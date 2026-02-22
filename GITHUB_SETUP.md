@@ -17,14 +17,20 @@ gh auth login
 
 ## 2. Create the private repo and push
 
-From the project root (`MMLM_CursorAI`):
+**Option A – GitHub CLI (after `gh auth login`):**
 
 ```bash
 cd /home/eprojuser011/MMLM_CursorAI
 gh repo create MMLM_CursorAI --private --source=. --remote=origin --push
 ```
 
-This creates a new private repo at `https://github.com/EviatarO/MMLM_CursorAI` and pushes `main`.
+**Option B – Create repo on the website, then push:**  
+Create an empty private repo named **MMLM_CursorAI** at https://github.com/new (no README). The `origin` remote is already set. Then:
+
+```bash
+cd /home/eprojuser011/MMLM_CursorAI
+git push -u origin main
+```
 
 ## Alternative: create repo on the website, then push
 
