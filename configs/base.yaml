@@ -1,0 +1,35 @@
+project_root: /home/eprojuser011/MMLM_CursorAI
+dataset_root: /home/eprojuser011/Data_Centric_using_3LC_and_MViT/src/projects/NexarChallenge/Nexar_DataSet
+frames_root: /home/eprojuser011/Data_Centric_using_3LC_and_MViT/src/projects/NexarChallenge/Nexar_DataSet/train_frames256
+train_csv: /home/eprojuser011/Data_Centric_using_3LC_and_MViT/src/projects/NexarChallenge/Nexar_DataSet/train.csv
+val_csv: /home/eprojuser011/Data_Centric_using_3LC_and_MViT/src/projects/NexarChallenge/Nexar_DataSet/validation_data_10.csv
+train_videos_dir: /home/eprojuser011/Data_Centric_using_3LC_and_MViT/src/projects/NexarChallenge/Nexar_DataSet/train
+
+window_size: 16
+stride: 4
+frame_size: 224
+max_windows_per_video: 128
+window_step: 1
+safe_risk: 0.0
+ramp_low: 0.1
+ramp_high: 0.9
+ignore_after_event: true
+limit_noncollision_half: true
+
+batch_size: 4
+val_batch_size: 4
+num_workers: 4
+learning_rate: 2.0e-5
+weight_decay: 0.01
+epochs: 1
+
+vision_model_id: openai/clip-vit-base-patch32
+llm_model_id: gpt2
+use_4bit: false
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: null
+score_token: "<SCORE>"
+
+output_dir: /home/eprojuser011/MMLM_CursorAI/outputs
