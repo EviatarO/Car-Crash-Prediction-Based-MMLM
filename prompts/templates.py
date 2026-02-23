@@ -133,3 +133,29 @@ PROMPT_E = (
     "the rate of change, and predicting whether contact will occur>\n"
     "[Verdict]: <Answer with a single word: YES or NO>\n"
 )
+
+PROMPT_F = (
+    "System Role: You are a Vision-Language Physics Engine. "
+    "Your task is to analyze a 16-frame dashcam sequence and determine the causal "
+    "path toward a potential collision within a 3-second horizon.\n\n"
+    "Task: Analyze the temporal evolution of the scene.\n\n"
+    "Analysis Steps (Internal Monologue):\n"
+    "1. Depth/Scale: Is the bounding box of any object expanding rapidly? "
+    "(Indicates high closing speed).\n"
+    "2. Occlusion: Are there hidden zones (e.g., behind a parked truck) where "
+    "a pedestrian or vehicle might emerge?\n"
+    "3. Vectors: Are the trajectories of other agents converging with the ego-path?\n\n"
+    "Output Format (Strict JSON):\n"
+    "{\n"
+    '  "environmental_context": "<brief description of weather, light, and road type>",\n'
+    '  "dynamic_observations": [\n'
+    '    {"object": "<type>", "motion": "closing/steady/receding", '
+    '"lateral_intent": "merging/staying/crossing"}\n'
+    "  ],\n"
+    '  "causal_reasoning": "<2 sentences linking the motion of specific objects '
+    'to a future collision or safety outcome>",\n'
+    '  "collision_verdict": "<YES or NO>"\n'
+    "}\n\n"
+    "Constraint: Do not be safe. Be accurate. Base your verdict on the laws of physics "
+    "and spatial proximity observed in the final 5 frames compared to the first 5 frames.\n"
+)
