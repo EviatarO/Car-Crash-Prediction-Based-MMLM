@@ -1,0 +1,45 @@
+# ============================================================
+# Zero-Shot Evaluation Config — InternVL3.5-4B-Flash
+# ============================================================
+# Used by: student_training/scripts/zero_shot_eval.py
+# Purpose: Run InternVL3.5-4B-Flash on clips with no training.
+#          Parses PROMPT_G JSON output → collision score for AP/AUC.
+#
+# VRAM requirement: ~10GB GPU (RunPod RTX 4090 recommended)
+# Local PC (RTX 1000 Ada, 6GB): set load_in_4bit: true (slow, CPU offload)
+
+# --- Model ---
+model_id: "OpenGVLab/InternVL3_5-4B-Flash"
+load_in_4bit: false       # true → 4-bit quantization, reduces VRAM to ~6GB (slightly slower)
+torch_dtype: "bfloat16"   # bfloat16 for A/H100, float16 for older GPUs
+
+# --- Input format ---
+window_size: 16            # frames per clip
+stride: 4                  # frame sampling stride (~30fps → 2sec window)
+frame_size: 448            # InternVL native resolution (pixels)
+frame_filename_pattern: "frame_{:05d}.jpg"  # e.g. frame_00042.jpg
+
+# --- Confidence → score mapping (zero-shot only, before ScoreHead exists) ---
+# Used to convert PROMPT_G JSON output to a float for AP/AUC computation.
+# YES verdict: HIGH=0.90, MEDIUM=0.65, LOW=0.40
+# NO  verdict: HIGH=0.10, MEDIUM=0.35, LOW=0.60
+confidence_to_score:
+  YES:
+    HIGH:   0.90
+    MEDIUM: 0.65
+    LOW:    0.40
+  NO:
+    HIGH:   0.10
+    MEDIUM: 0.35
+    LOW:    0.60
+
+# --- Generation ---
+max_new_tokens: 600        # enough for PROMPT_G full JSON output
+temperature: 0.0           # greedy decoding → fully reproducible
+do_sample: false
+
+# --- Batch ---
+batch_size: 1              # process one clip at a time (multi-image is memory-intensive)
+
+# --- Output ---
+save_raw_response: true    # save full LLM text in output JSONL (for debugging)

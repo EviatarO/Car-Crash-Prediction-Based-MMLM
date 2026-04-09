@@ -1,4 +1,46 @@
-python-dotenv
-openai
-openpyxl
-matplotlib
+# ============================================================
+# Car-Crash Prediction Based MMLM — Requirements
+# ============================================================
+# Install: pip install -r requirements.txt
+# Tested with Python 3.10+, CUDA 12.1
+# Training requires GPU with >= 16GB VRAM (RunPod RTX 4090 recommended)
+# Zero-shot inference requires >= 10GB VRAM (RunPod) or CPU (slow)
+
+# --- Core deep learning ---
+torch>=2.1.0
+torchvision>=0.16.0
+accelerate>=0.27.0
+
+# --- HuggingFace ecosystem ---
+transformers>=4.44.0
+peft>=0.10.0          # LoRA / QLoRA fine-tuning
+bitsandbytes>=0.43.0  # 4-bit quantization (QLoRA)
+einops>=0.7.0         # Required by InternVL
+
+# --- Image processing ---
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# --- Data & numerics ---
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0   # AP, AUC-ROC, confusion matrix
+
+# --- Visualizations ---
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# --- Reasoning quality metrics ---
+rouge-score>=0.1.2    # ROUGE-L for reasoning evaluation
+bert-score>=0.3.13    # BERTScore for semantic similarity
+
+# --- API & Teacher pipeline ---
+python-dotenv>=1.0.0
+openai>=1.0.0
+requests>=2.31.0
+
+# --- Utilities ---
+openpyxl>=3.1.0       # Excel I/O for teacher outputs
+tqdm>=4.65.0          # Progress bars
+pyyaml>=6.0           # YAML config loading
+timm>=0.9.0           # Vision model utilities (InternVL dependency)

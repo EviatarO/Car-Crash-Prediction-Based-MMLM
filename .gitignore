@@ -34,10 +34,30 @@ ENV/
 *.swo
 *~
 
-# Logs and outputs
+# Logs
 logs/
-outputs/
 *.log
+
+# Large output files — keep manifests + metrics JSON, exclude raw results + model weights
+outputs/zero_shot/
+outputs/metrics/*.png
+outputs/student_checkpoints/
+*.pt
+*.bin
+*.safetensors
+
+# Keep these tracked (small, important for reproducibility):
+# outputs/teacher_dataset_v*.jsonl
+# outputs/manifest_*.jsonl
+# outputs/test_manifest_private.jsonl
+# outputs/metrics/**/metrics.json
+
+# Environment / secrets
+.env
+
+# Smoke test outputs (temp)
+outputs/zero_shot/_smoke_test.jsonl
+outputs/metrics/_smoke_test/
 
 # OS
 .DS_Store
