@@ -166,11 +166,15 @@ class CollisionModelOutput:
 
 class ScoreHead(nn.Module):
     """
-    Single linear layer + Sigmoid.
+    Single linear layer that outputs a raw logit (no sigmoid).
 
     Input:  hidden state at the first assistant-token position
             shape: (B, hidden_size)
-    Output: P(collision) ∈ [0, 1]  shape: (B,)
+    Output: logit  shape: (B,)
+
+    Sigmoid is applied OUTSIDE this module:
+      - Training:  use F.binary_cross_entropy_with_logits (autocast-safe)
+      - Inference:  apply torch.sigmoid() on the returned logit
     """
 
     def __init__(self, hidden_size: int):
@@ -180,7 +184,7 @@ class ScoreHead(nn.Module):
         nn.init.zeros_(self.proj.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.proj(x)).squeeze(-1)   # (B,)
+        return self.proj(x).squeeze(-1)   # (B,) raw logit
 
 
 # ── Main model wrapper ────────────────────────────────────────────────────────
@@ -318,16 +322,19 @@ class InternVLCollisionModel(nn.Module):
             boundary_hidden = last_hidden[batch_indices, seq_lengths, :]   # (B, hidden_size)
 
         # ── Score prediction ──────────────────────────────────────────────
-        score_pred = self.score_head(boundary_hidden.float())   # (B,) in [0,1]
-        # Cast to float32 for loss stability regardless of model dtype
+        # ScoreHead outputs a raw logit (no sigmoid).
+        # We use bce_with_logits for the loss (autocast-safe) and apply
+        # sigmoid only on the returned score_pred for metric computation.
+        score_logit = self.score_head(boundary_hidden.float())   # (B,) raw logit
 
         # ── Score loss ────────────────────────────────────────────────────
         score_loss = None
         if score_target is not None:
-            score_loss = nn.functional.binary_cross_entropy(
-                score_pred,
-                score_target.float().to(score_pred.device),
+            score_loss = nn.functional.binary_cross_entropy_with_logits(
+                score_logit,
+                score_target.float().to(score_logit.device),
             )
+        score_pred = torch.sigmoid(score_logit)   # (B,) in [0,1] for metrics
 
         # ── Combined loss ─────────────────────────────────────────────────
         combined_loss = None
@@ -385,7 +392,8 @@ class InternVLCollisionModel(nn.Module):
         batch_idx    = torch.arange(last_hidden.shape[0], device=last_hidden.device)
         last_valid   = last_hidden[batch_idx, seq_lengths, :]  # (B, H)
 
-        return self.score_head(last_valid.float())             # (B,)
+        logit = self.score_head(last_valid.float())             # (B,) raw logit
+        return torch.sigmoid(logit)                              # (B,) P(collision)
 
     def generate_reasoning(
         self,
