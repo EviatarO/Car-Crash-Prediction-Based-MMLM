@@ -35,7 +35,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModel, AutoTokenizer
 
 # ── Monkey-patch for InternVL + newer transformers compatibility ──────────────
 # Newer transformers (>=4.50) both reads AND writes self.all_tied_weights_keys
@@ -57,6 +57,68 @@ if not hasattr(_tmu.PreTrainedModel, 'all_tied_weights_keys'):
         object.__setattr__(self, _TIED_KEYS_STORE, value)
 
     _tmu.PreTrainedModel.all_tied_weights_keys = _all_tied_getter
+
+
+# ── Image-context token discovery ─────────────────────────────────────────────
+
+def _probe_and_set_img_context_token_id(model, tokenizer) -> int:
+    """
+    InternVLChatModel.img_context_token_id is normally set inside chat(), not
+    during from_pretrained().  We must set it manually so that forward() knows
+    where to inject visual embeddings into the token sequence.
+
+    Strategy:
+      1. If model.img_context_token_id is already a valid int → done.
+      2. Try known token strings used by various InternVL versions.
+      3. Scan tokenizer.added_tokens_encoder for any IMG_CONTEXT-like entry.
+      4. If still not found, print all added tokens and raise a clear error.
+
+    Returns the resolved token ID (int) and sets it on model.img_context_token_id.
+    """
+    current = getattr(model, "img_context_token_id", None)
+    if current is not None and isinstance(current, int):
+        return current
+
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+
+    # Common token strings across InternVL versions
+    candidates = [
+        "<IMG_CONTEXT>",
+        "<img_context>",
+        "<image_patch>",
+        "<vit_patch>",
+        "<image>",
+    ]
+    for tok_str in candidates:
+        tid = tokenizer.convert_tokens_to_ids(tok_str)
+        if tid is not None and tid != unk_id:
+            model.img_context_token_id = tid
+            print(f"[internvl_lora] img_context_token_id = {tid}  (token: {tok_str!r})")
+            return tid
+
+    # Scan added_tokens_encoder for any IMG/context-like token
+    added = getattr(tokenizer, "added_tokens_encoder", {})
+    for tok_str, tid in sorted(added.items(), key=lambda x: x[1]):
+        low = tok_str.lower()
+        if "context" in low or ("img" in low and "start" not in low and "end" not in low):
+            if tid != unk_id:
+                model.img_context_token_id = tid
+                print(
+                    f"[internvl_lora] img_context_token_id = {tid}  "
+                    f"(found via scan: {tok_str!r})"
+                )
+                return tid
+
+    # Nothing found — print diagnostics and fail loudly
+    print("\n[internvl_lora] ERROR: Cannot find <IMG_CONTEXT> token.")
+    print("  All added tokens in tokenizer:")
+    for k, v in sorted(added.items(), key=lambda x: x[1]):
+        print(f"    {v:6d}: {k!r}")
+    raise ValueError(
+        "Cannot resolve img_context_token_id. "
+        "Check that you loaded the correct model_id and tokenizer. "
+        "See printed token list above."
+    )
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -129,6 +191,11 @@ class InternVLCollisionModel(nn.Module):
         # ── ScoreHead ─────────────────────────────────────────────────────
         hidden_size = self._get_hidden_size()
         self.score_head = ScoreHead(hidden_size)
+        # Move ScoreHead to the same device/dtype as the model to avoid
+        # device-mismatch errors during forward().
+        _model_device = next(base_model.parameters()).device
+        _model_dtype  = next(base_model.parameters()).dtype
+        self.score_head = self.score_head.to(device=_model_device, dtype=_model_dtype)
 
         # ── Unfreeze projector (vision→LLM alignment layer) ───────────────
         # Projector is a small MLP and benefits from fine-tuning even without LoRA.
@@ -363,6 +430,12 @@ def load_for_training(
         model_id, trust_remote_code=True, use_fast=True
     )
 
+    # ── Set img_context_token_id ──────────────────────────────────────────
+    # InternVL leaves this as None after from_pretrained(); it's normally set
+    # inside chat().  We must set it before building the dataset so that
+    # forward() can find image token positions in input_ids.
+    _probe_and_set_img_context_token_id(base_model, tokenizer)
+
     # ── LoRA config ────────────────────────────────────────────────────────
     lora_config = LoraConfig(
         task_type     = TaskType.CAUSAL_LM,
@@ -428,6 +501,9 @@ def load_from_checkpoint(
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=True
     )
+
+    # Set img_context_token_id (same reason as in load_for_training)
+    _probe_and_set_img_context_token_id(base_model, tokenizer)
 
     # Load LoRA adapters onto the LLM backbone
     print(f"Loading LoRA adapters from: {checkpoint_dir}")

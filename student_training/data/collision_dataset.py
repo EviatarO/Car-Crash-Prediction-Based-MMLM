@@ -194,13 +194,38 @@ class CollisionDataset(Dataset):
         # Query model for image token properties
         self.num_image_token = getattr(model, "num_image_token", 256)
 
-        # Get image special token IDs directly from model/tokenizer.
-        # We insert these IDs into input_ids manually rather than relying on
-        # the tokenizer to split the <IMG_CONTEXT> string correctly.
-        self.img_ctx_id   = getattr(model, "img_context_token_id",
-                                    tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>"))
+        # ── Image special token IDs ───────────────────────────────────────
+        # img_context_token_id MUST be set on the model before building the
+        # dataset (call _probe_and_set_img_context_token_id(model, tokenizer)
+        # in load_for_training() first).  We insert these IDs directly into
+        # input_ids so InternVL.forward() knows where to inject visual embeds.
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+
+        self.img_ctx_id = getattr(model, "img_context_token_id", None)
+        if self.img_ctx_id is None:
+            # Last-chance fallback: query tokenizer directly
+            self.img_ctx_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+            if self.img_ctx_id == unk_id:
+                self.img_ctx_id = None
+        if self.img_ctx_id is None:
+            raise ValueError(
+                "model.img_context_token_id is None and <IMG_CONTEXT> is not in "
+                "the tokenizer vocabulary.  Call "
+                "_probe_and_set_img_context_token_id(model, tokenizer) before "
+                "constructing CollisionDataset (load_for_training does this)."
+            )
+
         self.img_start_id = tokenizer.convert_tokens_to_ids("<img>")
         self.img_end_id   = tokenizer.convert_tokens_to_ids("</img>")
+
+        # Validate image boundary tokens
+        for name, tid in [("img_start (<img>)", self.img_start_id),
+                           ("img_end (</img>)",  self.img_end_id)]:
+            if tid is None or tid == unk_id:
+                raise ValueError(
+                    f"Token {name} not found in tokenizer vocabulary "
+                    f"(got {tid!r}). Check model_id and tokenizer."
+                )
 
         # per-image token ID list: [<img>, <IMG_CONTEXT>×N, </img>]
         self._per_img_ids: List[int] = (
@@ -215,11 +240,13 @@ class CollisionDataset(Dataset):
             raw_records = [r for r in raw_records if not r.get("error")]
         self.records: List[dict] = raw_records
 
+        tokens_per_clip = self.num_image_token * self.window_size
         print(
             f"CollisionDataset: {len(self.records)} records from {jsonl_path}\n"
             f"  img_context_token_id : {self.img_ctx_id}\n"
+            f"  img_start / img_end  : {self.img_start_id} / {self.img_end_id}\n"
             f"  num_image_token      : {self.num_image_token} per image "
-            f"({self.num_image_token * self.window_size} total)\n"
+            f"→ {tokens_per_clip} image tokens per clip\n"
             f"  max_seq_len          : {self.max_seq_len}"
         )
 
