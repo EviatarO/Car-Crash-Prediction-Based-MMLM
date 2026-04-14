@@ -37,6 +37,17 @@ import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
+# ── Monkey-patch for InternVL + newer transformers compatibility ──────────────
+# Newer transformers (>=4.50) calls self.all_tied_weights_keys inside
+# from_pretrained(). InternVLChatModel (loaded via trust_remote_code) doesn't
+# define this property, causing AttributeError. We patch it onto
+# PreTrainedModel so all subclasses (including dynamically loaded ones) inherit it.
+import transformers.modeling_utils as _tmu
+if not hasattr(_tmu.PreTrainedModel, 'all_tied_weights_keys'):
+    _tmu.PreTrainedModel.all_tied_weights_keys = property(
+        lambda self: {k: k for k in getattr(self, '_tied_weights_keys', set())}
+    )
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
