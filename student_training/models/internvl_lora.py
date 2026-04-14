@@ -332,16 +332,17 @@ def load_for_training(
     torch_dtype = dtype_map.get(cfg.get("torch_dtype", "bfloat16"), torch.bfloat16)
 
     print(f"Loading base model: {model_id}  dtype={torch_dtype}")
-    # Use {"": 0} instead of "auto" — InternVL doesn't implement all_tied_weights_keys
-    # which transformers' infer_auto_device_map requires. {"": 0} puts everything on GPU 0.
-    resolved_device_map = {"": 0} if device_map == "auto" else device_map
+    # Do NOT pass device_map — InternVLChatModel doesn't implement all_tied_weights_keys
+    # which newer transformers versions require for any device_map value.
+    # Load on CPU first, then move to GPU manually.
     base_model = AutoModel.from_pretrained(
         model_id,
         torch_dtype      = torch_dtype,
         trust_remote_code= True,
         low_cpu_mem_usage= True,
-        device_map       = resolved_device_map,
     )
+    if device_map != "cpu" and torch.cuda.is_available():
+        base_model = base_model.cuda()
     base_model.train()
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -401,14 +402,14 @@ def load_from_checkpoint(
     torch_dtype = dtype_map.get(cfg.get("torch_dtype", "bfloat16"), torch.bfloat16)
 
     print(f"Loading base model for inference: {model_id}")
-    resolved_device_map = {"": 0} if device_map == "auto" else device_map
     base_model = AutoModel.from_pretrained(
         model_id,
         torch_dtype       = torch_dtype,
         trust_remote_code = True,
         low_cpu_mem_usage = True,
-        device_map        = resolved_device_map,
     )
+    if device_map != "cpu" and torch.cuda.is_available():
+        base_model = base_model.cuda()
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=True
