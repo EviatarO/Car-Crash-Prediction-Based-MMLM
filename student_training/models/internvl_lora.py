@@ -176,32 +176,26 @@ class InternVLCollisionModel(nn.Module):
         labels:          Optional[torch.Tensor], # (B, seq_len)
         score_target:    Optional[torch.Tensor], # (B,)
         asst_start_pos:  Optional[torch.Tensor], # (B,)  index into seq_len
-        num_patches_list: Optional[List[int]] = None,
+        num_patches_list: Optional[List[int]] = None,  # kept for API compat, unused
     ) -> CollisionModelOutput:
         """
         Single forward pass that computes both LM loss and ScoreHead loss.
 
-        The LLM is run with output_hidden_states=True so we can extract
-        the hidden state at asst_start_pos for the ScoreHead.
-
-        Returns CollisionModelOutput with combined loss, component losses,
-        score predictions, and LM logits.
+        InternVLChatModel.forward() uses image_flags (not num_patches_list).
+        image_flags is a (B*16,) tensor of ones — all frames are real images.
         """
-        if num_patches_list is None:
-            batch_size = input_ids.shape[0]
-            num_patches_list = [1] * (batch_size * 16)   # default: 16 frames, 1 tile each
+        # image_flags: one flag per image in pixel_values; 1 = real image
+        n_images    = pixel_values.shape[0]
+        image_flags = torch.ones(n_images, dtype=torch.long, device=pixel_values.device)
 
         # ── LM forward ────────────────────────────────────────────────────
-        # InternVL's forward() returns a CausalLMOutputWithPast.
-        # Passing output_hidden_states=True makes it include the LLM's
-        # layer-by-layer hidden states in .hidden_states.
         lm_outputs = self.model(
             pixel_values     = pixel_values,
             input_ids        = input_ids,
             attention_mask   = attention_mask,
+            image_flags      = image_flags,
             labels           = labels,
             output_hidden_states = True,
-            num_patches_list = num_patches_list,
         )
 
         lm_loss = lm_outputs.loss   # cross-entropy over assistant tokens
@@ -277,16 +271,15 @@ class InternVLCollisionModel(nn.Module):
         Returns:
             score_pred (B,)  float in [0, 1]
         """
-        if num_patches_list is None:
-            batch_size = input_ids.shape[0]
-            num_patches_list = [1] * (batch_size * 16)
+        n_images    = pixel_values.shape[0]
+        image_flags = torch.ones(n_images, dtype=torch.long, device=pixel_values.device)
 
         lm_outputs = self.model(
             pixel_values     = pixel_values,
             input_ids        = input_ids,
             attention_mask   = attention_mask,
+            image_flags      = image_flags,
             output_hidden_states = True,
-            num_patches_list = num_patches_list,
         )
 
         last_hidden  = lm_outputs.hidden_states[-1]          # (B, seq, H)
