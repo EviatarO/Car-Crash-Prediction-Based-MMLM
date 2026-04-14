@@ -80,8 +80,37 @@ def _probe_and_set_img_context_token_id(model, tokenizer) -> int:
         return current
 
     unk_id = getattr(tokenizer, "unk_token_id", None)
+    added  = getattr(tokenizer, "added_tokens_encoder", {})
 
-    # Common token strings across InternVL versions
+    def _try(tok_str: str):
+        """Return token ID if tok_str is in the vocabulary, else None."""
+        if not tok_str:
+            return None
+        # Check added_tokens_encoder first (exact match, no BPE splitting)
+        if tok_str in added:
+            return added[tok_str]
+        tid = tokenizer.convert_tokens_to_ids(tok_str)
+        if tid is not None and tid != unk_id:
+            return tid
+        return None
+
+    # ── Strategy 1: read the token string from model.config ──────────────
+    # InternVLChatConfig always stores the exact token string used.
+    cfg = getattr(model, "config", None)
+    if cfg is not None:
+        for attr in ("img_context_token", "IMAGE_CONTEXT_TOKEN", "img_pad_token"):
+            tok_str = getattr(cfg, attr, None)
+            if tok_str and isinstance(tok_str, str):
+                tid = _try(tok_str)
+                if tid is not None:
+                    model.img_context_token_id = tid
+                    print(
+                        f"[internvl_lora] img_context_token_id = {tid}"
+                        f"  (from config.{attr}: {tok_str!r})"
+                    )
+                    return tid
+
+    # ── Strategy 2: try known token string variants ───────────────────────
     candidates = [
         "<IMG_CONTEXT>",
         "<img_context>",
@@ -90,28 +119,29 @@ def _probe_and_set_img_context_token_id(model, tokenizer) -> int:
         "<image>",
     ]
     for tok_str in candidates:
-        tid = tokenizer.convert_tokens_to_ids(tok_str)
-        if tid is not None and tid != unk_id:
+        tid = _try(tok_str)
+        if tid is not None:
             model.img_context_token_id = tid
             print(f"[internvl_lora] img_context_token_id = {tid}  (token: {tok_str!r})")
             return tid
 
-    # Scan added_tokens_encoder for any IMG/context-like token
-    added = getattr(tokenizer, "added_tokens_encoder", {})
+    # ── Strategy 3: scan added_tokens_encoder for any IMG/context token ───
     for tok_str, tid in sorted(added.items(), key=lambda x: x[1]):
         low = tok_str.lower()
         if "context" in low or ("img" in low and "start" not in low and "end" not in low):
             if tid != unk_id:
                 model.img_context_token_id = tid
                 print(
-                    f"[internvl_lora] img_context_token_id = {tid}  "
-                    f"(found via scan: {tok_str!r})"
+                    f"[internvl_lora] img_context_token_id = {tid}"
+                    f"  (found via scan: {tok_str!r})"
                 )
                 return tid
 
-    # Nothing found — print diagnostics and fail loudly
+    # ── Nothing found — print full diagnostics and raise ─────────────────
     print("\n[internvl_lora] ERROR: Cannot find <IMG_CONTEXT> token.")
-    print("  All added tokens in tokenizer:")
+    print(f"  model.config attrs: { {a: getattr(cfg, a, 'N/A') for a in dir(cfg) if 'img' in a.lower()} }")
+    print(f"  tokenizer.unk_token_id = {unk_id}")
+    print(f"  All {len(added)} added tokens:")
     for k, v in sorted(added.items(), key=lambda x: x[1]):
         print(f"    {v:6d}: {k!r}")
     raise ValueError(
