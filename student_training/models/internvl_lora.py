@@ -38,15 +38,25 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 
 # ── Monkey-patch for InternVL + newer transformers compatibility ──────────────
-# Newer transformers (>=4.50) calls self.all_tied_weights_keys inside
-# from_pretrained(). InternVLChatModel (loaded via trust_remote_code) doesn't
-# define this property, causing AttributeError. We patch it onto
-# PreTrainedModel so all subclasses (including dynamically loaded ones) inherit it.
+# Newer transformers (>=4.50) both reads AND writes self.all_tied_weights_keys
+# inside from_pretrained() and post_init(). InternVLChatModel (loaded via
+# trust_remote_code) doesn't define it. We add a descriptor with both getter
+# and setter so post_init can assign the value and later code can read it.
 import transformers.modeling_utils as _tmu
 if not hasattr(_tmu.PreTrainedModel, 'all_tied_weights_keys'):
-    _tmu.PreTrainedModel.all_tied_weights_keys = property(
-        lambda self: {k: k for k in getattr(self, '_tied_weights_keys', set())}
-    )
+    _TIED_KEYS_STORE = '_all_tied_weights_keys_store'
+
+    @property
+    def _all_tied_getter(self):
+        if hasattr(self, _TIED_KEYS_STORE):
+            return getattr(self, _TIED_KEYS_STORE)
+        return {k: k for k in getattr(self, '_tied_weights_keys', set())}
+
+    @_all_tied_getter.setter
+    def _all_tied_getter(self, value):
+        object.__setattr__(self, _TIED_KEYS_STORE, value)
+
+    _tmu.PreTrainedModel.all_tied_weights_keys = _all_tied_getter
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
