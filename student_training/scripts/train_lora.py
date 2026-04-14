@@ -172,17 +172,15 @@ def validate(
         lbl  = batch["labels"].to(device, non_blocking=True)
         stgt = batch["score_target"].to(device, non_blocking=True)
         asp  = batch["asst_start_pos"].to(device, non_blocking=True)
-        npl  = batch["num_patches_list"]
 
         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
             out = model(
-                pixel_values     = pv,
-                input_ids        = ids,
-                attention_mask   = mask,
-                labels           = lbl,
-                score_target     = stgt,
-                asst_start_pos   = asp,
-                num_patches_list = npl,
+                pixel_values   = pv,
+                input_ids      = ids,
+                attention_mask = mask,
+                labels         = lbl,
+                score_target   = stgt,
+                asst_start_pos = asp,
             )
 
         if out.loss is not None:
@@ -464,17 +462,15 @@ def train(args, cfg: dict):
             lbl  = batch["labels"].to(device, non_blocking=True)
             stgt = batch["score_target"].to(device, non_blocking=True)
             asp  = batch["asst_start_pos"].to(device, non_blocking=True)
-            npl  = batch["num_patches_list"]
 
             with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                 out = model(
-                    pixel_values     = pv,
-                    input_ids        = ids,
-                    attention_mask   = mask,
-                    labels           = lbl,
-                    score_target     = stgt,
-                    asst_start_pos   = asp,
-                    num_patches_list = npl,
+                    pixel_values   = pv,
+                    input_ids      = ids,
+                    attention_mask = mask,
+                    labels         = lbl,
+                    score_target   = stgt,
+                    asst_start_pos = asp,
                 )
 
             loss = out.loss / grad_accum

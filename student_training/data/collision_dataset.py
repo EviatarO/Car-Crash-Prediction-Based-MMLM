@@ -192,8 +192,22 @@ class CollisionDataset(Dataset):
         self.transform      = build_transform(self.frame_size)
 
         # Query model for image token properties
-        self.image_token_str = get_image_token_str(model)
-        self.num_image_token = getattr(model, "num_image_token", 64)
+        self.num_image_token = getattr(model, "num_image_token", 256)
+
+        # Get image special token IDs directly from model/tokenizer.
+        # We insert these IDs into input_ids manually rather than relying on
+        # the tokenizer to split the <IMG_CONTEXT> string correctly.
+        self.img_ctx_id   = getattr(model, "img_context_token_id",
+                                    tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>"))
+        self.img_start_id = tokenizer.convert_tokens_to_ids("<img>")
+        self.img_end_id   = tokenizer.convert_tokens_to_ids("</img>")
+
+        # per-image token ID list: [<img>, <IMG_CONTEXT>×N, </img>]
+        self._per_img_ids: List[int] = (
+            [self.img_start_id]
+            + [self.img_ctx_id] * self.num_image_token
+            + [self.img_end_id]
+        )
 
         # Load records
         raw_records = self._load_jsonl(jsonl_path)
@@ -203,9 +217,10 @@ class CollisionDataset(Dataset):
 
         print(
             f"CollisionDataset: {len(self.records)} records from {jsonl_path}\n"
-            f"  image_token_str length : {len(self.image_token_str)} chars "
-            f"({self.num_image_token} IMG_CONTEXT tokens/image)\n"
-            f"  max_seq_len            : {self.max_seq_len}"
+            f"  img_context_token_id : {self.img_ctx_id}\n"
+            f"  num_image_token      : {self.num_image_token} per image "
+            f"({self.num_image_token * self.window_size} total)\n"
+            f"  max_seq_len          : {self.max_seq_len}"
         )
 
     # ── I/O helpers ──────────────────────────────────────────────────────────
@@ -242,105 +257,74 @@ class CollisionDataset(Dataset):
 
     # ── Tokenisation ─────────────────────────────────────────────────────────
 
-    def _build_user_text(self) -> str:
+    def _build_ids_and_labels(self, assistant_text: str) -> Dict[str, torch.Tensor]:
         """
-        Build the user-turn text with <image> placeholders already expanded.
+        Build input_ids, labels, and attention_mask by inserting image token IDs
+        DIRECTLY rather than tokenizing a string that contains '<IMG_CONTEXT>'.
 
-        Format:
-          Frame 1: <img><IMG_CONTEXT>×64</img>
+        This is the correct approach because InternVL's forward() looks for
+        model.img_context_token_id in input_ids to know where to inject visual
+        embeddings — if we let the BPE tokenizer handle '<IMG_CONTEXT>' strings,
+        it may produce wrong IDs or split them incorrectly.
+
+        Conversation structure (Qwen3 / InternVL3.5 chat format):
+          <|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n
+          <|im_start|>user\\n
+          Frame 1: <img><IMG_CONTEXT>×N</img>\\n
           ...
-          Frame 16: <img><IMG_CONTEXT>×64</img>
-
-          {PROMPT_G}
-        """
-        image_prefix = "\n".join(
-            f"Frame {i + 1}: {self.image_token_str}"
-            for i in range(self.window_size)
-        )
-        return image_prefix + "\n\n" + PROMPT_G
-
-    def _tokenize_conversation(
-        self,
-        user_text:      str,
-        assistant_text: str,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Tokenize the full conversation and create labels that mask the user turn.
-
-        Returns dict with keys:
-          input_ids       (seq_len,)  long
-          attention_mask  (seq_len,)  long
-          labels          (seq_len,)  long  — user positions set to -100
-          asst_start_pos  scalar long — index of first assistant-response token
+          Frame 16: <img><IMG_CONTEXT>×N</img>\\n\\n
+          {PROMPT_G}<|im_end|>\\n
+          <|im_start|>assistant\\n
+          {JSON reasoning}<|im_end|>\\n
         """
         tok = self.tokenizer
 
-        # ── Build conversation using the model's chat template ─────────────
-        # apply_chat_template with add_generation_prompt=True gives us the
-        # tokenised user prompt + "<|im_start|>assistant\n" suffix.
-        # This works for Qwen3 and InternVL3.5 tokenisers (same <|im_start|> format).
-        messages_user_only = [
-            {"role": "system",    "content": self.SYSTEM_PROMPT},
-            {"role": "user",      "content": user_text},
-        ]
+        def enc(text: str) -> List[int]:
+            """Encode a plain text string to token IDs (no special tokens added)."""
+            return tok.encode(text, add_special_tokens=False)
 
-        # Tokenise the user-only prefix (without assistant response)
-        try:
-            user_prefix_ids = tok.apply_chat_template(
-                messages_user_only,
-                add_generation_prompt=True,   # appends <|im_start|>assistant\n
-                tokenize=True,
-                return_tensors="pt",
-            ).squeeze(0)                       # (user_prefix_len,)
-        except Exception:
-            # Fallback: manual Qwen3 format (same <|im_start|> convention)
-            prefix_text = (
-                f"<|im_start|>system\n{self.SYSTEM_PROMPT}<|im_end|>\n"
-                f"<|im_start|>user\n{user_text}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-            user_prefix_ids = tok(
-                prefix_text, add_special_tokens=False, return_tensors="pt"
-            ).input_ids.squeeze(0)
+        # ── System + user header ──────────────────────────────────────────
+        header_ids = enc(
+            f"<|im_start|>system\n{self.SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n"
+        )
 
-        # Tokenise the assistant response
-        # Add <|im_end|> + newline as EOS for the assistant turn
-        eos_token = getattr(tok, "eos_token", "<|im_end|>") or "<|im_end|>"
-        asst_text = assistant_text + eos_token + "\n"
-        asst_ids = tok(
-            asst_text,
-            add_special_tokens=False,
-            return_tensors="pt",
-        ).input_ids.squeeze(0)  # (asst_len,)
+        # ── 16 frames: "Frame N: " + [img token IDs] + "\n" ──────────────
+        frame_ids: List[int] = []
+        for i in range(self.window_size):
+            frame_ids += enc(f"Frame {i + 1}: ")
+            frame_ids += self._per_img_ids          # [<img>, ctx×N, </img>]
+            frame_ids += enc("\n")
 
-        # ── Concatenate ───────────────────────────────────────────────────
-        input_ids = torch.cat([user_prefix_ids, asst_ids], dim=0)
+        # ── PROMPT_G + end of user turn + assistant header ─────────────────
+        prompt_ids = enc(f"\n{PROMPT_G}<|im_end|>\n<|im_start|>assistant\n")
 
-        # Truncate to max_seq_len (keep end of sequence — most important part)
-        if input_ids.shape[0] > self.max_seq_len:
-            input_ids = input_ids[-self.max_seq_len:]
-            # Recalculate user_len after truncation — set to 0 if all user tokens removed
-            user_len = max(0, user_prefix_ids.shape[0] - (input_ids.shape[0] - self.max_seq_len + user_prefix_ids.shape[0] + asst_ids.shape[0] - self.max_seq_len))
-            user_len = min(user_prefix_ids.shape[0], self.max_seq_len - asst_ids.shape[0])
-            user_len = max(0, user_len)
-        else:
-            user_len = user_prefix_ids.shape[0]
+        # ── Assistant response ─────────────────────────────────────────────
+        asst_ids = enc(assistant_text + "<|im_end|>\n")
 
-        # ── Labels: mask user positions with -100 ─────────────────────────
-        labels = input_ids.clone()
-        labels[:user_len] = -100   # do not compute loss on user/system tokens
+        # ── Assemble ───────────────────────────────────────────────────────
+        user_ids  = header_ids + frame_ids + prompt_ids
+        all_ids   = user_ids + asst_ids
+        user_len  = len(user_ids)
 
-        attention_mask = torch.ones_like(input_ids)
+        # Truncate to max_seq_len from the END (preserve assistant response)
+        if len(all_ids) > self.max_seq_len:
+            all_ids  = all_ids[-self.max_seq_len:]
+            user_len = max(0, self.max_seq_len - len(asst_ids))
 
-        # asst_start_pos: the index of the first assistant response token
-        # = the first token AFTER the user prefix (0-indexed in the final input_ids)
-        asst_start_pos = min(user_len, input_ids.shape[0] - 1)
+        # ── Labels: -100 for user/system, real IDs for assistant ──────────
+        labels = [-100] * user_len + all_ids[user_len:]
+
+        input_ids      = torch.tensor(all_ids, dtype=torch.long)
+        labels_tensor  = torch.tensor(labels,  dtype=torch.long)
+        attention_mask = torch.ones(len(all_ids), dtype=torch.long)
+        asst_start_pos = torch.tensor(min(user_len, len(all_ids) - 1), dtype=torch.long)
 
         return {
             "input_ids":       input_ids,
             "attention_mask":  attention_mask,
-            "labels":          labels,
-            "asst_start_pos":  torch.tensor(asst_start_pos, dtype=torch.long),
+            "labels":          labels_tensor,
+            "asst_start_pos":  asst_start_pos,
         }
 
     # ── Dataset interface ─────────────────────────────────────────────────────
@@ -359,13 +343,10 @@ class CollisionDataset(Dataset):
         pixel_values = self._load_frames(video_id, frame_indices)
         # pixel_values: (16, 3, 448, 448)
 
-        # ── Build texts ───────────────────────────────────────────────────
-        user_text       = self._build_user_text()
-        reasoning_json  = build_full_reasoning_json(record)
-        assistant_text  = json.dumps(reasoning_json, indent=2, ensure_ascii=False)
-
-        # ── Tokenise ──────────────────────────────────────────────────────
-        tok_out = self._tokenize_conversation(user_text, assistant_text)
+        # ── Build assistant text + tokenise ──────────────────────────────
+        reasoning_json = build_full_reasoning_json(record)
+        assistant_text = json.dumps(reasoning_json, indent=2, ensure_ascii=False)
+        tok_out        = self._build_ids_and_labels(assistant_text)
 
         return {
             "pixel_values":   pixel_values,                          # (16, 3, H, W) cpu float
@@ -391,46 +372,28 @@ class CollisionDataset(Dataset):
         num_patches_list tells InternVL how many visual tiles each image has.
         For ViR-compressed single-tile mode (our setting): always [1] per image.
         """
-        pad_id = 0    # tokenizer pad_token_id; 0 is safe for most HF tokenisers
-
-        # Find max sequence length in batch
+        pad_id  = 0
         max_len = max(s["input_ids"].shape[0] for s in batch)
 
-        padded_ids   = []
-        padded_masks = []
-        padded_labels = []
-        all_pixel_values = []
-        score_targets    = []
-        asst_starts      = []
-        video_ids        = []
-        num_patches_list = []
+        padded_ids, padded_masks, padded_labels = [], [], []
+        all_pixel_values, score_targets, asst_starts, video_ids = [], [], [], []
 
         for s in batch:
-            seq_len = s["input_ids"].shape[0]
-            pad_len = max_len - seq_len
-
-            # Pad on the RIGHT with pad_id / 0 / -100
-            ids  = torch.nn.functional.pad(s["input_ids"],      (0, pad_len), value=pad_id)
-            mask = torch.nn.functional.pad(s["attention_mask"], (0, pad_len), value=0)
-            lbl  = torch.nn.functional.pad(s["labels"],         (0, pad_len), value=-100)
-
-            padded_ids.append(ids)
-            padded_masks.append(mask)
-            padded_labels.append(lbl)
-            all_pixel_values.append(s["pixel_values"])   # (16, 3, H, W)
+            pad_len = max_len - s["input_ids"].shape[0]
+            padded_ids.append(   torch.nn.functional.pad(s["input_ids"],      (0, pad_len), value=pad_id))
+            padded_masks.append( torch.nn.functional.pad(s["attention_mask"], (0, pad_len), value=0))
+            padded_labels.append(torch.nn.functional.pad(s["labels"],         (0, pad_len), value=-100))
+            all_pixel_values.append(s["pixel_values"])
             score_targets.append(s["score_target"])
             asst_starts.append(s["asst_start_pos"])
             video_ids.append(s["video_id"])
-            # 1 tile per image, 16 images per clip → 16 ones per sample in batch
-            num_patches_list.extend([1] * s["pixel_values"].shape[0])
 
         return {
-            "pixel_values":    torch.cat(all_pixel_values, dim=0),   # (B*16, 3, H, W)
-            "input_ids":       torch.stack(padded_ids,    dim=0),     # (B, seq_len)
-            "attention_mask":  torch.stack(padded_masks,  dim=0),     # (B, seq_len)
-            "labels":          torch.stack(padded_labels, dim=0),     # (B, seq_len)
-            "score_target":    torch.stack(score_targets, dim=0),     # (B,)
-            "asst_start_pos":  torch.stack(asst_starts,   dim=0),     # (B,)
-            "video_ids":       video_ids,
-            "num_patches_list": num_patches_list,                     # list[int], len = B*16
+            "pixel_values":   torch.cat(all_pixel_values, dim=0),    # (B*16, 3, H, W)
+            "input_ids":      torch.stack(padded_ids,     dim=0),     # (B, seq_len)
+            "attention_mask": torch.stack(padded_masks,   dim=0),     # (B, seq_len)
+            "labels":         torch.stack(padded_labels,  dim=0),     # (B, seq_len)
+            "score_target":   torch.stack(score_targets,  dim=0),     # (B,)
+            "asst_start_pos": torch.stack(asst_starts,    dim=0),     # (B,)
+            "video_ids":      video_ids,
         }
