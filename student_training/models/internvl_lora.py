@@ -451,25 +451,22 @@ def load_for_training(
     }
     torch_dtype = dtype_map.get(cfg.get("torch_dtype", "bfloat16"), torch.bfloat16)
 
-    print(f"Loading base model: {model_id}  dtype={torch_dtype}")
+    # use_flash_attn=True is InternVL's own flag (not transformers' attn_implementation).
+    # It enables flash attention inside InternVL's custom modeling code directly.
+    # device_map="auto" splits model layers across all available GPUs automatically,
+    # enabling 2x RTX 4090 (48 GB total) instead of a single 24 GB card.
+    n_gpus = torch.cuda.device_count()
+    _device_map = device_map if device_map == "cpu" else "auto"
+    print(f"Loading base model: {model_id}  dtype={torch_dtype}  GPUs={n_gpus}  device_map={_device_map}")
     base_model = AutoModel.from_pretrained(
         model_id,
         torch_dtype      = torch_dtype,
         trust_remote_code= True,
         low_cpu_mem_usage= True,
+        use_flash_attn   = True,
+        device_map       = _device_map,
     )
-
-    # Patch Qwen3 LLM to use sdpa AFTER from_pretrained — transformers reinits
-    # configs internally so pre-load patches don't survive. Qwen3 reads
-    # self.config._attn_implementation at forward() time, so post-load patch works.
-    if hasattr(base_model, "language_model") and hasattr(base_model.language_model, "config"):
-        base_model.language_model.config._attn_implementation = "sdpa"
-        print("[internvl_lora] LLM attn_implementation = sdpa (post-load patch)")
-    else:
-        print("[internvl_lora] WARNING: could not patch LLM attention — OOM risk")
-
-    if device_map != "cpu" and torch.cuda.is_available():
-        base_model = base_model.cuda()
+    print(f"[internvl_lora] use_flash_attn=True  device_map={_device_map}  n_gpus={n_gpus}")
     base_model.train()
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -540,9 +537,9 @@ def load_from_checkpoint(
         torch_dtype       = torch_dtype,
         trust_remote_code = True,
         low_cpu_mem_usage = True,
+        use_flash_attn    = True,
+        device_map        = "auto",
     )
-    if hasattr(base_model, "language_model") and hasattr(base_model.language_model, "config"):
-        base_model.language_model.config._attn_implementation = "sdpa"
 
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
