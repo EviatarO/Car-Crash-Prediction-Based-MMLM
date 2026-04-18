@@ -50,7 +50,8 @@ if not hasattr(_tmu.PreTrainedModel, 'all_tied_weights_keys'):
     def _all_tied_getter(self):
         if hasattr(self, _TIED_KEYS_STORE):
             return getattr(self, _TIED_KEYS_STORE)
-        return {k: k for k in getattr(self, '_tied_weights_keys', set())}
+        keys = getattr(self, '_tied_weights_keys', None) or []
+        return {k: k for k in keys}
 
     @_all_tied_getter.setter
     def _all_tied_getter(self, value):
