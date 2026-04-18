@@ -1,0 +1,113 @@
+==============================================================
+  RunPod Setup — Car Crash Prediction MMLM
+  Run these commands every time you spin up a NEW pod.
+  All code fixes are in git — just pull and install.
+==============================================================
+
+--------------------------------------------------------------
+STEP 1 — Clone or pull the repo
+--------------------------------------------------------------
+# If fresh pod (no repo yet):
+cd /workspace
+git clone https://github.com/EviatarO/Car-Crash-Prediction-Based-MMLM.git
+cd Car-Crash-Prediction-Based-MMLM
+
+# If repo already exists:
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull
+
+--------------------------------------------------------------
+STEP 2 — Move HuggingFace cache to /workspace
+         (avoids root disk quota exceeded errors)
+--------------------------------------------------------------
+mkdir -p /workspace/.cache
+mv /root/.cache/huggingface /workspace/.cache/huggingface
+ln -s /workspace/.cache/huggingface /root/.cache/huggingface
+
+# If /root/.cache/huggingface already exists as a symlink, skip above.
+# Verify with:
+ls -la /root/.cache/huggingface
+
+--------------------------------------------------------------
+STEP 3 — Install dependencies
+--------------------------------------------------------------
+pip install -r requirements.txt
+
+--------------------------------------------------------------
+STEP 4 — Start training
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/scripts/train_lora.py \
+    --jsonl outputs/teacher_dataset_v11.jsonl \
+    --frames_root /workspace/data/extracted_clips/train \
+    --config student_training/configs/train_lora.yaml \
+    > train_run.log 2>&1 &
+
+tail -f train_run.log
+
+--------------------------------------------------------------
+STEP 5 — Resume if training crashed (picks up last checkpoint)
+--------------------------------------------------------------
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/scripts/train_lora.py \
+    --jsonl outputs/teacher_dataset_v11.jsonl \
+    --frames_root /workspace/data/extracted_clips/train \
+    --config student_training/configs/train_lora.yaml \
+    --resume \
+    > train_run.log 2>&1 &
+
+tail -f train_run.log
+
+--------------------------------------------------------------
+STEP 6 — Monitor
+--------------------------------------------------------------
+# Check process is alive:
+ps aux | grep train_lora
+
+# Check GPU usage (expect ~20-22 GB on A100 40GB):
+nvidia-smi
+
+# Check disk space:
+df -h
+
+# See latest log:
+tail -50 train_run.log
+
+--------------------------------------------------------------
+EXPECTED STARTUP LOG (confirm these lines appear):
+--------------------------------------------------------------
+  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16
+  [internvl_lora] LLM attn_implementation = sdpa (post-load patch)
+  [internvl_lora] img_context_token_id = 151671  (token: '<IMG_CONTEXT>')
+  InternVLCollisionModel trainable params: 50.1M / 4939.2M (1.01%)
+  Gradient checkpointing enabled on LLM backbone
+  CollisionDataset: 100 records ...
+  Split: 80 train  /  20 val
+  -- Epoch 1/50 --
+
+--------------------------------------------------------------
+CODE CHANGES MADE THIS SESSION (all committed to git):
+--------------------------------------------------------------
+  e946f43  config: restore window_size to 16 for A100 40GB run
+  fc9f57d  fix(dataset): truncate frame_indices to window_size — fixes 4096 vs 2048 vision token mismatch
+  da8625e  fix(memory): window_size 16->8 + gradient checkpointing hook on inner base model
+  de86a4c  fix(internvl_lora): patch LLM sdpa post-load (pre-load config doesn't survive from_pretrained)
+  31133bb  fix(internvl_lora): handle None _tied_weights_keys in monkey-patch
+  cd974d8  fix(internvl_lora): patch llm_config._attn_implementation=sdpa
+  efa33e1  fix(internvl_lora): switch flash_attention_2 -> sdpa (InternVL wrapper rejects flash attn)
+  35451e6  chore(requirements): add peft, tqdm, pyyaml as required; add flash-attn install note
+  84b7bbe  fix(internvl_lora): activate FlashAttention2 (was defaulting to OOM-inducing eager attention)
+
+--------------------------------------------------------------
+NOTES
+--------------------------------------------------------------
+- Recommended GPU: A100 PCIe 40GB (~$1.49/hr) or L40S 48GB (~$1.14/hr)
+- RTX 4090 24GB is too tight for 16 frames (seq_len ~5000)
+- Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$6-7 total
+- Checkpoints saved every 5 epochs to: outputs/checkpoints/e2_lora_100clips/
+- All 50 checkpoints kept (save_total_limit=50)
+- After training: pick best epoch from epoch_metrics.jsonl (highest val_f1, smallest train-val gap)
+- Data paths on RunPod:
+    JSONL  : /workspace/Car-Crash-Prediction-Based-MMLM/outputs/teacher_dataset_v11.jsonl
+    Frames : /workspace/data/extracted_clips/train/{video_id}/frame_00042.jpg
+==============================================================
