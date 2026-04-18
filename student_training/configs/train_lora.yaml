@@ -60,7 +60,7 @@ lr_scheduler: "cosine"         # cosine decay after warmup plateau
 # ── Checkpointing ────────────────────────────────────────────
 output_dir: "outputs/checkpoints/e2_lora_100clips"
 save_steps: 50                 # save a checkpoint every N optimizer steps
-save_total_limit: 3            # keep only the latest 3 checkpoints
+save_total_limit: 50           # keep all epochs — needed to pick best checkpoint from val_f1 curve
 
 # ── Validation ───────────────────────────────────────────────
 # Stratified 80/20 split of the teacher JSONL (seeded, reproducible).

@@ -363,7 +363,7 @@ class CollisionDataset(Dataset):
         record = self.records[idx]
 
         video_id      = record["video_id"]
-        frame_indices = record["frame_indices"]
+        frame_indices = record["frame_indices"][:self.window_size]   # truncate to window_size
         score_target  = float(record.get("target", 0))   # 0 or 1 (int in JSONL)
 
         # ── Load pixel values ─────────────────────────────────────────────
