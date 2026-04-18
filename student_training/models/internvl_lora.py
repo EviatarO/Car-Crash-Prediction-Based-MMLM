@@ -459,9 +459,9 @@ def load_for_training(
         torch_dtype          = torch_dtype,
         trust_remote_code    = True,
         low_cpu_mem_usage    = True,
-        attn_implementation  = "flash_attention_2",   # avoids O(n²) eager attention OOM
+        attn_implementation  = "sdpa",   # PyTorch-native memory-efficient attention (no flash-attn needed)
     )
-    print(f"[internvl_lora] attn_implementation = flash_attention_2")
+    print(f"[internvl_lora] attn_implementation = sdpa")
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
     base_model.train()
@@ -534,7 +534,7 @@ def load_from_checkpoint(
         torch_dtype         = torch_dtype,
         trust_remote_code   = True,
         low_cpu_mem_usage   = True,
-        attn_implementation = "flash_attention_2",   # avoids O(n²) eager attention OOM
+        attn_implementation = "sdpa",   # PyTorch-native memory-efficient attention
     )
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
