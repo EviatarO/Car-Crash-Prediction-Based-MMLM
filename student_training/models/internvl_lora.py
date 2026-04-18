@@ -35,7 +35,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoConfig, AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
 
 # ── Monkey-patch for InternVL + newer transformers compatibility ──────────────
 # Newer transformers (>=4.50) both reads AND writes self.all_tied_weights_keys
@@ -452,25 +452,22 @@ def load_for_training(
     torch_dtype = dtype_map.get(cfg.get("torch_dtype", "bfloat16"), torch.bfloat16)
 
     print(f"Loading base model: {model_id}  dtype={torch_dtype}")
-    # InternVLChatModel's outer wrapper rejects both flash_attention_2 and sdpa
-    # via the transformers attn_implementation kwarg. Instead, patch the inner
-    # Qwen3 LLM config directly so it uses sdpa (PyTorch-native, O(n) memory,
-    # no flash-attn package needed). The outer wrapper stays on eager (fine — it
-    # is just a thin shell; the attention cost is in the LLM, not the wrapper).
-    _internvl_cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    if hasattr(_internvl_cfg, "llm_config"):
-        _internvl_cfg.llm_config._attn_implementation = "sdpa"
-        print(f"[internvl_lora] LLM attn_implementation = sdpa (patched via llm_config)")
-    else:
-        print(f"[internvl_lora] WARNING: llm_config not found — LLM will use default eager attention")
-
     base_model = AutoModel.from_pretrained(
         model_id,
-        config           = _internvl_cfg,
         torch_dtype      = torch_dtype,
         trust_remote_code= True,
         low_cpu_mem_usage= True,
     )
+
+    # Patch Qwen3 LLM to use sdpa AFTER from_pretrained — transformers reinits
+    # configs internally so pre-load patches don't survive. Qwen3 reads
+    # self.config._attn_implementation at forward() time, so post-load patch works.
+    if hasattr(base_model, "language_model") and hasattr(base_model.language_model, "config"):
+        base_model.language_model.config._attn_implementation = "sdpa"
+        print("[internvl_lora] LLM attn_implementation = sdpa (post-load patch)")
+    else:
+        print("[internvl_lora] WARNING: could not patch LLM attention — OOM risk")
+
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
     base_model.train()
@@ -538,17 +535,15 @@ def load_from_checkpoint(
     torch_dtype = dtype_map.get(cfg.get("torch_dtype", "bfloat16"), torch.bfloat16)
 
     print(f"Loading base model for inference: {model_id}")
-    _internvl_cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-    if hasattr(_internvl_cfg, "llm_config"):
-        _internvl_cfg.llm_config._attn_implementation = "sdpa"
-
     base_model = AutoModel.from_pretrained(
         model_id,
-        config            = _internvl_cfg,
         torch_dtype       = torch_dtype,
         trust_remote_code = True,
         low_cpu_mem_usage = True,
     )
+    if hasattr(base_model, "language_model") and hasattr(base_model.language_model, "config"):
+        base_model.language_model.config._attn_implementation = "sdpa"
+
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
 
