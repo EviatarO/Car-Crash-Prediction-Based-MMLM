@@ -32,6 +32,7 @@ ls -la /root/.cache/huggingface
 STEP 3 — Install dependencies
 --------------------------------------------------------------
 pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
 
 --------------------------------------------------------------
 STEP 4 — Start training
@@ -101,8 +102,9 @@ CODE CHANGES MADE THIS SESSION (all committed to git):
 --------------------------------------------------------------
 NOTES
 --------------------------------------------------------------
-- Recommended GPU: A100 PCIe 40GB (~$1.49/hr) or L40S 48GB (~$1.14/hr)
-- RTX 4090 24GB is too tight for 16 frames (seq_len ~5000)
+- Recommended GPU: 2x RTX 4090 (~$1.36/hr) — 48 GB combined, model splits automatically
+- Alternative: RTX PRO 4500 32GB (~$1.26/hr) single GPU
+- RTX 4090 single 24GB is too tight for 16 frames (seq_len ~5000)
 - Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$6-7 total
 - Checkpoints saved every 5 epochs to: outputs/checkpoints/e2_lora_100clips/
 - All 50 checkpoints kept (save_total_limit=50)
