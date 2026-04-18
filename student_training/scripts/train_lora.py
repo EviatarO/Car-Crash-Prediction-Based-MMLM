@@ -338,12 +338,22 @@ def train(args, cfg: dict):
     # forward hook that keeps the input tensor in the autograd graph even when
     # it doesn't require_grad itself — this is mandatory for LoRA + grad-ckpt.
     lm = model.model.language_model
-    if hasattr(lm, "enable_input_require_grads"):
+
+    # enable_input_require_grads must be called on the innermost base model
+    # (not the PEFT wrapper) so that the hook fires on the actual embed_tokens
+    # output — otherwise gradient checkpointing gets inputs with requires_grad=False
+    # and stores all activations instead of recomputing them.
+    lm_inner = getattr(getattr(lm, "base_model", lm), "model", lm)
+    if hasattr(lm_inner, "enable_input_require_grads"):
+        lm_inner.enable_input_require_grads()
+    elif hasattr(lm, "enable_input_require_grads"):
         lm.enable_input_require_grads()
 
-    lm_model = getattr(getattr(lm, "base_model", lm), "model", None)
-    if lm_model is not None and hasattr(lm_model, "gradient_checkpointing_enable"):
-        lm_model.gradient_checkpointing_enable()
+    if hasattr(lm_inner, "gradient_checkpointing_enable"):
+        lm_inner.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print("Gradient checkpointing enabled on LLM backbone")
+    elif hasattr(lm, "gradient_checkpointing_enable"):
+        lm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         print("Gradient checkpointing enabled on LLM backbone")
 
     # ── Dataset + split ───────────────────────────────────────────────────
