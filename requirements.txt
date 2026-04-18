@@ -5,6 +5,10 @@
 # Tested with Python 3.10+, CUDA 12.1
 # Training requires GPU with >= 16GB VRAM (RunPod RTX 4090 recommended)
 # Zero-shot inference requires >= 10GB VRAM (RunPod) or CPU (slow)
+#
+# NOTE: flash-attn must be installed separately (requires CUDA compiler):
+#   pip install flash-attn --no-build-isolation
+# NOTE: torch/torchvision are pre-installed on RunPod — skip if already present.
 
 # --- Core deep learning ---
 torch>=2.1.0
@@ -13,9 +17,9 @@ accelerate>=0.27.0
 
 # --- HuggingFace ecosystem ---
 transformers>=4.44.0
-peft>=0.10.0          # LoRA / QLoRA fine-tuning
-bitsandbytes>=0.43.0  # 4-bit quantization (QLoRA)
-einops>=0.7.0         # Required by InternVL
+peft>=0.10.0          # LoRA fine-tuning (REQUIRED for training)
+einops>=0.7.0         # Required by InternVL attention layers
+sentencepiece>=0.1.99 # Tokenizer dependency for some InternVL configs
 
 # --- Image processing ---
 Pillow>=10.0.0
@@ -41,6 +45,6 @@ requests>=2.31.0
 
 # --- Utilities ---
 openpyxl>=3.1.0       # Excel I/O for teacher outputs
-tqdm>=4.65.0          # Progress bars
-pyyaml>=6.0           # YAML config loading
+tqdm>=4.65.0          # Progress bars (REQUIRED for training loop)
+pyyaml>=6.0           # YAML config loading (REQUIRED for train_lora.yaml)
 timm>=0.9.0           # Vision model utilities (InternVL dependency)
