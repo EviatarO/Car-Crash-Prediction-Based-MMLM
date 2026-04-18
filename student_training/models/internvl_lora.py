@@ -456,10 +456,12 @@ def load_for_training(
     # Load on CPU first, then move to GPU manually.
     base_model = AutoModel.from_pretrained(
         model_id,
-        torch_dtype      = torch_dtype,
-        trust_remote_code= True,
-        low_cpu_mem_usage= True,
+        torch_dtype          = torch_dtype,
+        trust_remote_code    = True,
+        low_cpu_mem_usage    = True,
+        attn_implementation  = "flash_attention_2",   # avoids O(n²) eager attention OOM
     )
+    print(f"[internvl_lora] attn_implementation = flash_attention_2")
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
     base_model.train()
@@ -529,9 +531,10 @@ def load_from_checkpoint(
     print(f"Loading base model for inference: {model_id}")
     base_model = AutoModel.from_pretrained(
         model_id,
-        torch_dtype       = torch_dtype,
-        trust_remote_code = True,
-        low_cpu_mem_usage = True,
+        torch_dtype         = torch_dtype,
+        trust_remote_code   = True,
+        low_cpu_mem_usage   = True,
+        attn_implementation = "flash_attention_2",   # avoids O(n²) eager attention OOM
     )
     if device_map != "cpu" and torch.cuda.is_available():
         base_model = base_model.cuda()
