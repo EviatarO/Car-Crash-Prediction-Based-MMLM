@@ -27,7 +27,7 @@ lora_target_modules:           # attention + MLP projections in the LLM backbone
   - "down_proj"
 
 # ── Input format ─────────────────────────────────────────────
-window_size: 8                 # reduced from 16 to cut image tokens 4096→2048 (memory)
+window_size: 16                # frames per clip (must match Teacher manifest)
 frame_size: 448                # InternVL native resolution (pixels)
 frame_filename_pattern: "frame_{:05d}.jpg"   # e.g. frame_00042.jpg
 max_seq_len: 8192              # max tokenized length (image tokens + text)
