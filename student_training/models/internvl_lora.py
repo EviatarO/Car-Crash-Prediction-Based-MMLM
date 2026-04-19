@@ -381,7 +381,7 @@ class InternVLCollisionModel(nn.Module):
             score_pred (B,)  float in [0, 1]
         """
         n_images    = pixel_values.shape[0]
-        image_flags = torch.ones(n_images, dtype=torch.long, device=pixel_values.device)
+        image_flags = torch.ones(n_images, dtype=torch.long, device="cpu")  # CPU = device-agnostic
 
         lm_outputs = self.model(
             pixel_values     = pixel_values,
