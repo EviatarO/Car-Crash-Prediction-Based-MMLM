@@ -286,9 +286,13 @@ class InternVLCollisionModel(nn.Module):
         InternVLChatModel.forward() uses image_flags (not num_patches_list).
         image_flags is a (B*16,) tensor of ones — all frames are real images.
         """
-        # image_flags: one flag per image in pixel_values; 1 = real image
+        # image_flags: one flag per image in pixel_values; 1 = real image.
+        # Keep on CPU — with device_map="auto" the vision encoder may be on a
+        # different GPU than pixel_values, and InternVL's indexing
+        # `vit_embeds[image_flags == 1]` requires both tensors on the same device.
+        # CPU indices work as device-agnostic selectors in PyTorch.
         n_images    = pixel_values.shape[0]
-        image_flags = torch.ones(n_images, dtype=torch.long, device=pixel_values.device)
+        image_flags = torch.ones(n_images, dtype=torch.long, device="cpu")
 
         # ── LM forward ────────────────────────────────────────────────────
         lm_outputs = self.model(
