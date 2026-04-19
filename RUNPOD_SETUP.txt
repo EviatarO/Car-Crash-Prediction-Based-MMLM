@@ -17,22 +17,29 @@ cd /workspace/Car-Crash-Prediction-Based-MMLM
 git pull
 
 --------------------------------------------------------------
-STEP 2 — Move HuggingFace cache to /workspace
-         (avoids root disk quota exceeded errors)
---------------------------------------------------------------
-mkdir -p /workspace/.cache
-mv /root/.cache/huggingface /workspace/.cache/huggingface
-ln -s /workspace/.cache/huggingface /root/.cache/huggingface
-
-# If /root/.cache/huggingface already exists as a symlink, skip above.
-# Verify with:
-ls -la /root/.cache/huggingface
-
---------------------------------------------------------------
-STEP 3 — Install dependencies
+STEP 2 — Install dependencies
 --------------------------------------------------------------
 pip install -r requirements.txt
 pip install flash-attn --no-build-isolation
+
+--------------------------------------------------------------
+STEP 3 — Keep HuggingFace cache on LOCAL disk (NOT /workspace)
+         /workspace has ~10 GB quota — model is 7.4 GB, leave it on root.
+         Local disk has ~20 GB free and is fine for the model cache.
+--------------------------------------------------------------
+# Make sure cache points to local disk (default location):
+rm -rf /root/.cache/huggingface      # remove any broken symlink
+mkdir -p /root/.cache/huggingface    # ensure local dir exists
+
+# Verify it is NOT a symlink pointing to /workspace:
+ls -la /root/.cache/huggingface
+# Should show: drwx... (a real directory, not a symlink)
+
+# /workspace disk usage should be:
+#   ~1.1 GB  data
+#   ~1.2 GB  repo
+#   ~0.5 GB  checkpoints (grows during training)
+#   Total: well under 10 GB quota
 
 --------------------------------------------------------------
 STEP 4 — Start training
@@ -70,6 +77,7 @@ nvidia-smi
 
 # Check disk space:
 df -h
+du -sh /workspace/* /workspace/.cache 2>/dev/null | sort -rh
 
 # See latest log:
 tail -50 train_run.log
@@ -87,27 +95,14 @@ EXPECTED STARTUP LOG (confirm these lines appear):
   -- Epoch 1/50 --
 
 --------------------------------------------------------------
-CODE CHANGES MADE THIS SESSION (all committed to git):
---------------------------------------------------------------
-  e946f43  config: restore window_size to 16 for A100 40GB run
-  fc9f57d  fix(dataset): truncate frame_indices to window_size — fixes 4096 vs 2048 vision token mismatch
-  da8625e  fix(memory): window_size 16->8 + gradient checkpointing hook on inner base model
-  de86a4c  fix(internvl_lora): patch LLM sdpa post-load (pre-load config doesn't survive from_pretrained)
-  31133bb  fix(internvl_lora): handle None _tied_weights_keys in monkey-patch
-  cd974d8  fix(internvl_lora): patch llm_config._attn_implementation=sdpa
-  efa33e1  fix(internvl_lora): switch flash_attention_2 -> sdpa (InternVL wrapper rejects flash attn)
-  35451e6  chore(requirements): add peft, tqdm, pyyaml as required; add flash-attn install note
-  84b7bbe  fix(internvl_lora): activate FlashAttention2 (was defaulting to OOM-inducing eager attention)
-
---------------------------------------------------------------
 NOTES
 --------------------------------------------------------------
-- Recommended GPU: 2x RTX 4090 (~$1.36/hr) — 48 GB combined, model splits automatically
-- Alternative: RTX PRO 4500 32GB (~$1.26/hr) single GPU
-- RTX 4090 single 24GB is too tight for 16 frames (seq_len ~5000)
-- Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$6-7 total
+- Recommended GPU: 2x RTX 4090 (~$1.18/hr) — 48 GB combined, model splits automatically
+- /workspace quota is ~10 GB — DO NOT put HF model cache there
+- HF model cache (~7.4 GB) stays on local root disk (/root/.cache/huggingface)
+- Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$5 total
 - Checkpoints saved every 5 epochs to: outputs/checkpoints/e2_lora_100clips/
-- All 50 checkpoints kept (save_total_limit=50)
+- All 50 checkpoints kept (save_total_limit=50, ~100 MB each = ~5 GB total in /workspace)
 - After training: pick best epoch from epoch_metrics.jsonl (highest val_f1, smallest train-val gap)
 - Data paths on RunPod:
     JSONL  : /workspace/Car-Crash-Prediction-Based-MMLM/outputs/teacher_dataset_v11.jsonl
