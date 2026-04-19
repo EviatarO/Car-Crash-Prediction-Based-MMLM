@@ -65,7 +65,7 @@ STEP 6 — Monitor
 # Check process is alive:
 ps aux | grep train_lora
 
-# Check GPU usage (expect ~20-22 GB on A100 40GB):
+# Check GPU usage (expect ~12-14 GB per card on 2x RTX 4090):
 nvidia-smi
 
 # Check disk space:
@@ -77,8 +77,8 @@ tail -50 train_run.log
 --------------------------------------------------------------
 EXPECTED STARTUP LOG (confirm these lines appear):
 --------------------------------------------------------------
-  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16
-  [internvl_lora] LLM attn_implementation = sdpa (post-load patch)
+  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16  GPUs=2  device_map=auto
+  [internvl_lora] use_flash_attn=True  device_map=auto  n_gpus=2
   [internvl_lora] img_context_token_id = 151671  (token: '<IMG_CONTEXT>')
   InternVLCollisionModel trainable params: 50.1M / 4939.2M (1.01%)
   Gradient checkpointing enabled on LLM backbone
