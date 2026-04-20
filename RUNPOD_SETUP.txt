@@ -76,7 +76,7 @@ STEP 6 — Monitor
 # Check process is alive:
 ps aux | grep train_lora
 
-# Check GPU usage (expect ~12-14 GB per card on 2x RTX 4090):
+# Check GPU usage (expect ~18-22 GB on 1x RTX 5090):
 nvidia-smi
 
 # Check disk space:
@@ -89,8 +89,10 @@ tail -50 train_run.log
 --------------------------------------------------------------
 EXPECTED STARTUP LOG (confirm these lines appear):
 --------------------------------------------------------------
-  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16  GPUs=2  device_map=auto
-  [internvl_lora] use_flash_attn=True  device_map=auto  n_gpus=2
+  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16  GPUs=1  device_map=auto
+  [internvl_lora] use_flash_attn=True  device_map=auto  n_gpus=1
+  # (On 1x RTX 5090, the multi-GPU `fix-1`/`fix-2` lines are NOT printed —
+  #  those patches are gated by `n_gpus > 1` and stay dormant on single GPU.)
   [internvl_lora] img_context_token_id = 151671  (token: '<IMG_CONTEXT>')
   InternVLCollisionModel trainable params: 50.1M / 4939.2M (1.01%)
   Gradient checkpointing enabled on LLM backbone
@@ -101,10 +103,11 @@ EXPECTED STARTUP LOG (confirm these lines appear):
 --------------------------------------------------------------
 NOTES
 --------------------------------------------------------------
-- Recommended GPU: 2x RTX 4090 (~$1.18/hr) — 48 GB combined, model splits automatically
+- Recommended GPU: 1x RTX 5090 (~$0.80-1.00/hr) — 32 GB VRAM, fits model with flash-attn + grad-ckpt + bf16
+- Fallback GPU: 2x RTX 4090 (~$1.18/hr) — multi-GPU patches fire automatically when n_gpus > 1
 - /workspace quota is ~10 GB — DO NOT put HF model cache there
 - HF model cache (~7.4 GB) stays on local root disk (/root/.cache/huggingface)
-- Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$5 total
+- Training: 50 epochs x ~5 min/epoch = ~4 hrs = ~$3-4 total on RTX 5090
 - Checkpoints saved every 5 epochs to: outputs/checkpoints/e2_lora_100clips/
 - All 50 checkpoints kept (save_total_limit=50, ~100 MB each = ~5 GB total in /workspace)
 - After training: pick best epoch from epoch_metrics.jsonl (highest val_f1, smallest train-val gap)

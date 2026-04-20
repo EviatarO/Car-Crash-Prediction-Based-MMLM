@@ -457,8 +457,10 @@ def load_for_training(
 
     # use_flash_attn=True is InternVL's own flag (not transformers' attn_implementation).
     # It enables flash attention inside InternVL's custom modeling code directly.
-    # device_map="auto" splits model layers across all available GPUs automatically,
-    # enabling 2x RTX 4090 (48 GB total) instead of a single 24 GB card.
+    # device_map="auto":
+    #   - With 1 GPU (recommended: RTX 5090, 32 GB) → entire model on cuda:0.
+    #   - With 2+ GPUs (fallback: 2x RTX 4090, 48 GB total) → accelerate splits
+    #     layers across cards, and the multi-GPU patches below fire automatically.
     n_gpus = torch.cuda.device_count()
     _device_map = device_map if device_map == "cpu" else "auto"
     print(f"Loading base model: {model_id}  dtype={torch_dtype}  GPUs={n_gpus}  device_map={_device_map}")
@@ -473,36 +475,49 @@ def load_for_training(
     print(f"[internvl_lora] use_flash_attn=True  device_map={_device_map}  n_gpus={n_gpus}")
     base_model.train()
 
-    # ── Multi-GPU image_flags fix ─────────────────────────────────────────────
-    # With device_map="auto", accelerate's AlignDevicesHook runs before InternVL's
-    # forward and moves ALL tensor kwargs (including image_flags) to the module's
-    # primary input device (cuda:0). But the vision encoder lands on a different
-    # GPU (cuda:1), so vit_embeds is on cuda:1 while image_flags is on cuda:0 →
-    # IndexError at: vit_embeds = vit_embeds[image_flags == 1].
+    # ── Multi-GPU device fixes (device_map="auto") ────────────────────────────
+    # With device_map="auto" accelerate splits the model across GPUs.
+    # InternVL's forward code was written assuming all tensors are on one device.
+    # Two patches are needed:
     #
-    # Fix: replace base_model._old_forward (the function accelerate calls AFTER
-    # its hook) with a wrapper that moves image_flags to the vision encoder's
-    # device just before InternVL processes it.  This keeps accelerate's full
-    # inter-GPU tensor movement logic intact.
+    # PROBLEM 1 — image_flags (line ~314):
+    #   vit_embeds = vit_embeds[image_flags == 1]
+    #   accelerate moves image_flags to cuda:0, but vit_embeds may be on cuda:1.
+    #   Fix: wrap _old_forward to move image_flags back to CPU (PyTorch allows
+    #   CPU bool masks to index any CUDA tensor).
+    #
+    # PROBLEM 2 — vit_embeds injection (lines ~326, ~332):
+    #   input_embeds[selected] = ... + vit_embeds.reshape(-1, C)
+    #   input_embeds comes from the LLM embedding layer (e.g. cuda:0) but
+    #   vit_embeds is the projector (mlp1) output, which may be on cuda:1.
+    #   Fix: register a forward hook on mlp1 that moves its output to the
+    #   same device as the LLM's embedding layer.
     if n_gpus > 1 and hasattr(base_model, '_old_forward'):
         _ivl_orig_fwd = base_model._old_forward
 
         def _ivl_multi_gpu_fwd(pixel_values=None, input_ids=None,
                                attention_mask=None, image_flags=None, **kw):
             if image_flags is not None:
-                # Accelerate's AlignDevicesHook moves image_flags to cuda:0.
-                # But the vision encoder is split across GPUs, so vit_embeds
-                # (its output) lands on a different GPU (e.g. cuda:1).
-                # PyTorch allows CPU bool masks to index any CUDA tensor
-                # ("on cpu OR same device") — move back to CPU so it works
-                # regardless of which GPU vit_embeds ends up on.
-                image_flags = image_flags.cpu()
+                image_flags = image_flags.cpu()   # CPU masks index any CUDA tensor
             return _ivl_orig_fwd(pixel_values=pixel_values, input_ids=input_ids,
                                  attention_mask=attention_mask,
                                  image_flags=image_flags, **kw)
 
         base_model._old_forward = _ivl_multi_gpu_fwd
-        print(f"[internvl_lora] multi-GPU image_flags fix applied  (image_flags → CPU)")
+        print(f"[internvl_lora] fix-1: image_flags → CPU in _old_forward")
+
+    # Fix 2: mlp1 (projector) output → LLM embedding device
+    if n_gpus > 1 and hasattr(base_model, 'mlp1'):
+        try:
+            _lm_embed_device = next(base_model.language_model.parameters()).device
+
+            def _mlp1_device_hook(module, inp, output):
+                return output.to(_lm_embed_device)
+
+            base_model.mlp1.register_forward_hook(_mlp1_device_hook)
+            print(f"[internvl_lora] fix-2: mlp1 output → {_lm_embed_device} (LLM embed device)")
+        except StopIteration:
+            pass
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=True
