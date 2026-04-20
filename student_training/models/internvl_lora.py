@@ -473,6 +473,35 @@ def load_for_training(
     print(f"[internvl_lora] use_flash_attn=True  device_map={_device_map}  n_gpus={n_gpus}")
     base_model.train()
 
+    # ── Multi-GPU image_flags fix ─────────────────────────────────────────────
+    # With device_map="auto", accelerate's AlignDevicesHook runs before InternVL's
+    # forward and moves ALL tensor kwargs (including image_flags) to the module's
+    # primary input device (cuda:0). But the vision encoder lands on a different
+    # GPU (cuda:1), so vit_embeds is on cuda:1 while image_flags is on cuda:0 →
+    # IndexError at: vit_embeds = vit_embeds[image_flags == 1].
+    #
+    # Fix: replace base_model._old_forward (the function accelerate calls AFTER
+    # its hook) with a wrapper that moves image_flags to the vision encoder's
+    # device just before InternVL processes it.  This keeps accelerate's full
+    # inter-GPU tensor movement logic intact.
+    if n_gpus > 1 and hasattr(base_model, '_old_forward'):
+        _ivl_orig_fwd = base_model._old_forward
+
+        def _ivl_multi_gpu_fwd(pixel_values=None, input_ids=None,
+                               attention_mask=None, image_flags=None, **kw):
+            if image_flags is not None:
+                try:
+                    vit_dev = next(base_model.vision_model.parameters()).device
+                    image_flags = image_flags.to(vit_dev)
+                except (StopIteration, AttributeError):
+                    pass
+            return _ivl_orig_fwd(pixel_values=pixel_values, input_ids=input_ids,
+                                 attention_mask=attention_mask,
+                                 image_flags=image_flags, **kw)
+
+        base_model._old_forward = _ivl_multi_gpu_fwd
+        print(f"[internvl_lora] multi-GPU image_flags fix applied  (vision_model → {next(base_model.vision_model.parameters()).device})")
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=True
     )
