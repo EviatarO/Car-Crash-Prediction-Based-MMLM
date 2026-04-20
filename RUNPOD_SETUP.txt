@@ -27,13 +27,17 @@ STEP 3 — Keep HuggingFace cache on LOCAL disk (NOT /workspace)
          /workspace has ~10 GB quota — model is 7.4 GB, leave it on root.
          Local disk has ~20 GB free and is fine for the model cache.
 --------------------------------------------------------------
-# Make sure cache points to local disk (default location):
-rm -rf /root/.cache/huggingface      # remove any broken symlink
-mkdir -p /root/.cache/huggingface    # ensure local dir exists
+# 3a. Remove any stale /workspace/.cache from previous sessions
+#     (this filled the 10 GB quota in past sessions — always clean it):
+rm -rf /workspace/.cache
 
-# Verify it is NOT a symlink pointing to /workspace:
+# 3b. Fix /root/.cache/huggingface ONLY if it is a broken symlink.
+#     If it is already a real directory with the model inside, SKIP this
+#     (running rm would delete 7.4 GB and force a re-download).
 ls -la /root/.cache/huggingface
-# Should show: drwx... (a real directory, not a symlink)
+# If output shows: lrwx... -> /workspace/...  (a symlink) → run the fix:
+#   rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+# If output shows: drwx...               (a real directory) → nothing to do.
 
 # /workspace disk usage should be:
 #   ~1.1 GB  data
