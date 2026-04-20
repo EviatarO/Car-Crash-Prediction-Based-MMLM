@@ -5,6 +5,21 @@
 ==============================================================
 
 --------------------------------------------------------------
+STEP 0 — Select the right RunPod template (RTX 5090 ONLY)
+--------------------------------------------------------------
+  RTX 5090 (Blackwell) requires PyTorch 2.8+ and CUDA 12.8+.
+  When creating the pod, choose a template such as:
+    "RunPod PyTorch 2.8.0"  (or any image with PyTorch >= 2.8 + CUDA 12.8)
+  DO NOT use a PyTorch 2.1/2.2/2.4 image — the GPU will not be recognised.
+
+  ⚠ flash-attn: after pip install, verify it loaded correctly:
+    python -c "import flash_attn; print(flash_attn.__version__)"
+  If it errors, rebuild for your CUDA version:
+    pip install flash-attn --no-build-isolation --force-reinstall
+
+  (These steps are not needed for 2x RTX 4090 — any PyTorch 2.1+ template works.)
+
+--------------------------------------------------------------
 STEP 1 — Clone or pull the repo
 --------------------------------------------------------------
 # If fresh pod (no repo yet):
