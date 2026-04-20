@@ -490,17 +490,19 @@ def load_for_training(
         def _ivl_multi_gpu_fwd(pixel_values=None, input_ids=None,
                                attention_mask=None, image_flags=None, **kw):
             if image_flags is not None:
-                try:
-                    vit_dev = next(base_model.vision_model.parameters()).device
-                    image_flags = image_flags.to(vit_dev)
-                except (StopIteration, AttributeError):
-                    pass
+                # Accelerate's AlignDevicesHook moves image_flags to cuda:0.
+                # But the vision encoder is split across GPUs, so vit_embeds
+                # (its output) lands on a different GPU (e.g. cuda:1).
+                # PyTorch allows CPU bool masks to index any CUDA tensor
+                # ("on cpu OR same device") — move back to CPU so it works
+                # regardless of which GPU vit_embeds ends up on.
+                image_flags = image_flags.cpu()
             return _ivl_orig_fwd(pixel_values=pixel_values, input_ids=input_ids,
                                  attention_mask=attention_mask,
                                  image_flags=image_flags, **kw)
 
         base_model._old_forward = _ivl_multi_gpu_fwd
-        print(f"[internvl_lora] multi-GPU image_flags fix applied  (vision_model → {next(base_model.vision_model.parameters()).device})")
+        print(f"[internvl_lora] multi-GPU image_flags fix applied  (image_flags → CPU)")
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, trust_remote_code=True, use_fast=True
