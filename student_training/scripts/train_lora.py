@@ -223,7 +223,16 @@ def save_checkpoint(model, optimizer, scheduler, step: int, epoch: int,
     with open(ckpt_dir / "train_config.json", "w") as f:
         json.dump(cfg, f, indent=2)
 
-    # Prune old checkpoints
+    # Remove training_state.pt from older checkpoints (only latest needed for resume).
+    # Saves ~200 MB per old checkpoint on disk-constrained RunPod volumes.
+    for d in Path(output_dir).iterdir():
+        if d.is_dir() and d.name.startswith("step_") and d != ckpt_dir:
+            old_ts = d / "training_state.pt"
+            if old_ts.exists():
+                old_ts.unlink()
+                print(f"  [disk] removed {old_ts}")
+
+    # Prune old checkpoints (full removal) if over limit
     save_total_limit = cfg.get("save_total_limit", 3)
     checkpoints = sorted(
         [d for d in Path(output_dir).iterdir()
