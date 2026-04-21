@@ -252,7 +252,8 @@ def find_latest_checkpoint(output_dir: str):
     if not p.exists():
         return None
     ckpts = sorted(
-        [d for d in p.iterdir() if d.is_dir() and d.name.startswith("step_")],
+        [d for d in p.iterdir() if d.is_dir() and d.name.startswith("step_")
+         and (d / "training_state.pt").exists()],
         key=lambda d: int(d.name.split("_")[1])
     )
     return str(ckpts[-1]) if ckpts else None
