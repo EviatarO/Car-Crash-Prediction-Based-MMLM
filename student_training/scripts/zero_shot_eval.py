@@ -133,7 +133,7 @@ def load_model(model_id: str, load_in_4bit: bool, torch_dtype_str: str, device: 
     else:
         model_kwargs["torch_dtype"] = torch_dtype
         if device != "cpu":
-            model_kwargs["device_map"] = "auto"
+            model_kwargs["device_map"] = {"": 0}  # explicit GPU 0, avoids transformers all_tied_weights_keys bug
 
     model = AutoModel.from_pretrained(model_id, **model_kwargs)
     model.eval()
