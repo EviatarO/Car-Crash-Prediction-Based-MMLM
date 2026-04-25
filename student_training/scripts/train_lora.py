@@ -122,17 +122,25 @@ def get_scheduler(optimizer, num_warmup_steps: int, num_training_steps: int, sch
 
 # ── Metrics helpers ───────────────────────────────────────────────────────────
 
-def compute_f1(scores, targets, threshold: float = 0.5) -> float:
-    """Binary F1 at a fixed probability threshold."""
+def compute_prf1(scores, targets, threshold: float = 0.5):
+    """
+    Binary precision / recall / F1 at a fixed probability threshold.
+    Returns (precision, recall, f1, tp, fp, fn, tn).
+    """
     preds = [1 if s >= threshold else 0 for s in scores]
     tp = sum(p == 1 and t == 1 for p, t in zip(preds, targets))
     fp = sum(p == 1 and t == 0 for p, t in zip(preds, targets))
     fn = sum(p == 0 and t == 1 for p, t in zip(preds, targets))
+    tn = sum(p == 0 and t == 0 for p, t in zip(preds, targets))
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1, tp, fp, fn, tn
+
+
+def compute_f1(scores, targets, threshold: float = 0.5) -> float:
+    """Binary F1 at a fixed probability threshold (kept for backward-compat)."""
+    return compute_prf1(scores, targets, threshold)[2]
 
 
 def compute_ap(scores, targets) -> float:
@@ -196,12 +204,21 @@ def validate(
     n_pos = sum(1 for t in all_targets if t >= 0.5)
     n_neg = len(all_targets) - n_pos
 
+    val_p, val_r, val_f1, val_tp, val_fp, val_fn, val_tn = compute_prf1(all_scores, all_targets)
     return {
-        "val_loss": round(total_loss / max(n_batches, 1), 5),
-        "val_f1":   round(compute_f1(all_scores, all_targets), 4),
-        "val_ap":   round(compute_ap(all_scores, all_targets), 4),
-        "n_pos":    n_pos,
-        "n_neg":    n_neg,
+        "val_loss":      round(total_loss / max(n_batches, 1), 5),
+        "val_f1":        round(val_f1, 4),
+        "val_precision": round(val_p, 4),
+        "val_recall":    round(val_r, 4),
+        "val_ap":        round(compute_ap(all_scores, all_targets), 4),
+        # Raw confusion matrix at threshold=0.5 — keeps epoch_metrics.jsonl
+        # self-contained so P/R can always be re-derived without re-running.
+        "val_tp":        int(val_tp),
+        "val_fp":        int(val_fp),
+        "val_fn":        int(val_fn),
+        "val_tn":        int(val_tn),
+        "n_pos":         n_pos,
+        "n_neg":         n_neg,
     }
 
 
@@ -565,7 +582,11 @@ def train(args, cfg: dict):
             val_metrics = validate(model, val_loader, device, amp_dtype, use_amp)
             val_time    = time.time() - t_val
 
-            train_f1 = round(compute_f1(train_scores, train_targets), 4)
+            train_p, train_r, train_f1_raw, train_tp, train_fp, train_fn, train_tn = \
+                compute_prf1(train_scores, train_targets)
+            train_f1 = round(train_f1_raw, 4)
+            train_precision = round(train_p, 4)
+            train_recall    = round(train_r, 4)
             train_ap = round(compute_ap(train_scores, train_targets), 4)
             f1_gap   = round(train_f1 - val_metrics["val_f1"], 4)
 
@@ -578,8 +599,15 @@ def train(args, cfg: dict):
                 "epoch":    epoch + 1,
                 "step":     global_step,
                 "ckpt_dir": ckpt_dir,
-                "train_f1": train_f1,
-                "train_ap": train_ap,
+                "train_f1":        train_f1,
+                "train_precision": train_precision,
+                "train_recall":    train_recall,
+                "train_ap":        train_ap,
+                # Raw train-set confusion matrix at threshold=0.5
+                "train_tp":        int(train_tp),
+                "train_fp":        int(train_fp),
+                "train_fn":        int(train_fn),
+                "train_tn":        int(train_tn),
                 **val_metrics,
                 "f1_gap":   f1_gap,
                 "elapsed_min": round((time.time() - t_start) / 60, 1),
