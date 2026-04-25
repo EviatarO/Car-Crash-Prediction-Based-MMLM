@@ -30,9 +30,13 @@ ENV/
 # IDE / editor
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
+
+# Local plan files (claude-code, etc.)
+calm-popping-wolf.md
 
 # Logs
 logs/
