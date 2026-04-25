@@ -221,24 +221,39 @@ def evaluate(args, cfg: dict):
                 messages = [
                     {"role": "user", "content": prompt_text}
                 ]
+                user_input_ids = None
+                user_attn_mask = None
                 try:
-                    user_input_ids = tokenizer.apply_chat_template(
+                    chat_out = tokenizer.apply_chat_template(
                         messages,
                         add_generation_prompt=True,
                         tokenize=True,
                         return_tensors="pt",
-                    ).to(device=model_device)
+                        return_dict=True,
+                    )
+                    # `return_dict=True` → BatchEncoding with input_ids + attention_mask
+                    if hasattr(chat_out, "input_ids"):
+                        user_input_ids = chat_out["input_ids"].to(device=model_device)
+                        user_attn_mask = chat_out.get("attention_mask", None)
+                        if user_attn_mask is not None:
+                            user_attn_mask = user_attn_mask.to(device=model_device)
+                    else:
+                        # Older tokenizers may already return a raw Tensor here
+                        user_input_ids = chat_out.to(device=model_device)
                 except Exception:
                     # Fallback manual template
                     prefix_text = (
                         f"<|im_start|>user\n{prompt_text}<|im_end|>\n"
                         f"<|im_start|>assistant\n"
                     )
-                    user_input_ids = tokenizer(
+                    enc = tokenizer(
                         prefix_text, add_special_tokens=False, return_tensors="pt"
-                    ).input_ids.to(device=model_device)
+                    )
+                    user_input_ids = enc.input_ids.to(device=model_device)
+                    user_attn_mask = enc.attention_mask.to(device=model_device)
 
-                user_attn_mask = torch.ones_like(user_input_ids)
+                if user_attn_mask is None:
+                    user_attn_mask = torch.ones_like(user_input_ids)
 
                 with torch.no_grad():
                     score_pred = model.get_score(
