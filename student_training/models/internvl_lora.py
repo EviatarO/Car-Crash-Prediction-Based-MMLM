@@ -637,9 +637,13 @@ def load_from_checkpoint(
 
     loaded = _LoadedModel()
     loaded.eval()
-    # Move ScoreHead to same device as model
+    # Move ScoreHead to same device as model.
+    # Keep ScoreHead in float32 (its training dtype): forward() and get_score()
+    # cast the boundary hidden state to .float() before feeding it in, so the
+    # matmul must stay float32 × float32. Casting the head to bfloat16 here
+    # causes "mat1 and mat2 must have the same dtype" at inference.
     device = next(base_model.parameters()).device
-    loaded.score_head = loaded.score_head.to(device=device, dtype=torch_dtype)
+    loaded.score_head = loaded.score_head.to(device=device, dtype=torch.float32)
 
     return loaded, tokenizer
 

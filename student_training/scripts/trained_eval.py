@@ -49,6 +49,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from prompts.templates import PROMPT_G  # noqa: E402
 from student_training.models.internvl_lora import load_from_checkpoint  # noqa: E402
+from student_training.data.collision_dataset import (  # noqa: E402
+    get_image_token_str,
+    expand_image_placeholders,
+)
 
 # ── Image preprocessing (mirrors zero_shot_eval.py) ──────────────────────────
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -206,54 +210,29 @@ def evaluate(args, cfg: dict):
                 t0 = time.time()
 
                 # ── Step 1: Get collision score from ScoreHead ────────────
-                # Build the user-only prompt input_ids for the ScoreHead pass.
-                # We use model.model.chat() to build the generation prefix, then
-                # call model.get_score() with that tokenized input.
+                # The score-head pass requires `input_ids` whose <IMG_CONTEXT>
+                # token slots match the vision encoder's output exactly:
+                #   total <IMG_CONTEXT> count = num_frames * num_image_token
+                # If we tokenize a string with a literal "<image>" placeholder,
+                # the model finds 0 slots for 4096 vit_embeds and crashes:
+                #   "input_embeds[selected].shape=[0, 2560], vit_embeds.shape=[4096, 2560]"
                 #
-                # Simpler approach: get score from the generate() pass below
-                # by reading the hidden state at position 0 of the generated output.
-                # Here we use a two-pass approach for correctness:
-                #   Pass A (no generation): ScoreHead → score
-                #   Pass B (generate):      LLM → reasoning text
+                # We use the same expansion the training dataset uses
+                # (collision_dataset.expand_image_placeholders) so the score-head
+                # path sees the identical token layout as during training.
+                image_token_str = get_image_token_str(model.model)
+                expanded_prompt = expand_image_placeholders(prompt_text, image_token_str)
+                prefix_text = (
+                    f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                    f"<|im_start|>user\n{expanded_prompt}<|im_end|>\n"
+                    f"<|im_start|>assistant\n"
+                )
+                enc = tokenizer(
+                    prefix_text, add_special_tokens=False, return_tensors="pt"
+                )
+                user_input_ids = enc.input_ids.to(device=model_device)
+                user_attn_mask = enc.attention_mask.to(device=model_device)
 
-                # Build tokenized user prompt (same approach as zero_shot_eval.py
-                # but we call model.model.chat() to get the text then tokenize it).
-                messages = [
-                    {"role": "user", "content": prompt_text}
-                ]
-                user_input_ids = None
-                user_attn_mask = None
-                try:
-                    chat_out = tokenizer.apply_chat_template(
-                        messages,
-                        add_generation_prompt=True,
-                        tokenize=True,
-                        return_tensors="pt",
-                        return_dict=True,
-                    )
-                    # `return_dict=True` → BatchEncoding with input_ids + attention_mask
-                    if hasattr(chat_out, "input_ids"):
-                        user_input_ids = chat_out["input_ids"].to(device=model_device)
-                        user_attn_mask = chat_out.get("attention_mask", None)
-                        if user_attn_mask is not None:
-                            user_attn_mask = user_attn_mask.to(device=model_device)
-                    else:
-                        # Older tokenizers may already return a raw Tensor here
-                        user_input_ids = chat_out.to(device=model_device)
-                except Exception:
-                    # Fallback manual template
-                    prefix_text = (
-                        f"<|im_start|>user\n{prompt_text}<|im_end|>\n"
-                        f"<|im_start|>assistant\n"
-                    )
-                    enc = tokenizer(
-                        prefix_text, add_special_tokens=False, return_tensors="pt"
-                    )
-                    user_input_ids = enc.input_ids.to(device=model_device)
-                    user_attn_mask = enc.attention_mask.to(device=model_device)
-
-                if user_attn_mask is None:
-                    user_attn_mask = torch.ones_like(user_input_ids)
 
                 with torch.no_grad():
                     score_pred = model.get_score(
