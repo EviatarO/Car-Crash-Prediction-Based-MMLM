@@ -43,6 +43,11 @@ logs/
 *.log
 
 # Large output files — keep manifests + metrics JSON, exclude raw results + model weights
+dataset/
+output/
+outputs/
+report/
+reports/
 outputs/zero_shot/
 outputs/metrics/*.png
 outputs/student_checkpoints/

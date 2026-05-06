@@ -24,14 +24,14 @@ frame_filename_pattern: "frame_{:05d}.jpg"  # e.g. frame_00042.jpg
 # YES verdict: HIGH=0.90, MEDIUM=0.65, LOW=0.40
 # NO  verdict: HIGH=0.10, MEDIUM=0.35, LOW=0.60
 confidence_to_score:
-  YES:
-    HIGH:   0.90
-    MEDIUM: 0.65
-    LOW:    0.40
-  NO:
-    HIGH:   0.10
-    MEDIUM: 0.35
-    LOW:    0.60
+  "YES":
+    "HIGH":   0.90
+    "MEDIUM": 0.65
+    "LOW":    0.40
+  "NO":
+    "HIGH":   0.10
+    "MEDIUM": 0.35
+    "LOW":    0.60
 
 # --- Generation ---
 max_new_tokens: 600        # enough for PROMPT_G full JSON output
