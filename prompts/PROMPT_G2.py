@@ -52,3 +52,5 @@ PROMPT_G = (
     "- Prioritize the RATE OF CHANGE over static frame appearance.\n"
     "- Ensure the 'verdict_reasoning' is a dense summary suitable for model distillation.\n"
 )
+
+

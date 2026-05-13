@@ -45,6 +45,7 @@ bert-score>=0.3.13    # BERTScore for semantic similarity
 python-dotenv>=1.0.0
 openai>=1.0.0
 requests>=2.31.0
+dspy-ai>=2.5.0        # APO framework (ProTeGi-style optimization)
 
 # --- Utilities ---
 openpyxl>=3.1.0       # Excel I/O for teacher outputs
