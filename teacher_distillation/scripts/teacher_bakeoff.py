@@ -182,12 +182,14 @@ def _call_model(
     max_retries: int,
     retry_delay: float,
     temperature: float = 0.1,
+    max_tokens: int = 8192,  # caps OpenRouter's upfront reservation; Gemini uses ~2k reasoning tokens internally
 ) -> Tuple[str, Dict]:
     last_exc: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
             response = client.chat.completions.create(
                 model=model, messages=messages, temperature=temperature, timeout=timeout,
+                max_tokens=max_tokens,
             )
             text = response.choices[0].message.content if response.choices else ""
             usage = (

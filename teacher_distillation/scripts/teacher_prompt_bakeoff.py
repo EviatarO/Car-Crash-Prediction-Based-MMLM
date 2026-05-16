@@ -91,6 +91,8 @@ PROMPT_REGISTRY: Dict[str, tuple] = {
     "PROMPT_G_OPT_rerun": ("PROMPT_G_OPT.py",    "PROMPT_G_OPT"),     # rerun: same as original (150 tok), determinism check
     "PROMPT_G_OPT_v3":    ("PROMPT_G_OPT_v3.py", "PROMPT_G_OPT_v3"),  # v3: 120-token constraint
     "PROMPT_G_OPT_v4":    ("PROMPT_G_OPT_v4.py", "PROMPT_G_OPT_v4"),  # v4: 180-token constraint
+    "PROMPT_G_OPT_v5_balanced": ("PROMPT_G_OPT_v5_balanced.py", "PROMPT_G_OPT_v5_balanced"),  # v5: symmetric + GATES A/B/C
+    "PROMPT_G_OPT_v6_balanced": ("PROMPT_G_OPT_v6_balanced.py", "PROMPT_G_OPT_v6_balanced"),  # v6: base-rate first, ambiguous→NO
 }
 
 DEFAULT_GT_XLSX = REPO_ROOT / "dataset" / "teacher_dataset_GT_self_imply.xlsx"
