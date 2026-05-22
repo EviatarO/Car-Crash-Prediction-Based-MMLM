@@ -47,7 +47,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from prompts.templates import PROMPT_G  # noqa: E402
+from prompts.PROMPT_S import PROMPT_S  # noqa: E402  (student prompt, replaces old PROMPT_G)
 from student_training.models.internvl_lora import load_from_checkpoint  # noqa: E402
 from student_training.data.collision_dataset import (  # noqa: E402
     get_image_token_str,
@@ -68,12 +68,12 @@ def build_transform(input_size: int) -> T.Compose:
     ])
 
 
-def load_frames(frames_root: str, video_id: str, frame_indices: list,
+def load_frames(frames_root: str, frames_dir: str, frame_indices: list,
                 frame_size: int, pattern: str = "frame_{:05d}.jpg") -> torch.Tensor:
     transform = build_transform(frame_size)
     tensors = []
     for idx in frame_indices:
-        path = os.path.join(frames_root, video_id, pattern.format(idx))
+        path = os.path.join(frames_root, frames_dir, pattern.format(idx))
         if not os.path.exists(path):
             raise FileNotFoundError(f"Frame not found: {path}")
         img = Image.open(path).convert("RGB")
@@ -106,7 +106,7 @@ def parse_json_response(raw_text: str) -> dict:
 
 def build_prompt_with_images(num_frames: int) -> str:
     image_prefix = "\n".join(f"Frame {i + 1}: <image>" for i in range(num_frames))
-    return image_prefix + "\n\n" + PROMPT_G
+    return image_prefix + "\n\n" + PROMPT_S
 
 
 # ── Resume support ────────────────────────────────────────────────────────────
@@ -178,6 +178,7 @@ def evaluate(args, cfg: dict):
     with open(args.output, out_mode) as out_f:
         for rec in tqdm(remaining, desc="Trained eval", unit="clip"):
             vid          = rec["video_id"]
+            frames_dir   = rec.get("frames_dir", vid)   # hi-res dir for E3
             frame_indices = rec["frame_indices"]
             ground_truth  = rec.get("target", rec.get("event_occurs", -1))
 
@@ -201,7 +202,7 @@ def evaluate(args, cfg: dict):
             try:
                 # ── Load frames ───────────────────────────────────────────
                 pixel_values = load_frames(
-                    args.frames_root, vid, frame_indices, frame_size, frame_pattern
+                    args.frames_root, frames_dir, frame_indices, frame_size, frame_pattern
                 )
                 model_device = next(model.model.parameters()).device
                 model_dtype  = next(model.model.parameters()).dtype
@@ -267,15 +268,21 @@ def evaluate(args, cfg: dict):
                     result["collision_verdict"] = "YES" if score >= 0.5 else "NO"
                     tqdm.write(f"  PARSE ERROR [{vid}]: {parsed['parse_error'][:80]}")
                 else:
-                    verdict    = parsed.get("collision_verdict", "").strip().upper()
-                    confidence = parsed.get("confidence", "MEDIUM").strip().upper()
+                    # PROMPT_S schema is {"verdict","reason"}; fall back to the
+                    # legacy teacher keys for backward compatibility.
+                    verdict    = (parsed.get("verdict")
+                                  or parsed.get("collision_verdict")
+                                  or "").strip().upper()
+                    reasoning  = (parsed.get("reason")
+                                  or parsed.get("verdict_reasoning"))
+                    confidence = str(parsed.get("confidence", "MEDIUM")).strip().upper()
 
                     result["collision_verdict"] = verdict
                     result["confidence"]        = confidence
                     result["score"]             = round(score, 4)
                     result["scene_context"]     = parsed.get("scene_context")
                     result["temporal_analysis"] = parsed.get("temporal_analysis")
-                    result["verdict_reasoning"] = parsed.get("verdict_reasoning")
+                    result["verdict_reasoning"] = reasoning
                     result["latency_s"]         = round(latency, 2)
 
                     if verdict == "YES":

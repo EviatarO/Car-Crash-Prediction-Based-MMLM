@@ -338,13 +338,19 @@ def train(args, cfg: dict):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(cfg.get("seed", 42))
 
+    # CLI --output_dir overrides the config value
+    if getattr(args, "output_dir", None):
+        cfg["output_dir"] = args.output_dir
+
+    val_src = args.val_jsonl if getattr(args, "val_jsonl", None) else f"stratified {cfg.get('val_split',0.2)*100:.0f}% split"
+
     print(f"\n{'='*65}")
     print(f"Phase 3 — LoRA Fine-tuning  (overfit-curve run)")
     print(f"  JSONL          : {args.jsonl}")
+    print(f"  Val source     : {val_src}")
     print(f"  Frames root    : {args.frames_root}")
     print(f"  Output dir     : {cfg['output_dir']}")
     print(f"  Epochs         : {cfg['num_epochs']}  (intentional overfit)")
-    print(f"  Val split      : {cfg.get('val_split', 0.2)*100:.0f}%  (stratified)")
     print(f"  Loss alpha     : {cfg['loss_alpha']}")
     print(f"  LR             : {cfg['learning_rate']}")
     print(f"  Grad accum     : {cfg['gradient_accumulation_steps']}")
@@ -384,7 +390,7 @@ def train(args, cfg: dict):
         print("Gradient checkpointing enabled on LLM backbone")
 
     # ── Dataset + split ───────────────────────────────────────────────────
-    full_dataset = CollisionDataset(
+    train_dataset = CollisionDataset(
         jsonl_path   = args.jsonl,
         frames_root  = args.frames_root,
         model        = model.model,
@@ -393,34 +399,67 @@ def train(args, cfg: dict):
         skip_errors  = True,
     )
 
-    val_fraction = cfg.get("val_split", 0.2)
-    train_idx, val_idx = stratified_split(full_dataset, val_fraction, seed=cfg.get("seed", 42))
-
-    print(
-        f"Split: {len(train_idx)} train  /  {len(val_idx)} val  "
-        f"(stratified {100*(1-val_fraction):.0f}/{100*val_fraction:.0f})"
-    )
-
     num_workers = cfg.get("dataloader_num_workers", 0)
 
-    train_loader = DataLoader(
-        Subset(full_dataset, train_idx),
-        batch_size  = 1,
-        shuffle     = True,
-        collate_fn  = CollisionDataset.collate_fn,
-        num_workers = num_workers,
-        pin_memory  = (device == "cuda"),
-        drop_last   = False,
-    )
-    val_loader = DataLoader(
-        Subset(full_dataset, val_idx),
-        batch_size  = 1,
-        shuffle     = False,
-        collate_fn  = CollisionDataset.collate_fn,
-        num_workers = num_workers,
-        pin_memory  = (device == "cuda"),
-        drop_last   = False,
-    )
+    if args.val_jsonl:
+        # E3a path: separate, pre-built val JSONL (18 GT clips)
+        val_dataset = CollisionDataset(
+            jsonl_path   = args.val_jsonl,
+            frames_root  = args.frames_root,
+            model        = model.model,
+            tokenizer    = tokenizer,
+            cfg          = cfg,
+            skip_errors  = True,
+        )
+        train_idx = list(range(len(train_dataset)))
+        print(
+            f"Split: {len(train_dataset)} train  /  {len(val_dataset)} val  "
+            f"(separate val JSONL: {args.val_jsonl})"
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size  = 1,
+            shuffle     = True,
+            collate_fn  = CollisionDataset.collate_fn,
+            num_workers = num_workers,
+            pin_memory  = (device == "cuda"),
+            drop_last   = False,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size  = 1,
+            shuffle     = False,
+            collate_fn  = CollisionDataset.collate_fn,
+            num_workers = num_workers,
+            pin_memory  = (device == "cuda"),
+            drop_last   = False,
+        )
+    else:
+        # Legacy path: stratified split from a single JSONL
+        val_fraction = cfg.get("val_split", 0.2)
+        train_idx, val_idx = stratified_split(train_dataset, val_fraction, seed=cfg.get("seed", 42))
+        print(
+            f"Split: {len(train_idx)} train  /  {len(val_idx)} val  "
+            f"(stratified {100*(1-val_fraction):.0f}/{100*val_fraction:.0f})"
+        )
+        train_loader = DataLoader(
+            Subset(train_dataset, train_idx),
+            batch_size  = 1,
+            shuffle     = True,
+            collate_fn  = CollisionDataset.collate_fn,
+            num_workers = num_workers,
+            pin_memory  = (device == "cuda"),
+            drop_last   = False,
+        )
+        val_loader = DataLoader(
+            Subset(train_dataset, val_idx),
+            batch_size  = 1,
+            shuffle     = False,
+            collate_fn  = CollisionDataset.collate_fn,
+            num_workers = num_workers,
+            pin_memory  = (device == "cuda"),
+            drop_last   = False,
+        )
 
     # ── Optimizer ─────────────────────────────────────────────────────────
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -433,8 +472,9 @@ def train(args, cfg: dict):
     )
 
     # ── LR Scheduler ──────────────────────────────────────────────────────
+    n_train_clips   = len(train_idx)
     grad_accum      = cfg.get("gradient_accumulation_steps", 8)
-    steps_per_epoch = math.ceil(len(train_idx) / grad_accum)
+    steps_per_epoch = math.ceil(n_train_clips / grad_accum)
     total_steps     = steps_per_epoch * cfg["num_epochs"]
     warmup_steps    = math.ceil(total_steps * cfg.get("warmup_ratio", 0.1))
 
@@ -446,7 +486,7 @@ def train(args, cfg: dict):
     )
 
     print(
-        f"Schedule: {len(train_idx)} train clips  ×  {cfg['num_epochs']} epochs  "
+        f"Schedule: {n_train_clips} train clips  ×  {cfg['num_epochs']} epochs  "
         f"→ {steps_per_epoch} steps/epoch  →  {total_steps} total steps"
     )
     print(f"  Warmup: {warmup_steps} steps")
@@ -643,11 +683,16 @@ def main():
         description="LoRA fine-tuning of InternVL3.5-4B-Flash (overfit-curve run)"
     )
     parser.add_argument("--jsonl",       required=True,
-                        help="Path to teacher_dataset_v11.jsonl")
+                        help="Path to train JSONL (e.g. teacher_dataset_e3a.jsonl)")
+    parser.add_argument("--val_jsonl",   default=None,
+                        help="Optional separate val JSONL (e.g. val_e3a.jsonl). "
+                             "If omitted, a stratified split of --jsonl is used.")
     parser.add_argument("--frames_root", required=True,
                         help="Root dir with per-video frame folders")
     parser.add_argument("--config",      default="student_training/configs/train_lora.yaml",
                         help="Path to train_lora.yaml")
+    parser.add_argument("--output_dir",  default=None,
+                        help="Override output_dir from config (e.g. outputs/checkpoints/e3a_lora_89clips)")
     parser.add_argument("--resume",      action="store_true",
                         help="Resume from latest checkpoint in output_dir")
     args = parser.parse_args()

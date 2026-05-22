@@ -55,7 +55,7 @@ from torchvision.transforms.functional import InterpolationMode
 # ── Project root → prompts ────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
-from prompts.templates import PROMPT_G  # noqa: E402
+from prompts.PROMPT_S import PROMPT_S  # noqa: E402  (student prompt, replaces old PROMPT_G)
 
 # ── Image preprocessing (identical to zero_shot_eval.py) ─────────────────────
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -265,16 +265,20 @@ class CollisionDataset(Dataset):
                         pass
         return records
 
-    def _load_frames(self, video_id: str, frame_indices: List[int]) -> torch.Tensor:
+    def _load_frames(self, frames_dir: str, frame_indices: List[int]) -> torch.Tensor:
         """
         Load frame images and return a stacked (N, 3, H, W) tensor.
 
-        Frame path pattern:  frames_root / video_id / frame_00042.jpg
+        Frame path pattern:  frames_root / frames_dir / frame_00042.jpg
+
+        `frames_dir` is the per-clip directory name. For E3 it is the hi-res
+        directory ("{video_id}_hires", renumbered frames 1..16); for legacy
+        datasets it is just the video_id.
         """
         tensors = []
         for idx in frame_indices:
             path = os.path.join(
-                self.frames_root, video_id, self.frame_pattern.format(idx)
+                self.frames_root, frames_dir, self.frame_pattern.format(idx)
             )
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Frame not found: {path}")
@@ -323,8 +327,8 @@ class CollisionDataset(Dataset):
             frame_ids += self._per_img_ids          # [<img>, ctx×N, </img>]
             frame_ids += enc("\n")
 
-        # ── PROMPT_G + end of user turn + assistant header ─────────────────
-        prompt_ids = enc(f"\n{PROMPT_G}<|im_end|>\n<|im_start|>assistant\n")
+        # ── PROMPT_S + end of user turn + assistant header ─────────────────
+        prompt_ids = enc(f"\n{PROMPT_S}<|im_end|>\n<|im_start|>assistant\n")
 
         # ── Assistant response ─────────────────────────────────────────────
         asst_ids = enc(assistant_text + "<|im_end|>\n")
@@ -363,16 +367,23 @@ class CollisionDataset(Dataset):
         record = self.records[idx]
 
         video_id      = record["video_id"]
+        frames_dir    = record.get("frames_dir", video_id)            # hi-res dir for E3
         frame_indices = record["frame_indices"][:self.window_size]   # truncate to window_size
         score_target  = float(record.get("target", 0))   # 0 or 1 (int in JSONL)
 
         # ── Load pixel values ─────────────────────────────────────────────
-        pixel_values = self._load_frames(video_id, frame_indices)
+        pixel_values = self._load_frames(frames_dir, frame_indices)
         # pixel_values: (16, 3, 448, 448)
 
         # ── Build assistant text + tokenise ──────────────────────────────
-        reasoning_json = build_full_reasoning_json(record)
-        assistant_text = json.dumps(reasoning_json, indent=2, ensure_ascii=False)
+        # E3+: records carry a pre-baked minimal PROMPT_S target string
+        #      ({"verdict","reason"}).  Legacy records reconstruct the full
+        #      8-key teacher schema from individual fields.
+        if record.get("assistant_target"):
+            assistant_text = record["assistant_target"]
+        else:
+            reasoning_json = build_full_reasoning_json(record)
+            assistant_text = json.dumps(reasoning_json, indent=2, ensure_ascii=False)
         tok_out        = self._build_ids_and_labels(assistant_text)
 
         return {
