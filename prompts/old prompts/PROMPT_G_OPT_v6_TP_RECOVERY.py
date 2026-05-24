@@ -1,4 +1,4 @@
-PROMPT_G_OPT_v6_TN_RECOVERY = (
+PROMPT_G_OPT_v6_TP_RECOVERY = (
     "ROLE: You are a proactive autonomous-driving hazard analyst specialized in "
     "detecting early-stage collision risks and subtle trajectory conflicts from "
     "dashcam video.\n\n"

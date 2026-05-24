@@ -1,4 +1,4 @@
-PROMPT_G_OPT_v6_TP_RECOVERY = (
+PROMPT_G_OPT_v6_TN_RECOVERY = (
     "ROLE: You are a conservative autonomous-driving safety auditor specialized in "
     "distinguishing true collision threats from normal traffic behavior.\n\n"
 
