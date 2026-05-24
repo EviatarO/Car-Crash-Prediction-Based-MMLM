@@ -657,6 +657,22 @@ def train(args, cfg: dict):
             with open(epoch_log_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
+            # ── Keep only top-K checkpoints by val_ap + latest for resume ──
+            keep_best_n = cfg.get("keep_best_n_checkpoints", 3)
+            entries_with_ckpt = [e for e in epoch_log if e.get("ckpt_dir")]
+            top_k_dirs = {
+                e["ckpt_dir"]
+                for e in sorted(entries_with_ckpt,
+                                key=lambda e: e.get("val_ap", 0),
+                                reverse=True)[:keep_best_n]
+            }
+            top_k_dirs.add(ckpt_dir)   # always keep latest for resume
+            import shutil
+            for d in sorted(Path(output_dir).iterdir()):
+                if d.is_dir() and d.name.startswith("step_") and str(d) not in top_k_dirs:
+                    shutil.rmtree(d)
+                    print(f"  [prune] removed {d.name}  (not in top-{keep_best_n} val_ap)")
+
             gap_marker = f"  ← GAP GROWING (+{f1_gap:.3f})" if f1_gap > 0.05 else ""
             print(
                 f"  Epoch {epoch+1:>3}  "
