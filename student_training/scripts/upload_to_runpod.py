@@ -19,7 +19,6 @@ ZIP_FILE     = PROJECT_ROOT / "outputs" / "extracted_clips.zip"
 BUCKET       = "0hnvco2s4j"
 ENDPOINT_URL = "https://s3api-eu-ro-1.runpod.io"
 REGION       = "eu-ro-1"
-OBJECT_KEY   = "extracted_clips.zip"
 
 
 def main():
@@ -34,10 +33,14 @@ def main():
         print(f"[ERROR] Zip file not found: {zip_path}")
         sys.exit(1)
 
+    # Object key = filename of the zip (e.g. extracted_clips.zip or extracted_clips_hires.zip)
+    object_key = zip_path.name
+
     file_size_mb = zip_path.stat().st_size / 1024 / 1024
     print(f"File     : {zip_path}")
     print(f"Size     : {file_size_mb:.1f} MB")
     print(f"Bucket   : {BUCKET}")
+    print(f"Key      : {object_key}")
     print(f"Endpoint : {ENDPOINT_URL}")
     print()
 
@@ -70,11 +73,11 @@ def main():
     config = TransferConfig(multipart_threshold=10 * 1024 * 1024,  # 10MB chunks
                             max_concurrency=4)
 
-    print(f"Uploading to s3://{BUCKET}/{OBJECT_KEY} ...")
+    print(f"Uploading to s3://{BUCKET}/{object_key} ...")
     s3.upload_file(
         str(zip_path),
         BUCKET,
-        OBJECT_KEY,
+        object_key,
         Callback=progress,
         Config=config,
     )

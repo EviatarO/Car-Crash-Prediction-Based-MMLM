@@ -60,24 +60,65 @@ ls -la /root/.cache/huggingface
 # If output shows: drwx...               (a real directory) -> nothing to do.
 
 --------------------------------------------------------------
-STEP 4 — Upload training data  [E3a — do ONCE per workspace volume]
+STEP 4 — Upload hires frames  [E3a — do ONCE per workspace volume, from LOCAL machine]
 --------------------------------------------------------------
-# Check if hires frames are already uploaded:
-ls /workspace/data/extracted_clips/train/ | grep "_hires" | head -5
+# The old 256-px frames ({vid}/) are already on the network volume from E2.
+# For E3a we only need to upload the NEW _hires dirs (107 folders x 16 frames).
 
-# If NOT present, upload from your local machine (run this on LOCAL terminal):
-#   rsync -avz --progress \
-#     "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/dataset/train/" \
-#     runpod:/workspace/data/extracted_clips/train/
-#
-# OR use the RunPod web UI to upload the dataset/train folder.
-# Target path on RunPod: /workspace/data/extracted_clips/train/
-# After upload you should see dirs like:
-#   /workspace/data/extracted_clips/train/00065_hires/frame_00001.jpg ... frame_00016.jpg
-#   /workspace/data/extracted_clips/train/00319_hires/frame_00001.jpg ... frame_00016.jpg
-#   (107 total hires dirs: 89 train + 18 val)
+# --- 4a. Zip only the _hires dirs (run on LOCAL Windows PowerShell / terminal) ---
 
-# Verify frame count for a spot-check clip:
+cd "C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis\MMLM_For_Cars_Collision_Anticipation\MMLM_AI"
+
+python -c "
+import zipfile, glob, os
+from pathlib import Path
+src  = Path('dataset/train')
+out  = Path('outputs/extracted_clips_hires.zip')
+dirs = sorted(src.glob('*_hires'))
+print(f'Zipping {len(dirs)} hires dirs...')
+with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for d in dirs:
+        for f in sorted(d.glob('frame_*.jpg')):
+            arcname = 'train/' + d.name + '/' + f.name
+            zf.write(f, arcname)
+sz = out.stat().st_size / 1024**2
+print(f'Done: {out}  ({sz:.0f} MB)')
+"
+# Expected output: Zipping 107 hires dirs...  Done: outputs/extracted_clips_hires.zip  (~300-500 MB)
+
+# --- 4b. Upload the zip to RunPod network volume via S3 API ---
+# (Same mechanism as E2 — requires RunPod API key from Settings -> API Keys)
+
+python student_training/scripts/upload_to_runpod.py \
+    --api_key    YOUR_RUNPOD_API_KEY \
+    --secret_key YOUR_RUNPOD_SECRET_KEY \
+    --zip_file   outputs/extracted_clips_hires.zip
+
+# --- 4c. On RunPod: download and extract the zip ---
+# (Run these commands in the RunPod terminal after the upload completes)
+
+cd /workspace/data/extracted_clips
+
+# Download from S3:
+python -c "
+import boto3
+s3 = boto3.client('s3',
+    endpoint_url='https://s3api-eu-ro-1.runpod.io',
+    aws_access_key_id='YOUR_RUNPOD_API_KEY',
+    aws_secret_access_key='YOUR_RUNPOD_SECRET_KEY',
+    region_name='eu-ro-1')
+s3.download_file('0hnvco2s4j', 'extracted_clips_hires.zip', 'extracted_clips_hires.zip')
+print('Download complete')
+"
+
+# Extract (adds _hires dirs next to the existing {vid}/ dirs):
+unzip -q extracted_clips_hires.zip -d /workspace/data/extracted_clips/
+rm extracted_clips_hires.zip   # free up space after extraction
+
+# Verify:
+ls /workspace/data/extracted_clips/train/ | grep "_hires" | wc -l
+# Expected: 107
+
 ls /workspace/data/extracted_clips/train/00065_hires/ | wc -l
 # Expected: 16
 
