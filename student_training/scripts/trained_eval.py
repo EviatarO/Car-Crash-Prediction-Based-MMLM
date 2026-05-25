@@ -211,16 +211,12 @@ def evaluate(args, cfg: dict):
                 t0 = time.time()
 
                 # ── Step 1: Get collision score from ScoreHead ────────────
-                # The score-head pass requires `input_ids` whose <IMG_CONTEXT>
-                # token slots match the vision encoder's output exactly:
-                #   total <IMG_CONTEXT> count = num_frames * num_image_token
-                # If we tokenize a string with a literal "<image>" placeholder,
-                # the model finds 0 slots for 4096 vit_embeds and crashes:
-                #   "input_embeds[selected].shape=[0, 2560], vit_embeds.shape=[4096, 2560]"
-                #
-                # We use the same expansion the training dataset uses
-                # (collision_dataset.expand_image_placeholders) so the score-head
-                # path sees the identical token layout as during training.
+                # CRITICAL: The ScoreHead was trained to read the hidden state
+                # at asst_start_pos (the first assistant-response token, e.g. "{").
+                # We must replicate this at inference by appending a dummy
+                # response start to the prefix and calling model.forward()
+                # with the correct asst_start_pos — NOT model.get_score()
+                # which reads at the last prefix token (wrong position).
                 image_token_str = get_image_token_str(model.model)
                 expanded_prompt = expand_image_placeholders(prompt_text, image_token_str)
                 prefix_text = (
@@ -228,21 +224,35 @@ def evaluate(args, cfg: dict):
                     f"<|im_start|>user\n{expanded_prompt}<|im_end|>\n"
                     f"<|im_start|>assistant\n"
                 )
-                enc = tokenizer(
+                # Tokenize prefix to find asst_start_pos
+                prefix_enc = tokenizer(
                     prefix_text, add_special_tokens=False, return_tensors="pt"
                 )
-                user_input_ids = enc.input_ids.to(device=model_device)
-                user_attn_mask = enc.attention_mask.to(device=model_device)
+                prefix_len = prefix_enc.input_ids.shape[1]
 
+                # Append dummy response start so hidden state at asst_start_pos
+                # matches training (where first token was always "{")
+                dummy_response = '{"verdict":'
+                full_text = prefix_text + dummy_response
+                full_enc = tokenizer(
+                    full_text, add_special_tokens=False, return_tensors="pt"
+                )
+                full_input_ids = full_enc.input_ids.to(device=model_device)
+                full_attn_mask = full_enc.attention_mask.to(device=model_device)
+                # Labels all -100 → no LM loss computed
+                dummy_labels = torch.full_like(full_input_ids, -100)
+                asst_pos = torch.tensor([prefix_len], device=model_device)
 
                 with torch.no_grad():
-                    score_pred = model.get_score(
-                        pixel_values     = pixel_values,
-                        input_ids        = user_input_ids,
-                        attention_mask   = user_attn_mask,
-                        num_patches_list = num_patches_list,
+                    out = model(
+                        pixel_values   = pixel_values,
+                        input_ids      = full_input_ids,
+                        attention_mask = full_attn_mask,
+                        labels         = dummy_labels,
+                        score_target   = None,
+                        asst_start_pos = asst_pos,
                     )
-                score = float(score_pred[0].item())
+                score = float(out.score_pred[0].item())
 
                 # ── Step 2: Generate reasoning text ───────────────────────
                 # Derive verdict from score (threshold 0.5) for XLSX review.
