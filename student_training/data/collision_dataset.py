@@ -31,7 +31,7 @@ using the model's own num_image_token property and img_context_token_id.
 
 Usage:
   ds = CollisionDataset(
-      jsonl_path   = "outputs/teacher_dataset_v11.jsonl",
+      jsonl_path   = "dataset/teacher_labels/teacher_dataset_v11.jsonl",
       frames_root  = "/data/train_frames256",
       model        = intern_model,          # loaded InternVL model
       tokenizer    = tokenizer,

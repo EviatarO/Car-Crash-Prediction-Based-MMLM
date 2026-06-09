@@ -14,12 +14,12 @@ Usage
 -----
 
     python student_training/scripts/zero_shot_to_xlsx.py \
-        --input_jsonl outputs/zero_shot/zero_shot_train_100_fixed.jsonl \
-        --output_xlsx outputs/zero_shot/zero_shot_train_100_fixed.xlsx
+        --input_jsonl outputs/e0_zero_shot_baseline/zero_shot_train_100_fixed.jsonl \
+        --output_xlsx outputs/e0_zero_shot_baseline/zero_shot_train_100_fixed.xlsx
 
     python student_training/scripts/zero_shot_to_xlsx.py \
-        --input_jsonl outputs/zero_shot/zero_shot_test_fixed.jsonl \
-        --output_xlsx outputs/zero_shot/zero_shot_test_fixed.xlsx
+        --input_jsonl outputs/e0_zero_shot_baseline/zero_shot_test_fixed.jsonl \
+        --output_xlsx outputs/e0_zero_shot_baseline/zero_shot_test_fixed.xlsx
 
 If ``--output_xlsx`` is omitted, the output path defaults to the input path
 with a ``.xlsx`` suffix.

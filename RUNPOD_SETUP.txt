@@ -1,41 +1,24 @@
 ==============================================================
-  RunPod Setup — Car Crash Prediction MMLM
-  Run these commands every time you spin up a NEW pod.
-  All code fixes are in git — just pull and install.
+  RunPod Setup — E3a Student Training
+  GPU: 1x RTX 5090 (32GB) | Template: PyTorch 2.8 + CUDA 12.8
+  Network Volume: attached to /workspace (20GB+)
 ==============================================================
 
 --------------------------------------------------------------
-STEP 0 — Select the right RunPod template (RTX 5090 ONLY)
+STEP 0 — Pod creation (UI, not terminal)
 --------------------------------------------------------------
-  RTX 5090 (Blackwell) requires PyTorch 2.8+ and CUDA 12.8+.
-  When creating the pod, choose a template such as:
-    "RunPod PyTorch 2.8.0"  (or any image with PyTorch >= 2.8 + CUDA 12.8)
-  DO NOT use a PyTorch 2.1/2.2/2.4 image — the GPU will not be recognised.
-
-  Attach a Network Volume (at least 30 GB) to /workspace.
-  This is where frames, checkpoints, and outputs are stored.
-
-  Verify GPU after pod starts:
-    nvidia-smi
-  Expect: RTX 5090, 32 GB VRAM.
-
-  Verify PyTorch sees the GPU:
-    python -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0))"
-
-  If flash-attn errors after pip install, rebuild for your CUDA version:
-    pip install flash-attn --no-build-isolation --force-reinstall
+  GPU      : RTX 5090  (DO NOT use RTX 4090 x2 or PyTorch < 2.8)
+  Template : "RunPod PyTorch 2.8.0"  (CUDA 12.8+)
+  Volume   : attach existing Network Volume to /workspace
 
 --------------------------------------------------------------
-STEP 1 — Clone or pull the repo
+STEP 1 — Pull repo
 --------------------------------------------------------------
-# If fresh pod (no repo yet):
-cd /workspace
-git clone https://github.com/EviatarO/Car-Crash-Prediction-Based-MMLM.git
-cd Car-Crash-Prediction-Based-MMLM
-
-# If repo already exists (most common — just pull latest):
 cd /workspace/Car-Crash-Prediction-Based-MMLM
 git pull
+
+# If repo doesn't exist yet:
+# cd /workspace && git clone https://github.com/EviatarO/Car-Crash-Prediction-Based-MMLM.git
 
 --------------------------------------------------------------
 STEP 2 — Install dependencies
@@ -44,125 +27,56 @@ pip install -r requirements.txt
 pip install flash-attn --no-build-isolation
 
 --------------------------------------------------------------
-STEP 3 — Keep HuggingFace cache on LOCAL disk (NOT /workspace)
-         /workspace has limited quota — model is 7.4 GB.
-         Local disk has plenty of space for the model cache.
+STEP 3 — Fix HuggingFace cache  [CRITICAL — prevents disk quota crash]
+         HF model is 7-9 GB. It MUST live on local disk (/root),
+         NOT on /workspace (network volume has a size quota).
 --------------------------------------------------------------
-# 3a. Remove any stale /workspace/.cache from previous sessions
-#     (this filled the quota in past sessions — always clean it):
+# Always delete stale cache from /workspace first:
 rm -rf /workspace/.cache
 
-# 3b. Fix /root/.cache/huggingface ONLY if it is a broken symlink.
-#     If it is already a real directory with the model inside, SKIP this.
+# Check where the model cache is:
 ls -la /root/.cache/huggingface
-# If output shows: lrwx... -> /workspace/...  (a symlink) -> run the fix:
+
+# CASE A — output shows "No such file or directory" (fresh pod, model not downloaded yet):
+#   Nothing to do. Model will download to /root/.cache automatically on first run.
+
+# CASE B — output shows a real directory (drwx...):
+#   Nothing to do. Model is already on local disk.
+
+# CASE C — output shows a symlink (lrwx... -> /workspace/...):
 #   rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
-# If output shows: drwx...               (a real directory) -> nothing to do.
+
+# If model is stuck on /workspace (e.g. after a crash), move it:
+#   mkdir -p /root/.cache
+#   mv /workspace/.cache/huggingface /root/.cache/huggingface
 
 --------------------------------------------------------------
-STEP 4 — Upload hires frames  [E3a — do ONCE per workspace volume, from LOCAL machine]
+STEP 4 — Verify data is present
 --------------------------------------------------------------
-# The old 256-px frames ({vid}/) are already on the network volume from E2.
-# For E3a we only need to upload the NEW _hires dirs (107 folders x 16 frames).
+ls /workspace/data/train_HiRes/ | grep "_hires" | wc -l
+# Expected: 117
 
-# --- 4a. Zip only the _hires dirs (run on LOCAL Windows PowerShell / terminal) ---
-
-cd "C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis\MMLM_For_Cars_Collision_Anticipation\MMLM_AI"
-
-python -c "
-import zipfile, glob, os
-from pathlib import Path
-src  = Path('dataset/train')
-out  = Path('outputs/extracted_clips_hires.zip')
-dirs = sorted(src.glob('*_hires'))
-print(f'Zipping {len(dirs)} hires dirs...')
-with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
-    for d in dirs:
-        for f in sorted(d.glob('frame_*.jpg')):
-            arcname = 'train/' + d.name + '/' + f.name
-            zf.write(f, arcname)
-sz = out.stat().st_size / 1024**2
-print(f'Done: {out}  ({sz:.0f} MB)')
-"
-# Expected output: Zipping 107 hires dirs...  Done: outputs/extracted_clips_hires.zip  (~300-500 MB)
-
-# --- 4b. Upload the zip to RunPod network volume via S3 API ---
-# (Same mechanism as E2 — requires RunPod API key from Settings -> API Keys)
-
-python student_training/scripts/upload_to_runpod.py \
-    --api_key    YOUR_RUNPOD_API_KEY \
-    --secret_key YOUR_RUNPOD_SECRET_KEY \
-    --zip_file   outputs/extracted_clips_hires.zip
-
-# --- 4c. On RunPod: download and extract the zip ---
-# (Run these commands in the RunPod terminal after the upload completes)
-
-cd /workspace/data/extracted_clips
-
-# Download from S3:
-python -c "
-import boto3
-s3 = boto3.client('s3',
-    endpoint_url='https://s3api-eu-ro-1.runpod.io',
-    aws_access_key_id='YOUR_RUNPOD_API_KEY',
-    aws_secret_access_key='YOUR_RUNPOD_SECRET_KEY',
-    region_name='eu-ro-1')
-s3.download_file('0hnvco2s4j', 'extracted_clips_hires.zip', 'extracted_clips_hires.zip')
-print('Download complete')
-"
-
-# Extract (adds _hires dirs next to the existing {vid}/ dirs):
-unzip -q extracted_clips_hires.zip -d /workspace/data/extracted_clips/
-rm extracted_clips_hires.zip   # free up space after extraction
-
-# Verify:
-ls /workspace/data/extracted_clips/train/ | grep "_hires" | wc -l
-# Expected: 107
-
-ls /workspace/data/extracted_clips/train/00065_hires/ | wc -l
+ls /workspace/data/train_HiRes/00065_hires/ | wc -l
 # Expected: 16
 
 --------------------------------------------------------------
-STEP 5 — Build E3a JSONL files  [run on RunPod, takes ~10 sec]
+STEP 5 — Check disk space before training
 --------------------------------------------------------------
-cd /workspace/Car-Crash-Prediction-Based-MMLM
-
-python student_training/scripts/build_e3a_train_jsonl.py
-# Expected output:
-#   Source records: 100  |  passing: 90
-#   LEAKAGE GUARD: excluded 1 val-overlap clip(s) from train: ['01552']
-#   train after guard: 89
-#   Wrote 89 records -> outputs/teacher_dataset_e3a.jsonl
-#   class balance : 42 YES / 47 NO
-
-python student_training/scripts/build_e3a_val_jsonl.py
-# Expected output:
-#   Wrote 18 records -> outputs/val_e3a.jsonl
-#   class balance : 9 YES / 9 NO
+du -sh /workspace/* 2>/dev/null | sort -rh
+# Expected (healthy state):
+#   ~3-4G   /workspace/Car-Crash-Prediction-Based-MMLM  (repo + checkpoints)
+#   ~2G     /workspace/data
+#   NO      /workspace/.cache   (must be absent)
 
 --------------------------------------------------------------
-STEP 6 — [OPTIONAL] Zero-shot PROMPT_S sanity check on 18 val clips
-         (cheap: ~5 min, no training, confirms base model outputs valid JSON)
---------------------------------------------------------------
-python student_training/scripts/trained_eval.py \
-    --checkpoint  outputs/checkpoints/e3a_lora_89clips/step_000000 \
-    --manifest    outputs/val_e3a.jsonl \
-    --frames_root /workspace/data/extracted_clips/train \
-    --output      outputs/trained/zero_shot_prompt_s_val18.jsonl \
-    --config      student_training/configs/train_lora.yaml
-
-# Check output: should see a mix of YES/NO, no "parse_error" majority.
-# This step is optional but recommended before committing GPU hours.
-
---------------------------------------------------------------
-STEP 7 — Start E3a training
+STEP 6 — Start training (fresh run)
 --------------------------------------------------------------
 cd /workspace/Car-Crash-Prediction-Based-MMLM
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/scripts/train_lora.py \
     --jsonl       outputs/teacher_dataset_e3a.jsonl \
     --val_jsonl   outputs/val_e3a.jsonl \
-    --frames_root /workspace/data/extracted_clips/train \
+    --frames_root /workspace/data/train_HiRes \
     --output_dir  outputs/checkpoints/e3a_lora_89clips \
     --config      student_training/configs/train_lora.yaml \
     > train_e3a.log 2>&1 &
@@ -170,12 +84,14 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/s
 tail -f train_e3a.log
 
 --------------------------------------------------------------
-STEP 8 — Resume if training crashed (picks up last checkpoint)
+STEP 7 — Resume after crash
 --------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/scripts/train_lora.py \
     --jsonl       outputs/teacher_dataset_e3a.jsonl \
     --val_jsonl   outputs/val_e3a.jsonl \
-    --frames_root /workspace/data/extracted_clips/train \
+    --frames_root /workspace/data/train_HiRes \
     --output_dir  outputs/checkpoints/e3a_lora_89clips \
     --config      student_training/configs/train_lora.yaml \
     --resume \
@@ -184,73 +100,80 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python student_training/s
 tail -f train_e3a.log
 
 --------------------------------------------------------------
-STEP 9 — Monitor
+STEP 8 — Monitor
 --------------------------------------------------------------
-# Check process is alive:
 ps aux | grep train_lora
-
-# Check GPU usage (expect ~18-22 GB on 1x RTX 5090):
 nvidia-smi
-
-# Check disk space:
-df -h
-du -sh /workspace/* /workspace/.cache 2>/dev/null | sort -rh
-
-# See latest log:
 tail -50 train_e3a.log
-
-# Live epoch metrics (updated after each epoch):
-cat outputs/checkpoints/e3a_lora_89clips/epoch_metrics.jsonl | tail -10
+du -sh /workspace/* 2>/dev/null | sort -rh
+cat outputs/checkpoints/e3a_lora_89clips/epoch_metrics.jsonl | tail -5
 
 --------------------------------------------------------------
-STEP 10 — Run trained_eval.py on best checkpoint
-          (after training finishes — pick best val_f1 epoch from epoch_metrics.jsonl)
+STEP 9 — Disk quota emergency  [if training crashes with Errno 122]
 --------------------------------------------------------------
-# Find best epoch:
+# 1. Move HF cache off workspace (if it ended up there):
+mkdir -p /root/.cache
+mv /workspace/.cache/huggingface /root/.cache/huggingface
+rm -rf /workspace/.cache
+
+# 2. Check checkpoint sizes:
+ls outputs/checkpoints/e3a_lora_89clips/ | sort
+du -sh outputs/checkpoints/e3a_lora_89clips/
+
+# 3. Delete old checkpoints — keep only best 2 + latest resume point.
+#    Check epoch_metrics.jsonl to find best epochs, then:
+#    rm -rf outputs/checkpoints/e3a_lora_89clips/step_XXXXXX  (repeat for each to delete)
+
+# 4. Verify free space, then resume (STEP 7).
+
+--------------------------------------------------------------
+STEP 10 — Find best checkpoint after training finishes
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
 python -c "
 import json
 rows = [json.loads(l) for l in open('outputs/checkpoints/e3a_lora_89clips/epoch_metrics.jsonl')]
-best = max(rows, key=lambda r: r.get('val_f1', 0))
-print(f'Best epoch: {best[\"epoch\"]}  val_f1={best[\"val_f1\"]:.3f}  val_ap={best[\"val_ap\"]:.3f}')
-print(f'Checkpoint step: step_{best[\"step\"]:06d}')
+best_ap = max(rows, key=lambda r: r.get('val_ap', 0))
+best_f1 = max(rows, key=lambda r: r.get('val_f1', 0))
+print(f'Best val_ap : epoch={best_ap[\"epoch\"]}  val_ap={best_ap[\"val_ap\"]:.3f}  step=step_{best_ap[\"step\"]:06d}')
+print(f'Best val_f1 : epoch={best_f1[\"epoch\"]}  val_f1={best_f1[\"val_f1\"]:.3f}  step=step_{best_f1[\"step\"]:06d}')
 "
 
-# Then run eval with that checkpoint:
+--------------------------------------------------------------
+STEP 11 — Run eval on best checkpoint
+--------------------------------------------------------------
 python student_training/scripts/trained_eval.py \
     --checkpoint  outputs/checkpoints/e3a_lora_89clips/step_XXXXXX \
     --manifest    outputs/val_e3a.jsonl \
-    --frames_root /workspace/data/extracted_clips/train \
+    --frames_root /workspace/data/train_HiRes \
     --output      outputs/trained/e3a_lora_89clips_val18.jsonl \
     --config      student_training/configs/train_lora.yaml
 
 --------------------------------------------------------------
-EXPECTED STARTUP LOG (confirm these lines appear in train_e3a.log):
+EXPECTED STARTUP LOG
 --------------------------------------------------------------
-  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16  GPUs=1  device_map=auto
+  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16  GPUs=1
   [internvl_lora] use_flash_attn=True  device_map=auto  n_gpus=1
-  [internvl_lora] img_context_token_id = 151671  (token: '<IMG_CONTEXT>')
   InternVLCollisionModel trainable params: 50.1M / 4939.2M (1.01%)
   Gradient checkpointing enabled on LLM backbone
-  CollisionDataset: 89 records ...
+  CollisionDataset: 89 records from outputs/teacher_dataset_e3a.jsonl
+  CollisionDataset: 18 records from outputs/val_e3a.jsonl
   Split: 89 train  /  18 val  (separate val JSONL: outputs/val_e3a.jsonl)
-  -- Epoch 1/50 --
+  Schedule: 89 train clips x 50 epochs -> 12 steps/epoch -> 600 total steps
+  Warmup: 60 steps
+  -- Epoch 1/50 --   (or Resumed from: ... if --resume)
 
 --------------------------------------------------------------
 NOTES
 --------------------------------------------------------------
-- Recommended GPU  : 1x RTX 5090 (~$0.80-1.00/hr) — 32 GB VRAM, fits model with flash-attn + grad-ckpt + bf16
-- Fallback GPU     : 2x RTX 4090 (~$1.18/hr) — multi-GPU patches fire automatically when n_gpus > 1
-- /workspace quota : watch disk space (use STEP 9 df -h); keep HF model cache on root disk, NOT /workspace
-- HF model cache   : ~7.4 GB stays on /root/.cache/huggingface (local disk, NOT /workspace)
-- Training time    : 89 clips x 50 epochs x ~2s/clip ~= 2.5 hrs on RTX 5090  (~$2-3 total)
-- Checkpoints      : saved every 50 optimizer steps to outputs/checkpoints/e3a_lora_89clips/
-                     (~100 MB each x ~60 checkpoints = ~6 GB total in /workspace)
-- Best checkpoint  : pick from epoch_metrics.jsonl — highest val_ap (primary metric) or val_f1
-- Val set          : 18 GT clips (9 YES / 9 NO) — HUMAN ground truth, held out from training
-- Train set        : 89 teacher-distilled clips (42 YES / 47 NO) — hires 1280x720 frames
-- Frame dirs       : {video_id}_hires/ (16 frames numbered frame_00001..frame_00016)
-- Data paths on RunPod:
-    Train JSONL : /workspace/Car-Crash-Prediction-Based-MMLM/outputs/teacher_dataset_e3a.jsonl
-    Val JSONL   : /workspace/Car-Crash-Prediction-Based-MMLM/outputs/val_e3a.jsonl
-    Frames      : /workspace/data/extracted_clips/train/{video_id}_hires/frame_00001.jpg
+- GPU            : 1x RTX 5090, 32GB VRAM (~$0.80-1.00/hr, ~2.5hr training = ~$2-3)
+- HF cache       : 7-9 GB on /root/.cache/huggingface  (local disk, NOT /workspace)
+- Workspace      : ~20GB quota — repo (~4G) + data (~2G) + checkpoints (~6G) = ~12G safe
+- Checkpoints    : ~190MB each; keep only best 2 + latest to stay under quota
+- Metrics files  : epoch_metrics.jsonl + train_log.jsonl — safe to delete checkpoints,
+                   metrics are preserved in these files for plotting
+- frames_root    : /workspace/data/train_HiRes  (117 x _hires dirs, 16 frames each)
+- Train JSONL    : outputs/teacher_dataset_e3a.jsonl  (89 clips, in git — no rebuild needed)
+- Val JSONL      : outputs/val_e3a.jsonl  (18 GT clips, in git — no rebuild needed)
 ==============================================================

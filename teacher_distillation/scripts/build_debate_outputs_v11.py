@@ -3,7 +3,7 @@
 Sources:
   - outputs/prompt_bakeoff/v11_100clips/v6_hires_v11.jsonl   (100 clips)
   - outputs/prompt_bakeoff/v11_100clips/v6_debate_v11.jsonl  (34 debate clips)
-  - outputs/teacher_dataset_v11.xlsx                          (GT + final_reasoning)
+  - dataset/teacher_labels/teacher_dataset_v11.xlsx                          (GT + final_reasoning)
 
 Key differences vs. build_debate_outputs.py (18-clip version):
   - No BERTScore columns (no GT reasoning to compare against)

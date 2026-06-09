@@ -9,7 +9,7 @@ random.Random(seed) shuffle from stratified_split().
 
 Usage:
   python student_training/scripts/dump_split.py \
-    --jsonl outputs/teacher_dataset_v11.jsonl \
+    --jsonl dataset/teacher_labels/teacher_dataset_v11.jsonl \
     --config student_training/configs/train_lora.yaml \
     --out_dir outputs/checkpoints/e2_lora_100clips
 """

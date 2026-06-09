@@ -1,0 +1,186 @@
+==============================================================
+  RunPod Setup — E3a Epoch-7  |  Public Test Eval (667 clips)
+  GPU: RTX PRO 4500 (32GB) | Template: PyTorch 2.8 + CUDA 12.8
+  Network Volume: CCP_Based_MMLM_DataSet  →  /workspace
+  Estimated time: ~45 min  |  Cost: ~$0.55
+==============================================================
+
+--------------------------------------------------------------
+STEP 1 — Connect to pod, then verify workspace state
+--------------------------------------------------------------
+ls /workspace/Car-Crash-Prediction-Based-MMLM/
+# If the repo is there → go to STEP 2.
+# If missing → run:
+#   cd /workspace && git clone https://github.com/EviatarO/Car-Crash-Prediction-Based-MMLM.git
+
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull
+
+--------------------------------------------------------------
+STEP 2 — Fix HuggingFace cache  [CRITICAL — prevents disk crash]
+--------------------------------------------------------------
+rm -rf /workspace/.cache
+
+ls -la /root/.cache/huggingface
+# CASE A (no such dir)  → nothing to do, model downloads automatically on first run
+# CASE B (real dir)     → nothing to do, model already on local disk
+# CASE C (symlink → /workspace/...) → run:
+#   rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+
+--------------------------------------------------------------
+STEP 3 — Install dependencies  (skip if pip list already shows flash-attn)
+--------------------------------------------------------------
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
+
+--------------------------------------------------------------
+STEP 4 — Download Epoch-7 checkpoint from HF Hub
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface hf auth login
+# (paste your HF token when prompted — read access is enough)
+
+HF_HOME=/root/.cache/huggingface hf download EviatarO/e3a-epoch7-lora \
+    --repo-type model \
+    --local-dir /workspace/Car-Crash-Prediction-Based-MMLM/outputs/checkpoints/e3a-epoch7-lora
+
+ls /workspace/Car-Crash-Prediction-Based-MMLM/outputs/checkpoints/e3a-epoch7-lora/
+# Expected: adapter_config.json  adapter_model.safetensors  score_head.pt  README.md
+
+--------------------------------------------------------------
+STEP 5 — Upload Public frames + manifest  (from your LOCAL machine)
+--------------------------------------------------------------
+# Run these on YOUR LOCAL MACHINE (not the pod).
+# Replace <POD_IP> and <SSH_PORT> with your pod's SSH details.
+
+# Upload the 667 Public frame folders (~1.5 GB):
+rsync -avz --progress \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/dataset/test_public/" \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/dataset/test_public/ \
+    -e "ssh -p <SSH_PORT>"
+
+# Upload the HiRes manifest:
+scp -P <SSH_PORT> \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/dataset/manifests/test_manifest_public_hires.jsonl" \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/dataset/manifests/
+
+--------------------------------------------------------------
+STEP 6 — Verify upload
+--------------------------------------------------------------
+# Back on the pod:
+ls /workspace/Car-Crash-Prediction-Based-MMLM/dataset/test_public/ | wc -l
+# Expected: 667
+
+ls /workspace/Car-Crash-Prediction-Based-MMLM/dataset/test_public/00002_hires/ | wc -l
+# Expected: 16
+
+ls /workspace/Car-Crash-Prediction-Based-MMLM/dataset/manifests/test_manifest_public_hires.jsonl
+# Expected: file exists
+
+--------------------------------------------------------------
+STEP 7 — Check disk space before inference
+--------------------------------------------------------------
+du -sh /workspace/* 2>/dev/null | sort -rh
+df -h /workspace
+# Need ~3 GB free for output JSONL + safe margin
+# /root local disk has ~3.7 TB — no concern there
+
+--------------------------------------------------------------
+STEP 8 — Run inference  (~45 min, produces reasoning for all 667 clips)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
+mkdir -p outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained
+
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py \
+    --checkpoint  outputs/checkpoints/e3a-epoch7-lora \
+    --manifest    dataset/manifests/test_manifest_public_hires.jsonl \
+    --frames_root dataset/test_public \
+    --output      outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl \
+    --config      student_training/configs/train_lora.yaml \
+    > eval_public.log 2>&1 &
+
+# Watch progress:
+tail -f eval_public.log
+
+--------------------------------------------------------------
+STEP 9 — Monitor
+--------------------------------------------------------------
+ps aux | grep trained_eval
+nvidia-smi
+tail -50 eval_public.log
+
+# Check how many clips scored so far:
+wc -l outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl
+
+--------------------------------------------------------------
+STEP 10 — Verify result when done
+--------------------------------------------------------------
+wc -l outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl
+# Expected: 667
+
+# Quick AP sanity check:
+HF_HOME=/root/.cache/huggingface python -c "
+import json
+import numpy as np
+from sklearn.metrics import average_precision_score
+rows=[json.loads(l) for l in open('outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl') if l.strip()]
+yt=np.array([int(r['ground_truth']) for r in rows])
+ys=np.array([float(r['score']) for r in rows])
+print(f'n={len(rows)}  AP={average_precision_score(yt,ys):.4f}')
+"
+
+--------------------------------------------------------------
+STEP 11 — Download result to local machine
+--------------------------------------------------------------
+# Run on YOUR LOCAL MACHINE:
+scp -P <SSH_PORT> \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/"
+
+--------------------------------------------------------------
+STEP 12 — Run local analysis  (once JSONL is downloaded)
+--------------------------------------------------------------
+# From MMLM_AI/ on your local machine:
+
+# Stage 4 — metrics + Private vs Public comparison table:
+python student_training/scripts/compare_private_public.py
+
+# Stage 5 — per-clip review Excel with reasoning:
+python student_training/scripts/build_test_review_excel.py \
+    --jsonl     outputs/e3a_student_90clips/e3a_test_extracted/outputs/trained/e3a_test_public_epoch07.jsonl \
+    --out_xlsx  outputs/e3a_student_90clips/e3a_test_extracted/outputs/metrics/e3a_test_public_epoch07/e3a_test_public_epoch07_review.xlsx \
+    --title     "E3a Public Epoch7"
+
+--------------------------------------------------------------
+EXPECTED INFERENCE LOG (first few lines)
+--------------------------------------------------------------
+  Loading checkpoint: outputs/checkpoints/e3a-epoch7-lora
+  Loading base model: OpenGVLab/InternVL3_5-4B-Flash  dtype=torch.bfloat16
+  [internvl_lora] LoRA adapter loaded
+  ScoreHead loaded from score_head.pt
+  Manifest: dataset/manifests/test_manifest_public_hires.jsonl  (667 clips)
+  [1/667]  00002  score=0.XXXX  verdict=YES/NO  (X.Xs)
+  [2/667]  00009  score=0.XXXX  ...
+
+--------------------------------------------------------------
+DECISION AFTER ANALYSIS
+--------------------------------------------------------------
+  Replicates (Public AP ~ 0.74-0.78, within Private CI [0.688, 0.842]):
+    → Epoch-7 weights generalise. The 0.76 is real. Strong thesis evidence.
+
+  Drops (Public AP << 0.69):
+    → Investigate (possible lucky split or overfit). Report to supervisor.
+
+--------------------------------------------------------------
+NOTES
+--------------------------------------------------------------
+- GPU          : RTX PRO 4500, 32GB VRAM  (~$0.74/hr, ~45min = ~$0.55 total)
+- HF cache     : 7-9GB on /root/.cache/huggingface (local disk, NOT /workspace)
+- Workspace    : 20GB quota — checkpoint (~130MB) + frames (~1.5GB) + output (~30MB)
+- Checkpoint   : EviatarO/e3a-epoch7-lora on HF Hub  (adapter_model.safetensors + score_head.pt)
+- Frames       : 667 dirs × 16 frames, 1280x720, ~/dataset/test_public/
+- Manifest     : dataset/manifests/test_manifest_public_hires.jsonl  (frame_indices = [1..16])
+- Output JSONL : same schema as e3a_test_epoch07.jsonl
+                 fields: video_id, ground_truth, group, time_before_s,
+                         score, collision_verdict, verdict_reasoning
+==============================================================

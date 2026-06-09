@@ -16,7 +16,7 @@ evaluate_metrics.py and zero_shot_to_xlsx.py scripts work on the output.
 Usage (on RunPod after training):
   python student_training/scripts/trained_eval.py \\
     --checkpoint  outputs/checkpoints/e2_lora_100clips/step_000300 \\
-    --manifest    outputs/test_manifest_private.jsonl \\
+    --manifest    dataset/manifests/test_manifest_private.jsonl \\
     --frames_root /data/test_frames256 \\
     --output      outputs/trained/e2_lora_100clips_test.jsonl \\
     --config      student_training/configs/train_lora.yaml \\

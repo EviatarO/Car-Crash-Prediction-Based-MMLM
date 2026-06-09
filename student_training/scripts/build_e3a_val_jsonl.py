@@ -38,7 +38,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 SRC  = REPO / "dataset/teacher_dataset_GT_self_imply.xlsx"
 FRAMES_BASE = REPO / "dataset/train"
-OUT  = REPO / "outputs/val_e3a.jsonl"
+OUT  = REPO / "dataset/manifests/val_e3a.jsonl"
 
 WINDOW_SIZE = 16
 

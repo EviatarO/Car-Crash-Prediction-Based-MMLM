@@ -26,7 +26,7 @@ Hardware: RunPod RTX 4090 (24 GB VRAM)
 
 Usage:
   python student_training/scripts/train_lora.py \\
-    --jsonl       outputs/teacher_dataset_v11.jsonl \\
+    --jsonl       dataset/teacher_labels/teacher_dataset_v11.jsonl \\
     --frames_root /data/train_frames256 \\
     --config      student_training/configs/train_lora.yaml \\
     [--resume]    # continue from latest checkpoint in output_dir
@@ -34,7 +34,7 @@ Usage:
 After training, run the SUGGESTED checkpoint through:
   python student_training/scripts/trained_eval.py \\
     --checkpoint outputs/checkpoints/e2_lora_100clips/step_XXXXXX \\
-    --manifest   outputs/test_manifest_private.jsonl \\
+    --manifest   dataset/manifests/test_manifest_private.jsonl \\
     --frames_root /data/test_frames256 \\
     --output     outputs/trained/e2_lora_100clips_test.jsonl
 """
@@ -325,7 +325,7 @@ def print_epoch_table(epoch_log: list):
         print(f"\n  Run with:")
         print(f"    python student_training/scripts/trained_eval.py \\")
         print(f"      --checkpoint {best_entry['ckpt_dir']} \\")
-        print(f"      --manifest   outputs/test_manifest_private.jsonl \\")
+        print(f"      --manifest   dataset/manifests/test_manifest_private.jsonl \\")
         print(f"      --frames_root /data/test_frames256 \\")
         print(f"      --output     outputs/trained/e2_best_ep{best_entry['epoch']}_test.jsonl")
 

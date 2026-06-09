@@ -1,6 +1,6 @@
 """APO v11scale data loader.
 
-Reads `outputs/teacher_dataset_v11.jsonl` and builds three splits:
+Reads `dataset/teacher_labels/teacher_dataset_v11.jsonl` and builds three splits:
   - Train: 31 v11 Pass-1 failures (clean, no GT overlap)
   - Regression: 67 v11 Pass-1 successes (clean, no GT overlap)
   - Val: 18 GT clips from teacher_dataset_GT_self_imply.xlsx

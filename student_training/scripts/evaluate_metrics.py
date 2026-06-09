@@ -21,8 +21,8 @@ GRAPHS SAVED:
 
 Usage:
   python student_training/scripts/evaluate_metrics.py \
-    --results  outputs/zero_shot/zero_shot_teacher_100.jsonl \
-    --out_dir  outputs/metrics/zero_shot_teacher_100 \
+    --results  outputs/e0_zero_shot_baseline/zero_shot_teacher_100.jsonl \
+    --out_dir  outputs/e0_zero_shot_baseline/metrics/zero_shot_teacher_100 \
     [--tag     "Zero-Shot Baseline"]      # label used in graph titles
     [--threshold 0.5]                     # decision threshold for binary metrics
 """

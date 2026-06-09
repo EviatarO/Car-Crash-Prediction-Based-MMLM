@@ -21,6 +21,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ import cv2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Defaults reproduce the original Private-set behaviour; override via CLI for Public.
 SRC_VIDEOS = Path(
     r"C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis"
     r"\Data-Centric-Crash-Prediction-Using-3LC-and-MViT\src\Nexar_DataSet\test"
@@ -77,6 +79,21 @@ def _extract_one(vid: str, frame_indices: list[int]) -> tuple[int, int, int]:
 
 
 def main() -> None:
+    global SRC_VIDEOS, DST_ROOT, MANIFEST_IN, MANIFEST_OUT, FAILURES_JSON
+    ap = argparse.ArgumentParser(description="Extract native-res frames for a test manifest")
+    ap.add_argument("--manifest_in", default=str(MANIFEST_IN))
+    ap.add_argument("--dst_root", default=str(DST_ROOT))
+    ap.add_argument("--manifest_out", default=str(MANIFEST_OUT))
+    ap.add_argument("--failures_json", default=str(FAILURES_JSON))
+    ap.add_argument("--src_videos", default=str(SRC_VIDEOS))
+    args = ap.parse_args()
+    SRC_VIDEOS = Path(args.src_videos)
+    DST_ROOT = Path(args.dst_root)
+    MANIFEST_IN = Path(args.manifest_in)
+    MANIFEST_OUT = Path(args.manifest_out)
+    FAILURES_JSON = Path(args.failures_json)
+    MANIFEST_OUT.parent.mkdir(parents=True, exist_ok=True)
+
     if not MANIFEST_IN.exists():
         print(f"[ERROR] Manifest not found: {MANIFEST_IN}")
         sys.exit(1)

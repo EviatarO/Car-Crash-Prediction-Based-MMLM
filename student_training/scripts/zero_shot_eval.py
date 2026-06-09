@@ -16,12 +16,12 @@ TWO EVALUATION MODES:
   1. Teacher clips (train set baseline):
        --manifest outputs/manifest_v11_100clips.jsonl
        --frames_root <path>/train_frames256
-       --output outputs/zero_shot/zero_shot_teacher_100.jsonl
+       --output outputs/e0_zero_shot_baseline/zero_shot_teacher_100.jsonl
 
   2. Test clips (held-out test set):
-       --manifest outputs/test_manifest_private.jsonl
+       --manifest dataset/manifests/test_manifest_private.jsonl
        --frames_root <path>/test_frames256
-       --output outputs/zero_shot/zero_shot_test.jsonl
+       --output outputs/e0_zero_shot_baseline/zero_shot_test.jsonl
 
 REQUIREMENTS:
   GPU with >= 10GB VRAM (RunPod RTX 4090 recommended)
@@ -31,7 +31,7 @@ Usage:
   python student_training/scripts/zero_shot_eval.py \
     --manifest     outputs/manifest_v11_100clips.jsonl \
     --frames_root  /data/train_frames256 \
-    --output       outputs/zero_shot/zero_shot_teacher_100.jsonl \
+    --output       outputs/e0_zero_shot_baseline/zero_shot_teacher_100.jsonl \
     --config       student_training/configs/zero_shot.yaml \
     [--load_in_4bit]   # force 4-bit quantization
     [--device      cuda]

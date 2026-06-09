@@ -39,7 +39,7 @@ import pandas as pd
 REPO    = Path(__file__).resolve().parents[2]
 SRC     = REPO / "outputs/prompt_bakeoff/v11_100clips_resampled/final_combined.jsonl"
 VAL_XLSX = REPO / "dataset/teacher_dataset_GT_self_imply.xlsx"
-OUT     = REPO / "outputs/teacher_dataset_e3a.jsonl"
+OUT     = REPO / "dataset/teacher_labels/teacher_dataset_e3a.jsonl"
 
 WINDOW_SIZE = 16
 

@@ -27,7 +27,7 @@ Usage:
     --test_csv      <path>/test.csv \
     --metadata_csv  <path>/test_frames_metadata.csv \
     --frames_root   <path>/test_frames256 \
-    --output        outputs/test_manifest_private.jsonl \
+    --output        dataset/manifests/test_manifest_private.jsonl \
     [--usage        Private]        # default: Private
     [--window_size  16]             # default: 16
     [--stride       4]              # default: 4
