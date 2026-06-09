@@ -332,6 +332,43 @@ def print_epoch_table(epoch_log: list):
     print(f"{'='*75}\n")
 
 
+# ── Warm-start (load adapter + score_head as initialization) ──────────────────
+
+def warm_start_from(model, init_dir: str):
+    """Load LoRA adapter weights + ScoreHead from a prior checkpoint into the
+    freshly-built (trainable) model, WITHOUT touching requires_grad flags.
+    Mirrors how save_checkpoint wrote them (adapter via save_pretrained, score_head
+    via torch.save). Used for warm-starting e3b from the e3a epoch-7 checkpoint."""
+    import os
+    from peft import set_peft_model_state_dict
+
+    init_dir = str(init_dir)
+    # ---- adapter ----
+    adapter_sd = None
+    sft = os.path.join(init_dir, "adapter_model.safetensors")
+    binf = os.path.join(init_dir, "adapter_model.bin")
+    if os.path.exists(sft):
+        from safetensors.torch import load_file
+        adapter_sd = load_file(sft)
+    elif os.path.exists(binf):
+        adapter_sd = torch.load(binf, map_location="cpu")
+    else:
+        raise FileNotFoundError(f"No adapter_model.* in {init_dir}")
+    res = set_peft_model_state_dict(model.model.language_model, adapter_sd)
+    print(f"[warm-start] adapter loaded from {init_dir} "
+          f"(unexpected={getattr(res, 'unexpected_keys', '?')})")
+
+    # ---- score head ----
+    sh_path = os.path.join(init_dir, "score_head.pt")
+    if os.path.exists(sh_path):
+        sh_state = torch.load(sh_path, map_location="cpu")
+        model.score_head.load_state_dict(sh_state)
+        print(f"[warm-start] score_head loaded from {sh_path}")
+    else:
+        print(f"[warm-start] WARNING: score_head.pt not found in {init_dir} — "
+              f"keeping fresh ScoreHead")
+
+
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(args, cfg: dict):
@@ -341,6 +378,8 @@ def train(args, cfg: dict):
     # CLI --output_dir overrides the config value
     if getattr(args, "output_dir", None):
         cfg["output_dir"] = args.output_dir
+    if getattr(args, "num_epochs", None):
+        cfg["num_epochs"] = args.num_epochs
 
     val_src = args.val_jsonl if getattr(args, "val_jsonl", None) else f"stratified {cfg.get('val_split',0.2)*100:.0f}% split"
 
@@ -363,6 +402,14 @@ def train(args, cfg: dict):
         cfg        = cfg,
         device_map = "auto" if device == "cuda" else "cpu",
     )
+
+    # Warm-start (e.g. e3b from e3a epoch-7) — load adapter + score_head as init.
+    if getattr(args, "init_from", None):
+        if args.resume:
+            print("[warm-start] --resume given; skipping --init_from (resume takes precedence)")
+        else:
+            print(f"\nWarm-starting from: {args.init_from}")
+            warm_start_from(model, args.init_from)
 
     # Gradient checkpointing on LLM backbone
     # When LoRA is applied, the base model's embedding layer is frozen.
@@ -711,6 +758,12 @@ def main():
                         help="Override output_dir from config (e.g. outputs/checkpoints/e3a_lora_89clips)")
     parser.add_argument("--resume",      action="store_true",
                         help="Resume from latest checkpoint in output_dir")
+    parser.add_argument("--init_from",   default=None,
+                        help="Warm-start: load LoRA adapter + score_head.pt from this "
+                             "checkpoint dir as INITIALIZATION (fresh optimizer/scheduler/"
+                             "step=0). Different from --resume, which continues a run.")
+    parser.add_argument("--num_epochs",  type=int, default=None,
+                        help="Override num_epochs from config (e.g. 25 for warm-start).")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)

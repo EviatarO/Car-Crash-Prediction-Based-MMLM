@@ -1,0 +1,332 @@
+==============================================================
+  RunPod — E3b Full Runbook  (setup → train → dual eval)
+  GPU        : RTX 5090 (32 GB)  |  Template: RunPod PyTorch 2.8.0 (CUDA 12.8)
+  Volume     : CCP_Based_MMLM_DataSet  →  /workspace
+  Train set  : 267 clips (126 YES / 141 NO, 3 horizons), warm-start e3a epoch-7
+  Est. total : ~4-5 h  |  ~$4-6
+==============================================================
+
+OVERVIEW
+--------
+  STAGE 1  Setup            (Steps 1-4)   ~5 min
+  STAGE 2  Frames + verify  (Steps 5-7)   ~10 min
+  STAGE 3  Training         (Steps 8-9)   ~3-4 h
+  STAGE 4  Dual eval        (Steps 10-12) ~30 min
+  STAGE 5  Download results (Step 13)     ~5 min  [on LOCAL machine]
+
+
+==============================================================
+STAGE 1 — SETUP
+==============================================================
+
+--------------------------------------------------------------
+STEP 1 — Sync repo
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull
+
+# Confirm e3b files landed:
+ls dataset/teacher_labels/teacher_dataset_e3b.jsonl   # 267-clip train set
+ls dataset/manifests/val_e3a.jsonl                    # 18-clip val set
+grep -c "init_from" student_training/scripts/train_lora.py  # must be >0
+
+--------------------------------------------------------------
+STEP 2 — HF cache fix  [CRITICAL — keeps 7-9 GB off the 20 GB quota]
+--------------------------------------------------------------
+rm -rf /workspace/.cache
+
+ls -la /root/.cache/huggingface
+# CASE A (no such dir)     → nothing to do; model downloads on first run
+# CASE B (real directory)  → nothing to do; model already on local disk
+# CASE C (symlink → /workspace/...) → run:
+#   rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+
+--------------------------------------------------------------
+STEP 3 — Dependencies  (skip if already installed)
+--------------------------------------------------------------
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
+pip install huggingface_hub     # if missing
+
+--------------------------------------------------------------
+STEP 4 — Download warm-start checkpoint  (e3a epoch-7, ~130 MB)
+--------------------------------------------------------------
+# Login (read token is enough):
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import login
+login(token='YOUR_HF_TOKEN')
+print('logged in')
+"
+
+# Download:
+HF_HOME=/root/.cache/huggingface hf download EviatarO/e3a-epoch7-lora \
+    --repo-type model \
+    --local-dir outputs/checkpoints/e3a-epoch7-lora
+
+ls outputs/checkpoints/e3a-epoch7-lora/
+# Expected: adapter_config.json  adapter_model.safetensors  score_head.pt
+
+
+==============================================================
+STAGE 2 — FRAMES + VERIFY
+==============================================================
+
+--------------------------------------------------------------
+STEP 5 — Pull new e3b frame dirs from HF Hub  (~490 MB zip)
+--------------------------------------------------------------
+# Download zip (same HF token used in Step 4):
+HF_HOME=/root/.cache/huggingface hf download EviatarO/e3b-tte-frames \
+    e3b_tte_frames_upload.zip \
+    --repo-type dataset \
+    --local-dir /tmp/
+
+# Unzip into the training frames root:
+unzip -o /tmp/e3b_tte_frames_upload.zip -d /workspace/data/train_HiRes/
+
+# Free the tmp space:
+rm /tmp/e3b_tte_frames_upload.zip
+
+--------------------------------------------------------------
+STEP 6 — Verify all frame dirs are present
+--------------------------------------------------------------
+# New positive dirs (84 total across 3 horizons):
+ls -d /workspace/data/train_HiRes/*_tte05 2>/dev/null | wc -l   # expect 28
+ls -d /workspace/data/train_HiRes/*_tte10 2>/dev/null | wc -l   # expect 28
+ls -d /workspace/data/train_HiRes/*_tte15 2>/dev/null | wc -l   # expect 28
+
+# New negative dirs (94 total):
+ls -d /workspace/data/train_HiRes/*_neg4  2>/dev/null | wc -l   # expect 47
+ls -d /workspace/data/train_HiRes/*_neg8  2>/dev/null | wc -l   # expect 47
+
+# Existing 89 base dirs (from e3a):
+ls -d /workspace/data/train_HiRes/*_hires 2>/dev/null | wc -l   # expect >=89
+
+# Spot-check frames in one dir:
+ls /workspace/data/train_HiRes/00065_hires_tte05/ | wc -l       # expect 16
+
+--------------------------------------------------------------
+STEP 7 — Disk space check
+--------------------------------------------------------------
+du -sh /workspace/* 2>/dev/null | sort -rh
+df -h /workspace
+
+# Healthy state before training:
+#   ~5-7 G  /workspace/Car-Crash-Prediction-Based-MMLM  (repo + new ckpt dir)
+#   ~3-4 G  /workspace/data                             (train_HiRes + test frames)
+#   NO      /workspace/.cache                           (must be absent)
+#   Free    >= 8 G   (checkpoints write ~190 MB each; 25 epochs = ~4.75 GB worst case)
+
+
+==============================================================
+STAGE 3 — TRAINING
+==============================================================
+
+--------------------------------------------------------------
+STEP 8 — Launch training  (warm-start from e3a epoch-7, 25 epochs)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+HF_HOME=/root/.cache/huggingface \
+nohup python student_training/scripts/train_lora.py \
+    --jsonl       dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+    --val_jsonl   dataset/manifests/val_e3a.jsonl \
+    --frames_root /workspace/data/train_HiRes \
+    --output_dir  outputs/checkpoints/e3b_lora_267clips \
+    --config      student_training/configs/train_lora.yaml \
+    --init_from   outputs/checkpoints/e3a-epoch7-lora \
+    --num_epochs  25 \
+    > train_e3b.log 2>&1 &
+
+echo "PID: $!"
+tail -f train_e3b.log
+
+# Expected first lines:
+#   Warm-starting from: outputs/checkpoints/e3a-epoch7-lora
+#   [warm-start] adapter loaded    [warm-start] score_head loaded
+#   CollisionDataset: 267 records ...
+#   Split: 267 train / 18 val (separate val JSONL)
+#   Schedule: 267 train clips x 25 epochs -> XX steps/epoch -> XXX total steps
+
+--------------------------------------------------------------
+STEP 9 — Monitor during training
+--------------------------------------------------------------
+ps aux | grep train_lora          # confirm process is alive
+nvidia-smi                        # GPU util + VRAM usage
+tail -50 train_e3b.log
+cat outputs/checkpoints/e3b_lora_267clips/epoch_metrics.jsonl | tail -8
+
+# --- RESUME AFTER CRASH ---
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# HF_HOME=/root/.cache/huggingface \
+# nohup python student_training/scripts/train_lora.py \
+#     --jsonl       dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+#     --val_jsonl   dataset/manifests/val_e3a.jsonl \
+#     --frames_root /workspace/data/train_HiRes \
+#     --output_dir  outputs/checkpoints/e3b_lora_267clips \
+#     --config      student_training/configs/train_lora.yaml \
+#     --resume \
+#     > train_e3b.log 2>&1 &
+
+# --- DISK QUOTA EMERGENCY (errno 122) ---
+# 1. mkdir -p /root/.cache && mv /workspace/.cache/huggingface /root/.cache/huggingface
+# 2. rm -rf /workspace/.cache
+# 3. Keep only best 2 + latest checkpoint; rm -rf others
+# 4. Resume with --resume flag above
+
+# --- FIND BEST CHECKPOINT (run at any time during or after training) ---
+python -c "
+import json
+rows = [json.loads(l) for l in open('outputs/checkpoints/e3b_lora_267clips/epoch_metrics.jsonl')]
+best = max(rows, key=lambda r: r.get('val_ap', 0))
+print(f'Best  val_ap={best[\"val_ap\"]:.3f}  epoch={best[\"epoch\"]}  step=step_{best[\"step\"]:06d}')
+for r in sorted(rows, key=lambda r: r.get('val_ap',0), reverse=True)[:5]:
+    print(f'  ep={r[\"epoch\"]:>2}  val_ap={r[\"val_ap\"]:.3f}  val_auc={r.get(\"val_auc\",0):.3f}  step=step_{r[\"step\"]:06d}')
+"
+# NOTE THE BEST STEP — used in STEP 10 below.
+
+
+==============================================================
+STAGE 4 — DUAL TEST EVAL  (Private 677 + Public 667)
+==============================================================
+# Replace BEST_STEP below with the step string from Step 9,  e.g. step_000175
+
+BEST_STEP=step_XXXXXX     # <-- SET THIS
+
+--------------------------------------------------------------
+STEP 10 — Verify test frame roots exist on the pod
+--------------------------------------------------------------
+# Private test frames:
+ls /workspace/data/test_HiRes/ | wc -l       # expected: 677
+# If the above fails, try:
+# ls /workspace/data/train_HiRes/ | grep -v "_tte\|_neg" | wc -l
+# (private frames may share the same dir as train — check with: ls /workspace/data/)
+
+# Public test frames:
+ls /workspace/data/test_public/ | wc -l      # expected: 667
+# spot-check:
+ls /workspace/data/test_public/00002_hires/ | wc -l   # expected: 16
+
+--------------------------------------------------------------
+STEP 11 — Run Private eval  (677 clips, ~20-25 min)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+mkdir -p outputs/e3b_student_267clips_tte/e3b_test_private/outputs/trained
+
+HF_HOME=/root/.cache/huggingface \
+nohup python student_training/scripts/trained_eval.py \
+    --checkpoint  outputs/checkpoints/e3b_lora_267clips/${BEST_STEP} \
+    --manifest    dataset/manifests/test_manifest_hires.jsonl \
+    --frames_root /workspace/data/test_HiRes \
+    --output      outputs/e3b_student_267clips_tte/e3b_test_private/outputs/trained/e3b_test_private_${BEST_STEP}.jsonl \
+    --config      student_training/configs/train_lora.yaml \
+    > eval_private_e3b.log 2>&1 &
+
+tail -f eval_private_e3b.log
+# Done when: 677/677 processed
+
+--------------------------------------------------------------
+STEP 12 — Run Public eval  (667 clips, ~20-25 min)
+--------------------------------------------------------------
+mkdir -p outputs/e3b_student_267clips_tte/e3b_test_public/outputs/trained
+
+HF_HOME=/root/.cache/huggingface \
+nohup python student_training/scripts/trained_eval.py \
+    --checkpoint  outputs/checkpoints/e3b_lora_267clips/${BEST_STEP} \
+    --manifest    dataset/manifests/test_manifest_public_hires.jsonl \
+    --frames_root /workspace/data/test_public \
+    --output      outputs/e3b_student_267clips_tte/e3b_test_public/outputs/trained/e3b_test_public_${BEST_STEP}.jsonl \
+    --config      student_training/configs/train_lora.yaml \
+    > eval_public_e3b.log 2>&1 &
+
+tail -f eval_public_e3b.log
+# Done when: 667/667 processed
+
+# Quick AP sanity check for both:
+python -c "
+import json, numpy as np
+from sklearn.metrics import average_precision_score, roc_auc_score
+
+for tag, path in [
+    ('Private', 'outputs/e3b_student_267clips_tte/e3b_test_private/outputs/trained/e3b_test_private_${BEST_STEP}.jsonl'),
+    ('Public',  'outputs/e3b_student_267clips_tte/e3b_test_public/outputs/trained/e3b_test_public_${BEST_STEP}.jsonl'),
+]:
+    try:
+        rows = [json.loads(l) for l in open(path) if l.strip()]
+        yt = np.array([int(r['ground_truth']) for r in rows])
+        ys = np.array([float(r['score']) for r in rows])
+        print(f'{tag} n={len(rows)}  AP={average_precision_score(yt,ys):.4f}  AUC={roc_auc_score(yt,ys):.4f}')
+    except FileNotFoundError:
+        print(f'{tag}: not ready yet')
+"
+
+
+==============================================================
+STAGE 5 — DOWNLOAD RESULTS  [run on LOCAL MACHINE]
+==============================================================
+
+--------------------------------------------------------------
+STEP 13 — Download both eval JSONLs + epoch_metrics
+--------------------------------------------------------------
+# Replace <POD_IP> and <PORT> with your pod SSH details.
+
+# Private eval result:
+scp -P <PORT> \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3b_student_267clips_tte/e3b_test_private/outputs/trained/e3b_test_private_<BEST_STEP>.jsonl \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3b_student_267clips_tte/e3b_test_private/outputs/trained/"
+
+# Public eval result:
+scp -P <PORT> \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3b_student_267clips_tte/e3b_test_public/outputs/trained/e3b_test_public_<BEST_STEP>.jsonl \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3b_student_267clips_tte/e3b_test_public/outputs/trained/"
+
+# Training metrics (always useful):
+scp -P <PORT> \
+    root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/checkpoints/e3b_lora_267clips/epoch_metrics.jsonl \
+    "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/checkpoints/e3b_lora_267clips/"
+
+# Or use HF Hub to push the best checkpoint (then pull locally):
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import login, HfApi
+login(token='YOUR_HF_TOKEN')
+api = HfApi()
+api.create_repo('e3b-best-lora', repo_type='model', private=True, exist_ok=True)
+api.upload_folder(
+    folder_path='outputs/checkpoints/e3b_lora_267clips/<BEST_STEP>',
+    repo_id='EviatarO/e3b-best-lora',
+    repo_type='model'
+)
+print('checkpoint pushed')
+"
+
+
+==============================================================
+WHAT TO REPORT BACK AFTER TRAINING
+==============================================================
+Tell me:
+  1. Best val_ap + epoch + step  (from Step 9 python snippet)
+  2. Top-5 val_ap epochs table
+  3. Private AP + AUC  (from Step 12 quick check)
+  4. Public  AP + AUC  (from Step 12 quick check)
+
+Then we run:
+  - Tricolor review xlsx for Private + Public
+  - e3a vs e3b AP comparison table
+  - Paired multi-horizon slope test (separate script)
+
+
+==============================================================
+NOTES
+==============================================================
+GPU        : RTX 5090, 32 GB  (~$1.50-2/hr × 4h = ~$6-8 total incl. eval)
+HF cache   : InternVL3.5-4B-Flash = 7-9 GB → must stay on /root, NOT /workspace
+Workspace  : 20 GB quota:  repo ~2G + train_HiRes ~3G + test frames ~3G
+             + checkpoints ~5G (25 × 190 MB) + output JSONLs ~50 MB
+             = ~13-14 G used  →  ~6 G free  (tight; delete old ckpts if needed)
+Manifests  : Private 677  →  dataset/manifests/test_manifest_hires.jsonl
+             Public  667  →  dataset/manifests/test_manifest_public_hires.jsonl
+             Val      18  →  dataset/manifests/val_e3a.jsonl
+Train JSONL: dataset/teacher_labels/teacher_dataset_e3b.jsonl  (267: 126Y/141N)
+Warm-start : e3a epoch-7 adapter + score_head loaded; fresh optimizer at step=0
+Epochs     : 25 (bump to 50 via --num_epochs 50 if val_ap still rising at ep 25)
+==============================================================

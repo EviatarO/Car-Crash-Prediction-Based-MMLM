@@ -1,0 +1,127 @@
+==============================================================
+  RunPod — e3b Multi-Horizon Retrain (267 clips, warm-start)
+  GPU: RTX PRO 4500 / RTX 5090 (32GB) | PyTorch 2.8 + CUDA 12.8
+  Network Volume: CCP_Based_MMLM_DataSet  ->  /workspace
+  Warm-start from: EviatarO/e3a-epoch7-lora
+  Est: ~3-4 h training (25 epochs) | ~$2.5-3
+==============================================================
+
+--------------------------------------------------------------
+STEP 1 — Connect, sync repo (gets teacher_dataset_e3b.jsonl + --init_from)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull
+# Confirm the new files arrived:
+ls dataset/teacher_labels/teacher_dataset_e3b.jsonl        # 267-clip train set
+grep -c init_from student_training/scripts/train_lora.py   # >0 = warm-start support present
+
+--------------------------------------------------------------
+STEP 2 — HF cache fix  [CRITICAL]
+--------------------------------------------------------------
+rm -rf /workspace/.cache
+ls -la /root/.cache/huggingface
+# symlink -> /workspace ?  =>  rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+
+--------------------------------------------------------------
+STEP 3 — Dependencies (skip if already installed)
+--------------------------------------------------------------
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
+pip install huggingface_hub        # if missing
+
+--------------------------------------------------------------
+STEP 4 — Warm-start checkpoint (e3a epoch-7)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface hf auth login        # paste token (read scope ok)
+# (or: python -c "from huggingface_hub import login; login(token='YOUR_TOKEN')")
+
+HF_HOME=/root/.cache/huggingface hf download EviatarO/e3a-epoch7-lora \
+    --repo-type model \
+    --local-dir outputs/checkpoints/e3a-epoch7-lora
+ls outputs/checkpoints/e3a-epoch7-lora/
+# Expected: adapter_config.json  adapter_model.safetensors  score_head.pt
+
+--------------------------------------------------------------
+STEP 5 — Upload the 178 NEW frame dirs  (~480 MB)
+--------------------------------------------------------------
+# ON YOUR LOCAL MACHINE (from MMLM_AI/): push the zip to HF as a private dataset
+python -c "
+from huggingface_hub import login, HfApi
+login(token='YOUR_HF_TOKEN')
+api = HfApi()
+api.create_repo('e3b-tte-frames', repo_type='dataset', private=True, exist_ok=True)
+api.upload_file(path_or_fileobj='dataset/e3b_tte_frames_upload.zip',
+                path_in_repo='e3b_tte_frames_upload.zip',
+                repo_id='EviatarO/e3b-tte-frames', repo_type='dataset')
+print('uploaded')
+"
+
+# ON THE POD: pull + unzip into the training frames root
+HF_HOME=/root/.cache/huggingface hf download EviatarO/e3b-tte-frames \
+    e3b_tte_frames_upload.zip --repo-type dataset --local-dir /tmp/
+unzip -o /tmp/e3b_tte_frames_upload.zip -d /workspace/data/train_HiRes/
+
+--------------------------------------------------------------
+STEP 6 — Verify frames present
+--------------------------------------------------------------
+# New dirs (178): *_tte05/10/15 (84) + *_neg4/neg8 (94)
+ls -d /workspace/data/train_HiRes/*_tte05 /workspace/data/train_HiRes/*_tte10 \
+      /workspace/data/train_HiRes/*_tte15 2>/dev/null | wc -l   # expect 84
+ls -d /workspace/data/train_HiRes/*_neg4 /workspace/data/train_HiRes/*_neg8 2>/dev/null | wc -l  # expect 94
+ls /workspace/data/train_HiRes/00065_hires_tte05/ | wc -l       # expect 16
+# Existing 89 "{id}_hires" dirs should already be there from e3a.
+
+--------------------------------------------------------------
+STEP 7 — Launch training (warm-start, 25 epochs)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/train_lora.py \
+    --jsonl       dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+    --val_jsonl   dataset/manifests/val_e3a.jsonl \
+    --frames_root /workspace/data/train_HiRes \
+    --output_dir  outputs/checkpoints/e3b_lora_267clips \
+    --config      student_training/configs/train_lora.yaml \
+    --init_from   outputs/checkpoints/e3a-epoch7-lora \
+    --num_epochs  25 \
+    > train_e3b.log 2>&1 &
+
+tail -f train_e3b.log
+
+# Expected startup lines:
+#   Warm-starting from: outputs/checkpoints/e3a-epoch7-lora
+#   [warm-start] adapter loaded ...   [warm-start] score_head loaded ...
+#   CollisionDataset: 267 records ...
+#   Split: 267 train / 18 val (separate val JSONL: dataset/manifests/val_e3a.jsonl)
+
+--------------------------------------------------------------
+STEP 8 — Monitor
+--------------------------------------------------------------
+ps aux | grep train_lora
+nvidia-smi
+tail -50 train_e3b.log
+cat outputs/checkpoints/e3b_lora_267clips/epoch_metrics.jsonl | tail -8
+
+--------------------------------------------------------------
+STEP 9 — Best checkpoint (after training)
+--------------------------------------------------------------
+python -c "
+import json
+rows=[json.loads(l) for l in open('outputs/checkpoints/e3b_lora_267clips/epoch_metrics.jsonl')]
+best=max(rows, key=lambda r: r.get('val_ap',0))
+print(f\"Best val_ap epoch={best['epoch']} val_ap={best['val_ap']:.3f} step=step_{best['step']:06d}\")
+"
+# -> tell me the best step; we then run the dual test + paired slope eval.
+
+--------------------------------------------------------------
+NOTES
+--------------------------------------------------------------
+- Train set : dataset/teacher_labels/teacher_dataset_e3b.jsonl (267: 126 YES / 141 NO,
+              horizons 42/42/42 + 47/47/47), reason = final_reasoning2 (harmonized).
+- Val set   : dataset/manifests/val_e3a.jsonl (18, unchanged) — checkpoint selection.
+- Warm-start: --init_from loads e3a epoch-7 adapter + score_head; fresh optimizer/step=0.
+- Epochs    : 25 (warm-start). Bump to 50 if you want the full overfit curve.
+- Frames    : new dirs in train_HiRes; existing 89 "{id}_hires" already present.
+- After best ckpt -> Stage 5/6 (dual test 677+667, paired slope) run separately.
+==============================================================
