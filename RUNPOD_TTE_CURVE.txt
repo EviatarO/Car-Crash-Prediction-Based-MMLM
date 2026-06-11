@@ -1,0 +1,278 @@
+==============================================================
+  RunPod — TTE Anticipation Curve Runbook
+  GPU        : RTX PRO 4500 (inference only, ~$0.74/h)
+  Template   : RunPod PyTorch 2.8.0 (CUDA 12.8)
+  Volume     : CCP_Based_MMLM_DataSet  →  /workspace
+  Task       : 6 inference runs (e3a+e3b × Private+Public TTE curve + val + train)
+  Est. total : ~2.5-3 h  |  ~$2-3
+==============================================================
+
+OVERVIEW
+--------
+  STAGE A  Setup                    (~5 min)
+  STAGE B  Download frames + ckpts  (~15 min)
+  STAGE C  6 Inference runs         (~2-2.5 h)
+  STAGE D  Upload results to HF     (~5 min)
+  STAGE E  Download to local        [on LOCAL machine]
+
+Dataset on HF:  EviatarO/test-tte-curve-frames   (private)
+Checkpoints:    EviatarO/e3a-epoch7-lora          (private)
+                EviatarO/e3b-ep3-lora             (private, use step_000099/)
+
+
+==============================================================
+STAGE A — SETUP
+==============================================================
+
+--------------------------------------------------------------
+STEP A1 — Sync repo
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull
+
+# Confirm new files landed:
+ls student_training/scripts/extract_tte_curve_test_frames.py
+ls student_training/scripts/analyze_tte_curve.py
+ls dataset/manifests/test_tte_curve_private_manifest.jsonl
+ls dataset/manifests/test_tte_curve_public_manifest.jsonl
+
+--------------------------------------------------------------
+STEP A2 — HF cache fix  [CRITICAL]
+--------------------------------------------------------------
+rm -rf /workspace/.cache
+ls /root/.cache/huggingface   # should exist with model weights
+
+--------------------------------------------------------------
+STEP A3 — HF login  (interactive — avoids placeholder-token trap)
+--------------------------------------------------------------
+hf auth login
+# paste your real token when prompted (starts with hf_...)
+# → "Login successful"
+
+--------------------------------------------------------------
+STEP A4 — Disk check before starting
+--------------------------------------------------------------
+df -h /workspace
+# Need >= 10 GB free for: frames zip (~4 GB) + checkpoints (~260 MB) + result JSONLs
+
+
+==============================================================
+STAGE B — DOWNLOAD FRAMES + CHECKPOINTS
+==============================================================
+
+--------------------------------------------------------------
+STEP B1 — Download TTE curve frames  (~4 GB zip)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface hf download EviatarO/test-tte-curve-frames test_tte_curve_upload.zip --repo-type dataset --local-dir /tmp/
+
+# Unzip into /workspace/data/ (preserves private/ and public/ subfolders):
+unzip -o /tmp/test_tte_curve_upload.zip -d /workspace/data/
+
+# Free tmp space:
+rm /tmp/test_tte_curve_upload.zip
+
+--------------------------------------------------------------
+STEP B2 — Verify frame dirs
+--------------------------------------------------------------
+ls /workspace/data/test_tte_curve/private/ | wc -l   # expect 710
+ls /workspace/data/test_tte_curve/public/  | wc -l   # expect 710
+
+# Spot-check:
+ls /workspace/data/test_tte_curve/private/00001_hires_tte10/ | wc -l   # expect 16
+ls /workspace/data/test_tte_curve/public/00002_hires_tte30/  | wc -l   # expect 16
+
+# Each dir should have frame_00001.jpg through frame_00016.jpg
+
+--------------------------------------------------------------
+STEP B3 — Download e3a checkpoint (if not already on volume)
+--------------------------------------------------------------
+ls /workspace/Car-Crash-Prediction-Based-MMLM/outputs/checkpoints/e3a-epoch7-lora/adapter_config.json 2>/dev/null && echo "EXISTS" || HF_HOME=/root/.cache/huggingface hf download EviatarO/e3a-epoch7-lora --repo-type model --local-dir outputs/checkpoints/e3a-epoch7-lora
+
+--------------------------------------------------------------
+STEP B4 — Download e3b checkpoint step_000099
+--------------------------------------------------------------
+mkdir -p outputs/checkpoints/e3b-ep3-lora
+
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import login, snapshot_download
+import os
+snapshot_download(
+    repo_id='EviatarO/e3b-ep3-lora',
+    repo_type='model',
+    allow_patterns='step_000099/*',
+    local_dir='outputs/checkpoints/e3b-ep3-lora',
+    ignore_patterns=['results/*', '*.jsonl'],
+)
+print('e3b checkpoint downloaded')
+"
+
+ls outputs/checkpoints/e3b-ep3-lora/step_000099/
+# Expect: adapter_config.json  adapter_model.safetensors  score_head.pt  train_config.json
+
+--------------------------------------------------------------
+STEP B5 — Disk check after downloads
+--------------------------------------------------------------
+du -sh /workspace/data/test_tte_curve
+df -h /workspace
+
+
+==============================================================
+STAGE C — 6 INFERENCE RUNS
+==============================================================
+
+# Create output directories:
+mkdir -p outputs/e3b_student_267clips_tte/tte_curve
+
+# All 6 commands below use nohup — run one, wait for completion, then next.
+# Or run pairs in parallel if you have VRAM headroom.
+# Each 710-clip run takes ~36 min on RTX PRO 4500 at ~3s/clip.
+# Val (18) + train (267) run together take ~15 min.
+
+--------------------------------------------------------------
+RUN 1 — e3a × Private TTE curve (710 clips, ~36 min)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3a-epoch7-lora --manifest dataset/manifests/test_tte_curve_private_manifest.jsonl --frames_root /workspace/data/test_tte_curve/private --output outputs/e3b_student_267clips_tte/tte_curve/e3a_tte_curve_private_epoch07.jsonl --config student_training/configs/train_lora.yaml > tte_run1_e3a_private.log 2>&1 &
+echo "RUN1 PID: $!"; tail -f tte_run1_e3a_private.log
+# Done when: 710/710
+
+--------------------------------------------------------------
+RUN 2 — e3a × Public TTE curve (710 clips, ~36 min)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3a-epoch7-lora --manifest dataset/manifests/test_tte_curve_public_manifest.jsonl --frames_root /workspace/data/test_tte_curve/public --output outputs/e3b_student_267clips_tte/tte_curve/e3a_tte_curve_public_epoch07.jsonl --config student_training/configs/train_lora.yaml > tte_run2_e3a_public.log 2>&1 &
+echo "RUN2 PID: $!"; tail -f tte_run2_e3a_public.log
+# Done when: 710/710
+
+--------------------------------------------------------------
+RUN 3 — e3b × Private TTE curve (710 clips, ~36 min)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 --manifest dataset/manifests/test_tte_curve_private_manifest.jsonl --frames_root /workspace/data/test_tte_curve/private --output outputs/e3b_student_267clips_tte/tte_curve/e3b_tte_curve_private_step000099.jsonl --config student_training/configs/train_lora.yaml > tte_run3_e3b_private.log 2>&1 &
+echo "RUN3 PID: $!"; tail -f tte_run3_e3b_private.log
+
+--------------------------------------------------------------
+RUN 4 — e3b × Public TTE curve (710 clips, ~36 min)
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 --manifest dataset/manifests/test_tte_curve_public_manifest.jsonl --frames_root /workspace/data/test_tte_curve/public --output outputs/e3b_student_267clips_tte/tte_curve/e3b_tte_curve_public_step000099.jsonl --config student_training/configs/train_lora.yaml > tte_run4_e3b_public.log 2>&1 &
+echo "RUN4 PID: $!"; tail -f tte_run4_e3b_public.log
+
+--------------------------------------------------------------
+RUN 5 — e3b × VAL (18 clips, ~1 min)
+--------------------------------------------------------------
+mkdir -p outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099
+
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 --manifest dataset/manifests/val_e3a.jsonl --frames_root /workspace/data/train_HiRes --output outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/e3b_val_step000099.jsonl --config student_training/configs/train_lora.yaml > tte_run5_e3b_val.log 2>&1 &
+echo "RUN5 PID: $!"; tail -f tte_run5_e3b_val.log
+# Done when: 18/18
+
+--------------------------------------------------------------
+RUN 6 — e3b × TRAIN readback (267 clips, ~14 min)
+--------------------------------------------------------------
+mkdir -p outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099
+
+HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/trained_eval.py --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 --manifest dataset/teacher_labels/teacher_dataset_e3b.jsonl --frames_root /workspace/data/train_HiRes --output outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/e3b_train_readback_step000099.jsonl --config student_training/configs/train_lora.yaml > tte_run6_e3b_train.log 2>&1 &
+echo "RUN6 PID: $!"; tail -f tte_run6_e3b_train.log
+# Done when: 267/267
+
+--------------------------------------------------------------
+QUICK AP SANITY CHECK (run after each pair of runs)
+--------------------------------------------------------------
+python -c "
+import json, numpy as np
+from sklearn.metrics import average_precision_score, roc_auc_score
+from pathlib import Path
+
+files = [
+    ('e3a Private curve', 'outputs/e3b_student_267clips_tte/tte_curve/e3a_tte_curve_private_epoch07.jsonl'),
+    ('e3a Public curve',  'outputs/e3b_student_267clips_tte/tte_curve/e3a_tte_curve_public_epoch07.jsonl'),
+    ('e3b Private curve', 'outputs/e3b_student_267clips_tte/tte_curve/e3b_tte_curve_private_step000099.jsonl'),
+    ('e3b Public curve',  'outputs/e3b_student_267clips_tte/tte_curve/e3b_tte_curve_public_step000099.jsonl'),
+    ('e3b Val',           'outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/e3b_val_step000099.jsonl'),
+    ('e3b Train readback','outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/e3b_train_readback_step000099.jsonl'),
+]
+for tag, path in files:
+    if not Path(path).exists():
+        print(f'{tag}: NOT READY'); continue
+    rows = [json.loads(l) for l in open(path) if l.strip()]
+    yt = np.array([int(r['ground_truth']) for r in rows])
+    ys = np.array([float(r['score']) for r in rows])
+    ap = average_precision_score(yt, ys) if len(set(yt)) > 1 else float('nan')
+    print(f'{tag}: n={len(rows)}  pos={int(yt.sum())}  AP={ap:.4f}  mean_score={ys.mean():.3f}')
+"
+
+
+==============================================================
+STAGE D — UPLOAD RESULTS TO HF
+==============================================================
+
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import HfApi
+api = HfApi()
+
+# Upload all 6 result JSONLs to e3b-ep3-lora repo under results/tte_curve/
+import glob
+files = (
+    glob.glob('outputs/e3b_student_267clips_tte/tte_curve/*.jsonl') +
+    glob.glob('outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/*.jsonl') +
+    glob.glob('outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/*.jsonl')
+)
+for f in files:
+    from pathlib import Path
+    p = Path(f)
+    path_in_repo = f'results/tte_curve/{p.name}'
+    api.upload_file(
+        path_or_fileobj=f,
+        path_in_repo=path_in_repo,
+        repo_id='EviatarO/e3b-ep3-lora',
+        repo_type='model',
+    )
+    print(f'Uploaded: {path_in_repo}')
+print('All results on HF.')
+"
+
+
+==============================================================
+STAGE E — DOWNLOAD TO LOCAL  [run on LOCAL machine]
+==============================================================
+
+# Replace <POD_IP> and <PORT> with your SSH details.
+
+# TTE curve JSONLs:
+scp -P <PORT> root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3b_student_267clips_tte/tte_curve/*.jsonl "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3b_student_267clips_tte/tte_curve/"
+
+# Val JSONL:
+scp -P <PORT> root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/e3b_val_step000099.jsonl "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/"
+
+# Train readback JSONL:
+scp -P <PORT> root@<POD_IP>:/workspace/Car-Crash-Prediction-Based-MMLM/outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/e3b_train_readback_step000099.jsonl "C:/Users/eviatar.ohayon/Ramon Space/PycharmProjects/Thesis/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/"
+
+# Then run locally:
+python student_training/scripts/analyze_tte_curve.py
+
+
+==============================================================
+WHAT TO REPORT AFTER ALL RUNS
+==============================================================
+Run the quick AP sanity check (STAGE C snippet) and paste:
+  1. All 6 rows (n= AP= mean_score= for each run)
+  2. Note if TTE curve AP is flat or declining (e3a Private/Public)
+  3. Note e3b curve behavior (flat-high expected due to saturation)
+
+Then locally run:
+  python student_training/scripts/analyze_tte_curve.py
+  → 3 figures in outputs/e3b_student_267clips_tte/tte_curve/
+
+==============================================================
+TIMING ESTIMATE (RTX PRO 4500, ~3s/clip)
+==============================================================
+  RUN 1 (e3a Private 710) : ~36 min
+  RUN 2 (e3a Public  710) : ~36 min
+  RUN 3 (e3b Private 710) : ~36 min
+  RUN 4 (e3b Public  710) : ~36 min
+  RUN 5 (e3b Val      18) : ~1 min
+  RUN 6 (e3b Train   267) : ~14 min
+  Upload + overhead       : ~10 min
+  TOTAL                   : ~2.5-3 h  ≈ $2-3
+
+NOTE: You can run RUN1+RUN2 in parallel and RUN3+RUN4 in parallel
+      if you open two terminal sessions (each ~5 GB VRAM — fits on 20 GB).
+      Halves total time to ~1.5 h.
+==============================================================
