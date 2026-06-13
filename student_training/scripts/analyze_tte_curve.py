@@ -109,7 +109,6 @@ def _load_half_data(half: str, model: str) -> Dict:
 
     full = _load_jsonl(full_paths[half])
     curve = _load_jsonl(curve_paths[half])
-    tte_map = _build_manifest_tte_map(half)
 
     pos_05 = {r["video_id"]: r["score"]
               for r in full
@@ -118,14 +117,15 @@ def _load_half_data(half: str, model: str) -> Dict:
            for r in full
            if r.get("ground_truth") == 0}
 
+    # Each curve row carries its own offset in `time_before_s` (1.0..3.0).
+    # Do NOT collapse to a vid->tte map: every vid appears at all 5 offsets.
     pos_new: Dict[float, Dict[str, float]] = {t: {} for t in OFFSETS_NEW}
     for r in curve:
-        vid = r["video_id"]
-        tte = tte_map.get(vid) or r.get("time_before_s")
+        tte = r.get("time_before_s")
         if tte is not None:
             tte = float(tte)
             if tte in pos_new:
-                pos_new[tte][vid] = r["score"]
+                pos_new[tte][r["video_id"]] = r["score"]
 
     return {"pos_05": pos_05, "pos_new": pos_new, "neg": neg}
 

@@ -1,0 +1,121 @@
+==============================================================
+  RunPod — TTE Curve  [PIPELINED via SCP, no HF for frames]
+  Pod: root@213.173.103.48 -p 35970   GPU: RTX PRO 4500
+  Bottleneck = laptop uplink (~3.7 Mbps). Upload by priority,
+  infer each offset as it lands. First result (3.0s) ~ in 30 min.
+==============================================================
+
+WHY THIS SHAPE
+  - Negatives need ZERO upload (scores already exist on HF from the
+    677-clip test eval). Only the 1420 re-cut POSITIVE windows go up.
+  - 5 zips (~0.9 GB each), one per offset. Upload order = science order:
+    tte30(3.0s) -> tte25 -> tte20 -> tte15(1.5s) -> tte10(1.0s).
+
+--------------------------------------------------------------
+PART 1 — POD setup (web terminal, do NOW while uploads run)
+--------------------------------------------------------------
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+git pull                         # gets analyze script etc. (user pushes)
+rm -rf /workspace/.cache
+ls /root/.cache/huggingface      # must hold model weights
+hf auth login                    # paste real HF token
+df -h /workspace                 # need >= 6 GB free
+
+# checkpoints (skip if already on volume)
+ls outputs/checkpoints/e3a-epoch7-lora/adapter_config.json 2>/dev/null \
+  || HF_HOME=/root/.cache/huggingface hf download EviatarO/e3a-epoch7-lora \
+     --repo-type model --local-dir outputs/checkpoints/e3a-epoch7-lora
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id='EviatarO/e3b-ep3-lora', repo_type='model',
+  allow_patterns='step_000099/*', local_dir='outputs/checkpoints/e3b-ep3-lora')
+print('e3b ready')"
+
+mkdir -p /workspace/data
+# run_tte_offset.sh + the 10 per-offset manifests arrive via SCP (Part 2 on laptop)
+
+--------------------------------------------------------------
+PART 2 — LAPTOP (PowerShell): cancel old SCP, then pipeline
+--------------------------------------------------------------
+# In the terminal running the slow full-zip SCP: press Ctrl+C to cancel it.
+# Then paste this block (uploads helper + manifests first, then zips by priority):
+
+$key  = "$env:USERPROFILE\.ssh\id_ed25519"
+$pod  = "root@213.173.103.48"
+$port = 35970
+$repo = "C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis\MMLM_For_Cars_Collision_Anticipation\MMLM_AI"
+$pdst = "/workspace/Car-Crash-Prediction-Based-MMLM"
+
+# helper script
+scp -P $port -i $key "$repo\run_tte_offset.sh" "${pod}:${pdst}/"
+# 10 tiny per-offset manifests
+Get-ChildItem "$repo\dataset\manifests\test_tte_curve_*_tte*_manifest.jsonl" | ForEach-Object {
+  scp -P $port -i $key $_.FullName "${pod}:${pdst}/dataset/manifests/"
+}
+# 5 zips in priority order -> /workspace/data/
+foreach ($s in "tte30","tte25","tte20","tte15","tte10") {
+  Write-Host ">>> uploading $s ..."
+  scp -P $port -i $key "$repo\dataset\tte_zips\test_tte_curve_$s.zip" "${pod}:/workspace/data/"
+  Write-Host ">>> UPLOADED $s"
+}
+
+--------------------------------------------------------------
+PART 3 — POD: run each offset the moment its zip lands
+--------------------------------------------------------------
+# When laptop prints ">>> UPLOADED tte30", in the POD terminal:
+bash run_tte_offset.sh tte30
+# then, as each lands:
+bash run_tte_offset.sh tte25
+bash run_tte_offset.sh tte20
+bash run_tte_offset.sh tte15
+bash run_tte_offset.sh tte10
+# Each run = 4 x 142 clips ~ 28 min. Per-offset parts land in:
+#   outputs/e3b_student_267clips_tte/tte_curve/parts/
+
+--------------------------------------------------------------
+PART 4 — POD: also the val + train readback (any time)
+--------------------------------------------------------------
+export HF_HOME=/root/.cache/huggingface
+mkdir -p outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099 \
+         outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099
+python student_training/scripts/trained_eval.py \
+  --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 \
+  --manifest dataset/manifests/val_e3a.jsonl --frames_root /workspace/data/train_HiRes \
+  --output outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099/e3b_val_step000099.jsonl \
+  --config student_training/configs/train_lora.yaml
+python student_training/scripts/trained_eval.py \
+  --checkpoint outputs/checkpoints/e3b-ep3-lora/step_000099 \
+  --manifest dataset/teacher_labels/teacher_dataset_e3b.jsonl --frames_root /workspace/data/train_HiRes \
+  --output outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099/e3b_train_readback_step000099.jsonl \
+  --config student_training/configs/train_lora.yaml
+
+--------------------------------------------------------------
+PART 5 — POD: concatenate parts -> combined curve JSONLs
+--------------------------------------------------------------
+cd outputs/e3b_student_267clips_tte/tte_curve
+cat parts/e3a_tte_curve_private_tte*.jsonl > e3a_tte_curve_private_epoch07.jsonl
+cat parts/e3a_tte_curve_public_tte*.jsonl  > e3a_tte_curve_public_epoch07.jsonl
+cat parts/e3b_tte_curve_private_tte*.jsonl > e3b_tte_curve_private_step000099.jsonl
+cat parts/e3b_tte_curve_public_tte*.jsonl  > e3b_tte_curve_public_step000099.jsonl
+wc -l *.jsonl   # each combined = 710 (142 x 5 offsets)
+cd /workspace/Car-Crash-Prediction-Based-MMLM
+
+--------------------------------------------------------------
+PART 6 — POD: upload the 6 result JSONLs to HF
+--------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface python -c "
+from huggingface_hub import HfApi
+from pathlib import Path
+api = HfApi()
+files = (list(Path('outputs/e3b_student_267clips_tte/tte_curve').glob('*.jsonl')) +
+  list(Path('outputs/e3b_student_267clips_tte/metrics/e3b_val_step000099').glob('*.jsonl')) +
+  list(Path('outputs/e3b_student_267clips_tte/metrics/e3b_train_readback_step000099').glob('*.jsonl')))
+for f in files:
+    api.upload_file(path_or_fileobj=str(f), path_in_repo=f'results/tte_curve/{f.name}',
+                    repo_id='EviatarO/e3b-ep3-lora', repo_type='model')
+    print('Uploaded', f.name)
+print('Done.')"
+
+# Then download the 6 JSONLs locally and run:
+#   python student_training/scripts/analyze_tte_curve.py
+==============================================================
