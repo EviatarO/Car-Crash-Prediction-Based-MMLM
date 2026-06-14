@@ -148,3 +148,48 @@ group-0 video *ends* 0.5s before the event, absolute TTE labels may be shifted ~
 - `tte_curve/old_vs_new_tte_curve.png` (+ `_numbers.json`) — OLD flat (per-bucket
   balanced, cross-scene) vs NEW declining (re-cut same scene, fixed neg). Both share
   the 0.5s anchor; OLD stays ~0.76 flat, NEW declines — the artifact, visualized.
+
+---
+
+# Related Work & Positioning (2026-06-14) — SafeVL & BADAS on Nexar
+
+## Direct competitors on the SAME Nexar dataset
+Both evaluate on the Nexar real-world collision dataset (BADAS: n=1344, 672 pos /
+672 neg, 1:1). This makes them valid same-dataset comparisons — unlike cross-dataset
+(DAD/CCD/DoTA) numbers, which are NOT comparable.
+
+| Model | Metric reported | Value (Nexar) | Setting | Backbone | Nexar train data |
+|---|---|---|---|---|---|
+| **Ours e3a** | AP / bal-acc | 0.762 / 0.726 | fine-tuned | InternVL3.5-4B (LoRA) | 267 clips |
+| **Ours e3b** | AP / bal-acc | 0.790 / 0.738 | fine-tuned | InternVL3.5-4B (LoRA) | 267 clips |
+| SafeVL | **balanced accuracy** | 0.76 | **zero-shot** | Qwen2.5-VL-7B + DINO/YOLO + SAM-2 | none |
+| BADAS-Open | AP / AUC | 0.86 / 0.88 | trained | V-JEPA2 (video-native) | 1.5k videos |
+| BADAS-1.0 | AP / AUC | 0.91 / 0.91 | trained | V-JEPA2 (video-native) | 40k videos |
+| BADAS-2.0 | adds reasoning + 22M/86M distilled models, larger long-tail bench | — | trained | V-JEPA2 | 178.5k videos |
+
+## Metric caveats (critical — do not conflate)
+- **SafeVL's 0.76 is balanced ACCURACY of a zero-shot safe/unsafe verdict, NOT AP.**
+  Our comparable balanced accuracy = 0.726 (e3a) / 0.738 (e3b). SafeVL (0.76, zero-shot)
+  slightly edges us (fine-tuned) on this metric. SafeVL reports **no TTE / no AP-vs-TTE
+  curve** — single verdict per clip; nothing to put on our TTE x-axis.
+- **BADAS reports AP at a 2s prediction horizon, frame-level, balanced 1:1**, mTTA
+  3.9–4.9s. BADAS is meaningfully ahead on AP (0.86–0.91 vs our 0.76–0.79) on the same data.
+
+## Honest verdict (decided)
+- **Do NOT chase raw AP.** The gap to BADAS is structural: data scale (267 vs 40k–178k)
+  and backbone (image-frame VLM vs video-native V-JEPA2). More training on 267 clips
+  overfits (train AUC already 0.97) — we are data-bound, not compute-bound. We will not
+  beat the team that owns the dataset as an MSc.
+- **SafeVL + BADAS-2.0 together already cover "interpretable VLM for collision"**
+  (reasoning traces, small distilled models). That niche is taken.
+- **Our defensible contribution (reposition the thesis here):**
+  1. **Data-efficient teacher→student distillation** — how far 267 distilled clips reach
+     (AP 0.79) vs competitors' 40k–178k. The 0.79-vs-0.91 gap becomes a *feature* of a
+     low-resource study, not a failure.
+  2. **Prevalence-controlled within-scene AP/AUC-vs-TTE methodology** + the flat-0.76
+     artifact correction — neither SafeVL nor BADAS reports this.
+- **Publication:** sound as an MSc thesis (cite SafeVL + BADAS, position honestly).
+  Not a SOTA-AP paper. Possible workshop/methods note on the data-efficiency + TTE angle.
+
+Refs: SafeVL (Ma et al., "SafeVL: Driving Safety Evaluation via Meticulous Reasoning in
+VLMs"); BADAS (arXiv 2510.14876); BADAS-2.0 (arXiv 2604.05767).
