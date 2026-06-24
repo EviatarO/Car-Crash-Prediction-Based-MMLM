@@ -58,14 +58,16 @@ class VJEPA2FeatureExtractor:
         self.vjepa, self.nn_model, self.device = load_badas(stagea_cfg)
         self.temperature = temperature
 
-        # Locate the attentive-probe module to hook. The BADAS-Open nn.Module
-        # exposes `.pooler` (VJEPA2 attentive pooler) per the load report; fall
-        # back to a name search if the attribute is absent.
-        probe = getattr(self.nn_model, "pooler", None)
+        # Locate the aggregation module to hook (tap point = patch grid before pooling).
+        # EnhancedVideoClassifier uses `temporal_processor`; older BADAS builds use `pooler`.
+        probe = getattr(self.nn_model, "temporal_processor", None)
+        if probe is None:
+            probe = getattr(self.nn_model, "pooler", None)
         if probe is None:
             for name, mod in self.nn_model.named_modules():
                 low = name.lower()
-                if low.endswith("pooler") or "probe" in low or "attentive" in low:
+                if ("temporal" in low or low.endswith("pooler")
+                        or "probe" in low or "attentive" in low):
                     probe = mod
                     print(f"  [extractor] hooking probe module by search: '{name}'")
                     break
