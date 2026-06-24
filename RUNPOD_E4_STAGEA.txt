@@ -1,0 +1,105 @@
+==============================================================================
+ RUNPOD RUNBOOK — e4_vjepa_reason, Stage A (BADAS-Open scorer reproduction)
+==============================================================================
+ GOAL: confirm BADAS-Open scores AP ~= 0.86 on our Nexar test halves
+       (Private 677 + Public 667), single last-16-frame (~2s) window.
+ STATUS: code ready, dry-run validated locally. Scoring NOT yet run (needs RunPod credit).
+ QUICK RUN: use RUNPOD_E4_STAGEA_RUN.sh (single script, self-terminates pod when done).
+
+------------------------------------------------------------------------------
+ 0) LOCAL sanity (no GPU) — already runnable on the laptop
+------------------------------------------------------------------------------
+  python student_training/scripts/e4_stageA_badas_open_eval.py \
+      --config student_training/configs/e4_stageA.yaml \
+      --manifest dataset/manifests/test_manifest_hires.jsonl \
+      --frames_root dataset/test --split Private --dry_run
+  # repeat with: --manifest dataset/manifests/test_manifest_public_hires.jsonl \
+  #              --frames_root dataset/test_public --split Public
+  # Confirms record counts, label balance, and frames load at 1280x720 (hi-res).
+
+------------------------------------------------------------------------------
+ 1) ENV (RunPod) — Network Volume CCP_Based_MMLM_DataSet -> /workspace
+------------------------------------------------------------------------------
+  cd /workspace/Car-Crash-Prediction-Based-MMLM && git pull
+  export HF_HOME=/root/.cache/huggingface          # CLAUDE.md rule (avoid /workspace overflow)
+  pip install badas openpyxl pyyaml scikit-learn pandas pillow   # badas pulls V-JEPA2 weights
+
+------------------------------------------------------------------------------
+ 2) VERIFY PREPROCESSING (resolve 224-vs-256 + normalization) — DO FIRST
+------------------------------------------------------------------------------
+  python -c "import badas, inspect; print(inspect.getsource(badas.preprocess_video))"
+  # Neither paper specifies the transform (BADAS only says 256x256 in §3.2;
+  # V-JEPA2 uses resize-then-crop multi-crop eval, no explicit mean/std).
+  # If badas exposes a frame transform -> keep preprocess.source: official.
+  # Else set preprocess.source: manual + the real img_size/mean/std in the yaml.
+
+------------------------------------------------------------------------------
+ 3) FRAMES — upload hi-res dirs from LOCAL if the pod volume lacks them
+------------------------------------------------------------------------------
+  # (see RUNPOD_EVAL_PUBLIC.txt STEP 5 for the rsync/scp recipe; point at *_hires/)
+  #   Private: dataset/test/<id>_hires/        Public: dataset/test_public/<id>_hires/
+
+------------------------------------------------------------------------------
+ 4) (optional) smoke test — 8 clips per split
+------------------------------------------------------------------------------
+  HF_HOME=/root/.cache/huggingface python student_training/scripts/e4_stageA_badas_open_eval.py \
+      --config student_training/configs/e4_stageA.yaml \
+      --manifest dataset/manifests/test_manifest_hires.jsonl --frames_root dataset/test \
+      --split Private --limit 8 \
+      --output outputs/e4_vjepa_reason/StageA_scorer/_smoke_private.jsonl
+
+------------------------------------------------------------------------------
+ 5) FULL RUN — Private (677) then Public (667)
+------------------------------------------------------------------------------
+  HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/e4_stageA_badas_open_eval.py \
+      --config student_training/configs/e4_stageA.yaml \
+      --manifest dataset/manifests/test_manifest_hires.jsonl --frames_root dataset/test \
+      --split Private \
+      --output outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl > e4_private.log 2>&1 &
+  tail -f e4_private.log
+
+  HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/e4_stageA_badas_open_eval.py \
+      --config student_training/configs/e4_stageA.yaml \
+      --manifest dataset/manifests/test_manifest_public_hires.jsonl --frames_root dataset/test_public \
+      --split Public \
+      --output outputs/e4_vjepa_reason/StageA_scorer/badas_open_public.jsonl > e4_public.log 2>&1 &
+  tail -f e4_public.log
+  # Each prints AP/AUC + PASS/CHECK vs expected 0.86 (+-0.03).
+
+------------------------------------------------------------------------------
+ 6) METRICS (reuse existing tools) + combined Excel
+------------------------------------------------------------------------------
+  # Per-split plots + metrics.json (CM, AP, AUC, F1, PR/ROC, score histogram):
+  python student_training/scripts/evaluate_metrics.py \
+      --results outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl \
+      --out_dir outputs/e4_vjepa_reason/StageA_scorer/metrics_private --tag "BADAS-Open Private"
+  python student_training/scripts/evaluate_metrics.py \
+      --results outputs/e4_vjepa_reason/StageA_scorer/badas_open_public.jsonl \
+      --out_dir outputs/e4_vjepa_reason/StageA_scorer/metrics_public --tag "BADAS-Open Public"
+
+  # Private-vs-Public comparison (bootstrap AP CI + replication test):
+  python student_training/scripts/compare_private_public.py \
+      --private outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl \
+      --public  outputs/e4_vjepa_reason/StageA_scorer/badas_open_public.jsonl \
+      --out     outputs/e4_vjepa_reason/StageA_scorer/private_vs_public_comparison.json
+
+  # Combined per-clip Excel (video_id, Public/Private, group, time_before_s,
+  # ground_truth, collision_verdict, score, Score Pred, Correct?):
+  python student_training/scripts/e4_stageA_build_excel.py
+
+------------------------------------------------------------------------------
+ OUTPUTS (outputs/e4_vjepa_reason/StageA_scorer/)
+------------------------------------------------------------------------------
+  badas_open_private.jsonl / badas_open_public.jsonl   per-clip raw scores
+  metrics_private/ , metrics_public/                   metrics.json + PR/ROC/CM/hist PNGs
+  private_vs_public_comparison.json                    AP CIs + replication verdict
+  badas_open_StageA_scores.xlsx                        combined per-clip Excel
+  StageA_summary.md                                    run summary (write after the run)
+
+------------------------------------------------------------------------------
+ ACCEPTANCE
+------------------------------------------------------------------------------
+  PASS if |AP - 0.86| <= 0.03 on Private, and Public AP within Private's bootstrap CI.
+  If FAIL -> almost certainly preprocessing (img_size / normalization / squashed frames).
+  Fix step 2 and re-run. Do NOT start Stage B until Stage A passes.
+==============================================================================

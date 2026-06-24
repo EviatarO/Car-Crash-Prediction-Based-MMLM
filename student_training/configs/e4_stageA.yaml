@@ -1,0 +1,46 @@
+# =============================================================================
+# e4_stageA.yaml  —  BADAS-Open scorer reproduction (Stage A of e4_vjepa_reason)
+# =============================================================================
+# Goal: load nexar-ai/BADAS-Open, score our Nexar test halves (Private 677 +
+#       Public 667) with the last-16-frame (~2s) window, confirm AP ~= 0.86.
+#
+# Data paths (manifest / frames_root / split / output) are passed on the CLI
+# (one invocation per split) — see RUNPOD_E4_STAGEA.txt.
+# RUN TARGET: RunPod GPU (needs credit). Use --dry_run locally first (no GPU).
+# =============================================================================
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  hf_repo: "nexar-ai/BADAS-Open"      # official open weights (APSv2)
+  use_official_loader: true           # badas_loader.py from the HF repo
+
+# ── Preprocessing ────────────────────────────────────────────────────────────
+# Neither the BADAS nor the V-JEPA2 paper fully specifies the transform:
+#   - BADAS states "16 frames of size 256x256" only in §3.2.
+#   - V-JEPA2 reports 256x256 + multi-crop eval (resize-then-crop, NOT a squash),
+#     and gives no explicit pixel mean/std.
+# => the exact transform lives in the CODE. source: official routes frames
+# through BADAS's own transform; manual is a fallback only (VERIFY on RunPod).
+preprocess:
+  source: "official"   # "official" (preferred) | "manual"
+  img_size: 256        # fallback only; confirm 224 vs 256 against the badas pkg
+  num_frames: 16
+  target_fps: 8
+  norm_mean: [0.485, 0.456, 0.406]   # fallback only; confirm against badas source
+  norm_std:  [0.229, 0.224, 0.225]
+
+# ── Data fields (paths come from the CLI) ────────────────────────────────────
+# Use HI-RES source frames (1280x720) and let BADAS resize to 256x256, because
+# V-JEPA2 eval crops rather than squashes -> the pre-squashed 256 dirs mismatch.
+#   Private: --manifest test_manifest_hires.jsonl        --frames_root dataset/test
+#   Public:  --manifest test_manifest_public_hires.jsonl --frames_root dataset/test_public
+data:
+  frame_filename_pattern: "frame_{:05d}.jpg"
+  gt_field:    "event_occurs"   # 1 = collision, 0 = none
+  group_field: "group"
+  verdict_threshold: 0.5        # collision_verdict = YES if score >= this
+
+# ── Acceptance ───────────────────────────────────────────────────────────────
+acceptance:
+  expected_ap: 0.86      # BADAS-Open Nexar AP (BADAS-1.0 Table 3)
+  ap_tolerance: 0.03     # flag if |AP - 0.86| > tol -> likely a preprocessing bug
