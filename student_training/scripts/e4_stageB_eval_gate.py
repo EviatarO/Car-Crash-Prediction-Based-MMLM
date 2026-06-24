@@ -213,27 +213,41 @@ def run_gate(cfg, out_dir):
                "dCE_zero": round(ce_zero - ce_trained, 5),
                "dCE_shuffle": round(ce_shuf - ce_trained, 5)}
 
-    # (3)+(4) generation discrimination
+    # (3)+(4) generation discrimination — feed the PROMPT ONLY. The dataset item
+    # carries the full teacher-forced sequence (prompt + teacher answer + <|im_end|>);
+    # generating from that makes the model see a completed turn and emit EOS at once
+    # (empty gen). The supervised reason span starts at the first non -100 label, so
+    # everything before it is the prompt (system + vis block + question + verdict prefix,
+    # which ends with `"reason": "` — the model then continues with the reason body).
     gens = []
     pos_haz, neg_haz, lengths, reps, parseable = [], [], [], 0, 0
     with torch.no_grad():
         for b in loader:
+            lbl = b["labels"][0]
+            nz = (lbl != -100).nonzero(as_tuple=False)
+            plen = int(nz[0].item()) if nz.numel() else lbl.shape[0]   # prompt length
+            ids = b["input_ids"][:, :plen].to(device)
+            am  = b["attention_mask"][:, :plen].to(device)
+            vm  = b["vis_mask"][:, :plen].to(device)                   # 64 vis tokens kept
             out_ids = trained.generate(
-                b["vis_feats"].to(device), b["input_ids"].to(device),
-                b["attention_mask"].to(device), b["vis_mask"].to(device),
+                b["vis_feats"].to(device), ids, am, vm,
                 max_new_tokens=cfg["gate"].get("max_new_tokens", 160))
-            text = tok.decode(out_ids[0], skip_special_tokens=True)
+            cont = tok.decode(out_ids[0], skip_special_tokens=True)    # reason continuation
             meta = b["meta"][0]
+            # Prompt ended mid-JSON at `"reason": "`, so the continuation is the reason
+            # body (+ closing `"}`); strip the closer and reconstruct full JSON to parse.
+            reason = cont.split('"}')[0].split('"\n')[0].strip().strip('"').strip()
+            full = '{"verdict": "%s", "reason": "%s"}' % (meta.get("verdict", ""), reason)
             try:
-                obj = json.loads(text[text.index("{"):text.rindex("}") + 1])
-                reason = obj.get("reason", text); parseable += 1
+                json.loads(full); parseable += 1
             except Exception:
-                reason = text
+                pass
             (pos_haz if meta["target"] == 1 else neg_haz).append(hazard_rate(reason))
             lengths.append(len(reason.split()))
             reps += _is_degenerate(reason)
             gens.append({"video_id": meta["video_id"], "target": meta["target"],
-                         "generated": text, "teacher_reason": meta["reason"]})
+                         "generated": cont, "reconstructed": full,
+                         "teacher_reason": meta["reason"]})
 
     disc = {
         "hazard_rate_pos": round(np.mean(pos_haz) if pos_haz else 0, 4),
