@@ -1,0 +1,83 @@
+==============================================================================
+ RUNPOD RUNBOOK — e4_vjepa_reason, Stage B (V-JEPA2 -> projector -> Qwen3-4B)
+==============================================================================
+ GOAL: train ONLY the projector (LoRA OFF) so frozen Qwen3-4B can read frozen
+       V-JEPA2 features. Gate = does visual info flow? (plan §5). STOP at gate.
+ STATUS: code ready, dry-run validated locally. Not yet run (needs RunPod GPU).
+ GPU: any 24GB+ (frozen 4B LLM bf16 ~9GB + grad-ckpt). Whole stage < 1h.
+
+------------------------------------------------------------------------------
+ 0) LOCAL sanity (no GPU) — already runnable on the laptop
+------------------------------------------------------------------------------
+  python student_training/scripts/e4_stageB_cache_features.py \
+      --config student_training/configs/e4_stageB.yaml \
+      --manifest dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+      --frames_root dataset/train --split train --dry_run
+  python student_training/scripts/e4_stageB_train_bridge.py \
+      --config student_training/configs/e4_stageB.yaml --dry_run
+
+------------------------------------------------------------------------------
+ 1) ENV (RunPod) — Network Volume CCP_Based_MMLM_DataSet -> /workspace
+------------------------------------------------------------------------------
+  cd /workspace/Car-Crash-Prediction-Based-MMLM && git pull
+  export HF_HOME=/root/.cache/huggingface          # CLAUDE.md rule
+  pip install badas albumentations matplotlib seaborn scipy openpyxl pyyaml \
+              scikit-learn pandas pillow transformers accelerate
+  HF_HOME=/root/.cache/huggingface hf auth login   # gated BADAS-Open + Qwen
+
+  # CONFIRM on pod (resolves the two open items in the config):
+  #  - Qwen3-4B model id + embed dim (out_dim): expect 2560
+  python -c "from transformers import AutoConfig; c=AutoConfig.from_pretrained('Qwen/Qwen3-4B-Instruct-2507',trust_remote_code=True); print('hidden_size',c.hidden_size)"
+  #  - V-JEPA2 patch-grid token count + dim (in_dim): printed by the cache step.
+  #    If embed dim != 2560 -> edit projector.out_dim in e4_stageB.yaml.
+
+------------------------------------------------------------------------------
+ 2) CACHE V-JEPA2 FEATURES (frozen trunk; once) — train then val
+------------------------------------------------------------------------------
+  # TRAIN (267 windows). Frames live at /workspace/data/train_HiRes.
+  HF_HOME=/root/.cache/huggingface python student_training/scripts/e4_stageB_cache_features.py \
+      --config student_training/configs/e4_stageB.yaml \
+      --manifest dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+      --frames_root /workspace/data/train_HiRes --split train
+  # VAL (18 GT clips) — same frames root:
+  HF_HOME=/root/.cache/huggingface python student_training/scripts/e4_stageB_cache_features.py \
+      --config student_training/configs/e4_stageB.yaml \
+      --manifest dataset/manifests/val_e3a.jsonl \
+      --frames_root /workspace/data/train_HiRes --split val
+  # NOTE the printed patch-grid shape (e.g. (1568,1024)). If dim != 1024 ->
+  # edit projector.in_dim in e4_stageB.yaml before training.
+
+------------------------------------------------------------------------------
+ 3) TRAIN PROJECTOR (cached features; LoRA OFF; minutes)
+------------------------------------------------------------------------------
+  HF_HOME=/root/.cache/huggingface nohup python student_training/scripts/e4_stageB_train_bridge.py \
+      --config student_training/configs/e4_stageB.yaml > e4_stageB_train.log 2>&1 &
+  tail -f e4_stageB_train.log
+  # Prints per-epoch val PPL; saves projector_best.pt on improvement; early-stops.
+  # Watch: val_ppl should drop below the "@ init (random projector)" floor.
+
+------------------------------------------------------------------------------
+ 4) GATE EVAL (plan §5) + per-TTE histogram
+------------------------------------------------------------------------------
+  HF_HOME=/root/.cache/huggingface python student_training/scripts/e4_stageB_eval_gate.py \
+      --config student_training/configs/e4_stageB.yaml
+  # Writes: metrics/ppl_results.json, ablation_sensitivity.json, discrimination.json,
+  #         score_path_by_tte.json, generations.jsonl, plots/score_hist_by_tte.png
+  # (Per-TTE analysis alone, no LLM:  add --skip_gate)
+
+------------------------------------------------------------------------------
+ 5) WRITE SUMMARY + STOP (stage gate)
+------------------------------------------------------------------------------
+  # Fill outputs/e4_vjepa_reason/e4_StageB_bridge/StageB_summary.md from the JSONs.
+  # Upload projector_best.pt to HF Hub (EviatarO/e4-stageB-projector).
+  # Download metrics/plots/generations to local. Then STOP for the gate decision.
+
+------------------------------------------------------------------------------
+ GATE / ACCEPTANCE (proceed to Stage C iff ALL hold)
+------------------------------------------------------------------------------
+  (1) ppl gain vs random projector >= 20%   AND ppl_trained < ppl_text_only
+  (2) dCE_zero clearly > 0  (zeroing visual tokens raises CE)
+  (3) hazard gap (pos-neg) clearly positive; coherent, low-repetition, JSON-parseable gens
+  (5) 18-val frozen scores == Stage A (anchor AP ~0.86 intact)
+  If FAIL -> diagnose: shrink projector / raise dropout / pool_mlp fallback / more data.
+==============================================================================

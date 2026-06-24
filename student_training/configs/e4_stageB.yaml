@@ -1,0 +1,70 @@
+# =============================================================================
+# e4_stageB.yaml — V-JEPA2 -> projector -> Qwen3-4B bridge (Stage B of e4)
+# =============================================================================
+# Trains ONLY the projector (LoRA OFF). Score path + LLM frozen. Loss = reason CE.
+# Run target: RunPod GPU. Use --dry_run locally first (no GPU).
+# =============================================================================
+
+torch_dtype: "bfloat16"
+seed: 42
+
+# ── Frozen V-JEPA2 scorer (Stage-A contract; used by the caching step) ───────
+model:
+  hf_repo: "nexar-ai/BADAS-Open"
+  use_official_loader: true
+preprocess:
+  source: "manual"          # confirmed in Stage A; transform owned by badas loader
+  img_size: 224             # CONFIRMED: badas_loader.py VJEPAModel(img_size=224)
+  num_frames: 16
+  target_fps: 8
+  temperature: 2.0          # score = softmax(logits / 2.0)[1]
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std:  [0.229, 0.224, 0.225]
+
+# ── LLM (frozen standalone Qwen3-4B; LoRA OFF in Stage B) ─────────────────────
+llm:
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"   # confirm id + embed-dim 2560 on pod
+
+# ── Projector (the ONLY trainable module) ────────────────────────────────────
+projector:
+  variant: "resampler"      # "resampler" (chosen) | "pool_mlp" (fallback)
+  in_dim: 1024              # V-JEPA2 ViT-L hidden size (confirm ~1568 tokens x 1024)
+  out_dim: 2560             # Qwen3-4B embedding dim (confirm on pod)
+  num_queries: 64           # visual-token budget (Flamingo=64); config knob, not locked
+  hidden_dim: 512           # internal latent dim (keeps projector ~6M params for 267 ex)
+  n_heads: 8
+  ffn_mult: 4
+  dropout: 0.1
+
+# ── Data / paths ─────────────────────────────────────────────────────────────
+data:
+  frame_filename_pattern: "frame_{:05d}.jpg"
+  cache_dir:   "outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features"
+  output_dir:  "outputs/e4_vjepa_reason/e4_StageB_bridge"
+  max_seq_len: 1024
+  num_workers: 0
+  # sources (passed to the cache step via CLI):
+  #   train: dataset/teacher_labels/teacher_dataset_e3b.jsonl  (267 windows)
+  #   val  : dataset/manifests/val_e3a.jsonl                   (18 GT clips)
+  #   frames_root (pod): /workspace/data/train_HiRes
+
+# ── Training (projector only) ────────────────────────────────────────────────
+train:
+  learning_rate: 1.0e-3     # fresh small module trains faster than LoRA's 2e-4
+  weight_decay: 0.01
+  num_epochs: 40
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  early_stop_patience: 6
+  gradient_checkpointing: true
+
+# ── Gate (plan §5) ───────────────────────────────────────────────────────────
+gate:
+  neg_bucket: "MID"         # negative set paired with each TTE positive bucket
+  max_new_tokens: 160
+  # PASS thresholds (applied when reading the metrics):
+  ppl_gain_vs_random_pct: 20   # trained PPL >=20% below random projector
+  min_dCE_zero: 0.05           # zeroing visual tokens must raise CE clearly
+  min_hazard_gap: 0.15         # pos-neg hazard-lexicon gap
