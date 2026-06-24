@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -168,7 +169,9 @@ def score_split(cfg, records, frames_root, split, out_path, limit=0):
         records = records[:limit]
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    print(f"Scoring {len(records)} {split} clips -> {out_path}")
+    total = len(records)
+    print(f"Scoring {total} {split} clips -> {out_path}")
+    t0 = time.time()
     n = 0
     with open(out_path, "w", encoding="utf-8") as fh:
         for k, r in enumerate(records):
@@ -189,8 +192,13 @@ def score_split(cfg, records, frames_root, split, out_path, limit=0):
             }) + "\n")
             fh.flush()
             n += 1
-            if n % 50 == 0:
-                print(f"  {n}/{len(records)}")
+            if n % 10 == 0 or n == total:
+                elapsed = time.time() - t0
+                rate = n / elapsed
+                eta = (total - n) / rate if rate > 0 else 0
+                print(f"  [{n:4d}/{total}]  {rate:.1f} clips/s  "
+                      f"elapsed {elapsed/60:.1f}m  ETA {eta/60:.1f}m  "
+                      f"last_score={score:.4f}")
 
     # Quick AP/AUC sanity (authoritative metrics come from evaluate_metrics.py).
     import numpy as np
