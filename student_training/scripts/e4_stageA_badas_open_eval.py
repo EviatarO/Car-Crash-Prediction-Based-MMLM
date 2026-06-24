@@ -6,20 +6,23 @@ our Nexar test halves (Private 677 + Public 667), to anchor the frozen scorer
 used by later stages.
 
 WHAT IT DOES (per split)
-  1. Loads nexar-ai/BADAS-Open via its OFFICIAL loader, so the resize +
-     normalization come from BADAS's own code (neither the BADAS nor V-JEPA2
-     paper fully specifies the transform — it lives in the package).
-  2. For each clip: loads the 16 last-window frames named by the manifest,
-     hands them to BADAS's transform (which downsizes to 256x256), runs the
-     model -> P(collision).
+  1. Loads nexar-ai/BADAS-Open via its OFFICIAL loader (badas_loader.py from HF).
+     The loader returns a VJEPAModel wrapper (NOT an nn.Module). The actual
+     nn.Module is vjepa.model; the HF AutoVideoProcessor is vjepa.processor.
+  2. For each clip: loads the 16 last-window frames as numpy RGB arrays,
+     preprocesses via vjepa.processor (224x224, ImageNet norm), runs the
+     nn.Module -> logits -> temperature scaling T=2.0 -> softmax -> P(collision).
   3. Writes a per-clip JSONL with the Stage-A schema (see OUTPUT SCHEMA).
 
-FRAMING (see plan §3.2): the MODEL input is 256x256 regardless. We feed the
-HI-RES (1280x720) source frame and let BADAS resize — V-JEPA2 eval is
-resize-then-crop (not a squash), so our pre-squashed 256 frames would mismatch.
+CONFIRMED from badas_loader.py + badas/core/preprocessing.py (2026-06-24):
+  - img_size = 224  (badas_loader.py: VJEPAModel(img_size=224))
+  - resize  = squash (cv2.resize to (size,size), no crop)
+  - norm    = ImageNet mean/std
+  - temperature = 2.0 before softmax (apply_temperature_scaling in vjepa.py)
+  - score   = softmax(logits/2.0)[1]  (positive class probability)
 
-WINDOWING (see plan §3.4): the manifests already encode the last-16-frame
-(~2 s) window at stride 4. We reuse them unchanged.
+WINDOWING: manifests encode the last-16-frame (~2 s) window at stride 4 (7.5fps).
+BADAS targets 8fps; 7.5fps is a benign second-order difference.
 
 OUTPUT SCHEMA (one JSON object per clip)
   {video_id, ground_truth, group, time_before_s, score, collision_verdict, split}
@@ -111,7 +114,11 @@ def dry_run(cfg, records, frames_root, split, n_check=5):
 # =============================================================================
 
 def load_badas(cfg):
-    """Load BADAS-Open via its official loader + expose its frame transform."""
+    """Load BADAS-Open. Returns (vjepa_wrapper, nn_module, device).
+
+    VJEPAModel (wrapper) is NOT an nn.Module — do not call .eval()/.to() on it.
+    vjepa.model IS the nn.Module; vjepa.processor is the HF AutoVideoProcessor.
+    """
     import torch
     from huggingface_hub import hf_hub_download
 
@@ -120,47 +127,43 @@ def load_badas(cfg):
     loader_path = hf_hub_download(repo_id=repo, filename="badas_loader.py")
     sys.path.insert(0, os.path.dirname(loader_path))
     from badas_loader import load_badas_model  # noqa: E402
-    model = load_badas_model()
-    model.eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-
-    # Prefer BADAS's own frame transform (resolves the 224/256 + normalization
-    # ambiguity). Fall back to manual yaml values only if absent.
-    transform = None
-    if cfg["preprocess"]["source"] == "official":
-        try:
-            import badas
-            transform = getattr(badas, "frame_transform", None) \
-                or getattr(badas, "build_transform", None)
-        except Exception:
-            transform = None
-        if transform is None:
-            print("  NOTE: official frame transform not found in `badas`; "
-                  "using manual yaml fallback. VERIFY img_size/norm.")
-    return model, transform, device
+    vjepa = load_badas_model()          # VJEPAModel wrapper
+    nn_model = vjepa.model              # actual nn.Module (ViT-L + pooler + classifier)
+    nn_model.eval()
+    device = str(vjepa.device)          # already on GPU from load_badas_model
+    print(f"  device: {device}  processor: {type(vjepa.processor).__name__}")
+    return vjepa, nn_model, device
 
 
-def manual_transform(paths, pp):
+def preprocess_clip(vjepa, paths):
+    """Preprocess 16 JPEG frames -> (1, T, C, H, W) tensor using BADAS's processor."""
+    import numpy as np
     import torch
-    import torchvision.transforms as T
-    from torchvision.transforms.functional import InterpolationMode
-    tfm = T.Compose([
-        T.Resize((pp["img_size"], pp["img_size"]), interpolation=InterpolationMode.BICUBIC),
-        T.ToTensor(),
-        T.Normalize(mean=pp["norm_mean"], std=pp["norm_std"]),
-    ])
-    return torch.stack([tfm(Image.open(p).convert("RGB")) for p in paths], dim=0)
+
+    frames_np = [np.array(Image.open(p).convert("RGB")) for p in paths]
+
+    if vjepa.processor is not None:
+        # Official HF AutoVideoProcessor (handles resize + norm correctly)
+        inputs = vjepa.processor(videos=frames_np, return_tensors="pt")
+        key = "pixel_values_videos" if "pixel_values_videos" in inputs else next(iter(inputs))
+        clip = inputs[key]
+        if clip.dim() == 4:             # (T, C, H, W) -> (1, T, C, H, W)
+            clip = clip.unsqueeze(0)
+    else:
+        # Fallback: albumentations transform from vjepa.transform
+        frames_t = torch.stack([vjepa.transform(image=f)["image"] for f in frames_np])
+        clip = frames_t.unsqueeze(0)    # (1, T, C, H, W)
+
+    return clip
 
 
 def score_split(cfg, records, frames_root, split, out_path, limit=0):
     import torch
-    pp = cfg["preprocess"]
     pattern = cfg["data"]["frame_filename_pattern"]
     gt_field = cfg["data"]["gt_field"]
     threshold = cfg["data"].get("verdict_threshold", 0.5)
 
-    model, transform, device = load_badas(cfg)
+    vjepa, nn_model, device = load_badas(cfg)
     if limit:
         records = records[:limit]
 
@@ -170,12 +173,11 @@ def score_split(cfg, records, frames_root, split, out_path, limit=0):
     with open(out_path, "w", encoding="utf-8") as fh:
         for k, r in enumerate(records):
             paths = frame_paths_for(r, frames_root, pattern)
-            imgs = [Image.open(p).convert("RGB") for p in paths]
-            clip = transform(imgs) if transform is not None else manual_transform(paths, pp)
-            clip = clip.unsqueeze(0).to(device)  # (1, T, 3, H, W) — adjust if model differs
+            clip = preprocess_clip(vjepa, paths).to(device)  # (1, T, C, H, W)
             with torch.no_grad():
-                out = model(clip)
-            score = float(out.reshape(-1).max().item()) if hasattr(out, "reshape") else float(out)
+                logits = nn_model(clip)             # (1, 2)
+                logits_t = logits / 2.0             # temperature scaling T=2.0 (BADAS default)
+                score = float(torch.softmax(logits_t, dim=1)[0, 1].item())
             fh.write(json.dumps({
                 "video_id":          r["video_id"],
                 "ground_truth":      int(r[gt_field]),

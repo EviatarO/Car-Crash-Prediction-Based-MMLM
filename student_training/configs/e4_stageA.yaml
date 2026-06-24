@@ -15,25 +15,25 @@ model:
   use_official_loader: true           # badas_loader.py from the HF repo
 
 # ── Preprocessing ────────────────────────────────────────────────────────────
-# Neither the BADAS nor the V-JEPA2 paper fully specifies the transform:
-#   - BADAS states "16 frames of size 256x256" only in §3.2.
-#   - V-JEPA2 reports 256x256 + multi-crop eval (resize-then-crop, NOT a squash),
-#     and gives no explicit pixel mean/std.
-# => the exact transform lives in the CODE. source: official routes frames
-# through BADAS's own transform; manual is a fallback only (VERIFY on RunPod).
+# CONFIRMED 2026-06-24 from badas/core/preprocessing.py on RunPod:
+#   - img_size = 256 (VideoPreprocessor default)
+#   - resize = squash (cv2.resize to (256,256), no crop)
+#   - norm = ImageNet (IMAGENET_MEAN/STD constants in preprocessing.py)
+# badas package does NOT expose a top-level frame_transform / build_transform,
+# so manual fallback is used — values below are confirmed correct.
 preprocess:
-  source: "official"   # "official" (preferred) | "manual"
-  img_size: 256        # fallback only; confirm 224 vs 256 against the badas pkg
+  source: "manual"     # badas has no top-level transform fn; manual values confirmed correct
+  img_size: 224        # CONFIRMED: badas_loader.py VJEPAModel(img_size=224)
   num_frames: 16
   target_fps: 8
-  norm_mean: [0.485, 0.456, 0.406]   # fallback only; confirm against badas source
-  norm_std:  [0.229, 0.224, 0.225]
+  norm_mean: [0.485, 0.456, 0.406]   # CONFIRMED: IMAGENET_MEAN in preprocessing.py
+  norm_std:  [0.229, 0.224, 0.225]   # CONFIRMED: IMAGENET_STD in preprocessing.py
 
 # ── Data fields (paths come from the CLI) ────────────────────────────────────
-# Use HI-RES source frames (1280x720) and let BADAS resize to 256x256, because
-# V-JEPA2 eval crops rather than squashes -> the pre-squashed 256 dirs mismatch.
-#   Private: --manifest test_manifest_hires.jsonl        --frames_root dataset/test
-#   Public:  --manifest test_manifest_public_hires.jsonl --frames_root dataset/test_public
+# Preprocessing is squash-resize (not crop), so hires or pre-squashed frames
+# are equivalent. We use hires (1280x720) as the source.
+#   Private: --manifest test_manifest_hires.jsonl        --frames_root /workspace/data/test_HiRes
+#   Public:  --manifest test_manifest_public_hires.jsonl --frames_root /workspace/data/test_public
 data:
   frame_filename_pattern: "frame_{:05d}.jpg"
   gt_field:    "event_occurs"   # 1 = collision, 0 = none
