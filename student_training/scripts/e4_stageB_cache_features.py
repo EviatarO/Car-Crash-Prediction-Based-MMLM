@@ -127,7 +127,9 @@ def main():
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--frames_root", required=True)
     ap.add_argument("--split", required=True, choices=["train", "val"])
-    ap.add_argument("--cache_dir", default="outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features")
+    ap.add_argument("--cache_dir", default=os.environ.get(
+        "E4_CACHE_DIR", "outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features"),
+        help="Feature cache dir. On RunPod set E4_CACHE_DIR=/root/... (off the 20GB /workspace volume).")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()

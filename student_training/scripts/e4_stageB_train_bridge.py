@@ -50,9 +50,16 @@ def get_cosine_lambda(warmup, total):
     return f
 
 
+def resolve_dirs(cfg):
+    """Cache/output dirs, env-overridable (RunPod points these off /workspace)."""
+    cache_dir = os.environ.get("E4_CACHE_DIR", cfg["data"]["cache_dir"])
+    out_dir = os.environ.get("E4_OUTPUT_DIR", cfg["data"]["output_dir"])
+    return cache_dir, out_dir
+
+
 def dry_run(cfg):
     """No GPU: build datasets from the cache manifests, check shapes/counts."""
-    cache_dir = Path(cfg["data"]["cache_dir"])
+    cache_dir = Path(resolve_dirs(cfg)[0])
     print("\n=== DRY RUN (Stage B train) — no model ===")
     for split in ("train", "val"):
         man = cache_dir / f"cache_manifest_{split}.jsonl"
@@ -106,8 +113,8 @@ def train(args, cfg):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(cfg.get("seed", 42))
     tcfg = cfg["train"]
-    cache_dir = cfg["data"]["cache_dir"]
-    out_dir = Path(cfg["data"]["output_dir"]); out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir, out_dir = resolve_dirs(cfg)
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
     amp_dtype = torch.bfloat16 if "bfloat16" in cfg.get("torch_dtype", "bfloat16") else torch.float16
 

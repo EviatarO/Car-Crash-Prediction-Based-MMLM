@@ -158,7 +158,7 @@ def run_gate(cfg, out_dir):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     amp_dtype = torch.bfloat16 if "bfloat16" in cfg.get("torch_dtype", "bfloat16") else torch.float16
-    cache_dir = cfg["data"]["cache_dir"]
+    cache_dir = os.environ.get("E4_CACHE_DIR", cfg["data"]["cache_dir"])
     nq = cfg["projector"]["num_queries"]
 
     llm, tok = load_llm(cfg["llm"]["model_id"], dtype=amp_dtype)
@@ -289,8 +289,8 @@ def main():
     with open(args.config if os.path.isabs(args.config) else PROJECT_ROOT / args.config) as f:
         cfg = yaml.safe_load(f)
 
-    out_dir = cfg["data"]["output_dir"]
-    cache_dir = cfg["data"]["cache_dir"]
+    out_dir = os.environ.get("E4_OUTPUT_DIR", cfg["data"]["output_dir"])
+    cache_dir = os.environ.get("E4_CACHE_DIR", cfg["data"]["cache_dir"])
     train_rows = _load_manifest(cache_dir, "train")
     val_rows = _load_manifest(cache_dir, "val")
 
