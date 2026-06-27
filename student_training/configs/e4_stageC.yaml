@@ -50,6 +50,8 @@ projector:
   freeze: true              # reversible ablation: set false to co-train at low LR
   co_train_lr_scale: 0.2    # projector LR = lr * this, only if freeze=false
   ckpt: "projector_q35_best.pt"   # under E4_OUTPUT_DIR (Phase 0 output)
+  match_embed_norm: true    # REQUIRED for Qwen3.5: L2-match visual tokens to native
+                            # embedding norm (~0.66); without it tokens are 123x too big.
 
 # ── Data / paths ──────────────────────────────────────────────────────────────
 data:

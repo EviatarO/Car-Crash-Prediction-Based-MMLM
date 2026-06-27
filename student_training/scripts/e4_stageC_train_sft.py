@@ -128,7 +128,8 @@ def build_bridge(cfg, model_id, proj_ckpt, device, amp_dtype):
     else:
         print(f"Projector: CO-TRAIN at lr*{cfg['projector'].get('co_train_lr_scale', 0.2)}")
 
-    bridge = StageBBridge(llm, projector, freeze_llm=False).to(device)
+    bridge = StageBBridge(llm, projector, freeze_llm=False,
+                          match_embed_norm=cfg["projector"].get("match_embed_norm")).to(device)
     if cfg["train"].get("gradient_checkpointing", True) and hasattr(llm, "gradient_checkpointing_enable"):
         llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(llm, "enable_input_require_grads"):

@@ -73,7 +73,8 @@ def load_bridge(cfg, model_id, adapter_dir, proj_ckpt, device, amp_dtype):
     llm.eval()
     projector = build_projector(cfg)
     projector.load_state_dict(torch.load(proj_ckpt, map_location="cpu"))
-    bridge = StageBBridge(llm, projector, freeze_llm=True).to(device).eval()
+    bridge = StageBBridge(llm, projector, freeze_llm=True,
+                          match_embed_norm=cfg["projector"].get("match_embed_norm")).to(device).eval()
     return bridge, tok
 
 
