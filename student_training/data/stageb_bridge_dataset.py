@@ -52,11 +52,14 @@ def _parse_target(assistant_target: str):
 class StageBBridgeDataset(Dataset):
     def __init__(self, manifest_path: str, cache_dir: str, tokenizer,
                  num_vis_tokens: int = 64, max_seq_len: int = 1024,
-                 split: str = None):
+                 split: str = None, supervise_verdict: bool = False):
         self.cache_dir = Path(cache_dir)
         self.tok = tokenizer
         self.num_vis_tokens = num_vis_tokens
         self.max_seq_len = max_seq_len
+        # Stage B (False): mask the verdict, supervise the reason span only.
+        # Stage C (True):  supervise the FULL assistant JSON (verdict + reason).
+        self.supervise_verdict = supervise_verdict
         # Placeholder id for visual positions; its embedding is overwritten, so
         # the exact id is irrelevant — only the position matters.
         self.vis_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -93,16 +96,24 @@ class StageBBridgeDataset(Dataset):
         vis_block = [self.vis_id] * self.num_vis_tokens
         question = self._enc(
             f"\n{STAGEB_QUESTION}<|im_end|>\n<|im_start|>assistant\n")
-        # Verdict prefix is MASKED; only the reason body is supervised (plan §3.1).
-        verdict_prefix = self._enc(f'{{"verdict": "{verdict}", "reason": "')
-        reason_body = self._enc(f'{reason}"}}<|im_end|>\n')
 
         # Visual block sits right after the header; record its span explicitly so
         # vis positions are tracked structurally (never inferred from token id).
         vstart = len(header)
         vend = vstart + self.num_vis_tokens
-        prefix = header + vis_block + question + verdict_prefix
-        all_ids = prefix + reason_body
+
+        if self.supervise_verdict:
+            # Stage C: prompt ends at the assistant header; supervise the FULL JSON
+            # (verdict + reason) so the model learns to emit its own verdict.
+            target = self._enc(
+                f'{{"verdict": "{verdict}", "reason": "{reason}"}}<|im_end|>\n')
+            prefix = header + vis_block + question
+        else:
+            # Stage B: verdict prefix is MASKED; only the reason body is supervised.
+            verdict_prefix = self._enc(f'{{"verdict": "{verdict}", "reason": "')
+            target = self._enc(f'{reason}"}}<|im_end|>\n')
+            prefix = header + vis_block + question + verdict_prefix
+        all_ids = prefix + target
         prefix_len = len(prefix)
 
         # Truncate from the FRONT only if it does not reach the visual block, so

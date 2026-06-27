@@ -1,0 +1,104 @@
+==============================================================================
+ RUNPOD RUNBOOK — e4_vjepa_reason, Stage C (Reasoning SFT, LoRA on Qwen3.5-4B)
+==============================================================================
+ GOAL: LoRA-finetune the LLM so reasoning becomes clip-specific + emits its own
+       verdict. Score path + projector FROZEN. Headline prediction stays vision.
+ HEADLINE SIGNAL: ΔCE-shuffle flips from ~0 (Stage B) -> clearly >0.
+ GATE: STOP after train+val. Review, THEN (on user OK) run test.
+ GPU: 24GB+ (4B + LoRA + grad-ckpt). Phase 0 ~10 min; LoRA train < 1h.
+
+------------------------------------------------------------------------------
+ 0) ENV
+------------------------------------------------------------------------------
+  cd /workspace/Car-Crash-Prediction-Based-MMLM && git pull
+  export HF_HOME=/root/.cache/huggingface
+  export E4_CACHE_DIR=/root/e4_stageB/cache          # REUSE Stage B feature cache
+  export E4_OUTPUT_DIR=/root/e4_stageC/out
+  mkdir -p $E4_OUTPUT_DIR
+  pip install peft badas albumentations matplotlib seaborn scipy openpyxl pyyaml \
+              scikit-learn pandas pillow transformers accelerate
+  HF_HOME=/root/.cache/huggingface hf auth login     # if not already
+
+  # CONFIRM Qwen3.5-4B exists + hidden_size:
+  HF_HOME=$HF_HOME python -c "from transformers import AutoConfig; \
+    c=AutoConfig.from_pretrained('Qwen/Qwen3.5-4B'); print('hidden_size', c.hidden_size)"
+  #  -> if this 404s: fall back, export E4_LLM_MODEL_ID=Qwen/Qwen3-4B and
+  #     E4_PROJECTOR_CKPT=<existing Qwen3 projector_best.pt>, SKIP Phase 0.
+  #  -> if hidden_size != 2560: export E4_PROJECTOR_OUT_DIM=<hidden_size>
+
+  # If the Stage B cache is gone (pod was recycled), re-cache (≈10 min):
+  #   HF_HOME=$HF_HOME python student_training/scripts/e4_stageB_cache_features.py \
+  #     --config student_training/configs/e4_stageB.yaml \
+  #     --manifest dataset/teacher_labels/teacher_dataset_e3b.jsonl \
+  #     --frames_root /workspace/data/train_HiRes --split train
+  #   (+ same with val_e3a.jsonl --split val)
+
+------------------------------------------------------------------------------
+ 1) PHASE 0 — re-fit projector to Qwen3.5 (Stage B' ; reuses cached features)
+------------------------------------------------------------------------------
+  export E4_LLM_MODEL_ID=Qwen/Qwen3.5-4B
+  # (export E4_PROJECTOR_OUT_DIM=<h> only if hidden_size != 2560)
+  E4_OUTPUT_DIR=/root/e4_stageC/projfit \
+  HF_HOME=$HF_HOME python student_training/scripts/e4_stageB_train_bridge.py \
+      --config student_training/configs/e4_stageB.yaml
+  # -> /root/e4_stageC/projfit/projector_best.pt ; check val PPL >=20% below random floor.
+  export E4_PROJECTOR_CKPT=/root/e4_stageC/projfit/projector_best.pt
+  # archive: upload projector_best.pt to HF EviatarO/e4-stageB-projector (q35 revision)
+
+------------------------------------------------------------------------------
+ 2) TRAIN LoRA (cached features; top-3 by val CE; early-stop)
+------------------------------------------------------------------------------
+  HF_HOME=$HF_HOME nohup python student_training/scripts/e4_stageC_train_sft.py \
+      --config student_training/configs/e4_stageC.yaml > /root/e4_stageC/train.log 2>&1 &
+  tail -f /root/e4_stageC/train.log
+  # Watch: "Val CE/PPL @ init (LoRA=0)" floor, then per-epoch val_ce with <-top3 / *best*.
+  # Saves ckpt_epNN/ (LoRA adapter); keeps top-3 by val CE; train_result.json at end.
+
+------------------------------------------------------------------------------
+ 3) VAL EVAL on the top-3 (pick the best ON VAL — no test leakage)
+------------------------------------------------------------------------------
+  for D in $(python -c "import json;print(' '.join(t['dir'] for t in json.load(open('/root/e4_stageC/out/train_result.json'))['top3']))"); do
+    HF_HOME=$HF_HOME python student_training/scripts/e4_stageC_eval.py \
+      --config student_training/configs/e4_stageC.yaml \
+      --adapter /root/e4_stageC/out/$D --split val \
+      --out /root/e4_stageC/out/eval/val_${D}.jsonl
+  done
+  # Compare val (LLM-verdict AP/F1 + agreement printed); the BEST-VAL ckpt is the pick.
+
+  # Standard metric pack + figures on the picked val eval:
+  HF_HOME=$HF_HOME python student_training/scripts/evaluate_metrics.py \
+      --results /root/e4_stageC/out/eval/val_<PICK>.jsonl \
+      --out_dir /root/e4_stageC/out/metrics/val --tag "Stage C val"
+  HF_HOME=$HF_HOME python student_training/scripts/e4_stageC_figures.py \
+      --out_dir /root/e4_stageC/out \
+      --epoch_metrics /root/e4_stageC/out/epoch_metrics.jsonl \
+      --val_jsonl /root/e4_stageC/out/eval/val_<PICK>.jsonl \
+      --stageb_ablation outputs/e4_vjepa_reason/e4_StageB_bridge/pod_artifacts/metrics/ablation_sensitivity.json
+
+  # >>> STOP HERE. Report train/val to user. Wait for go/no-go before test. <<<
+
+------------------------------------------------------------------------------
+ 4) (ON APPROVAL) TEST — Private + Public, reuse Stage-A vision scores
+------------------------------------------------------------------------------
+  # Cache test V-JEPA2 features (once), then eval with the PICKED adapter:
+  #   cache: e4_stageB_cache_features.py on test_manifest_hires.jsonl (--split test)
+  #          + test_manifest_public_hires.jsonl
+  #   eval : e4_stageC_eval.py --split test --vision_scores \
+  #          outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl  (then public)
+  # Then evaluate_metrics.py + e4_stageC_figures.py (--test_jsonl ...), and Excel:
+  #   python student_training/scripts/build_test_review_excel.py --layout stagec \
+  #     --jsonl <split>.jsonl --out_xlsx <split>_stagec_review.xlsx --title "Stage C <split>"
+
+------------------------------------------------------------------------------
+ 5) SUMMARY + STOP
+------------------------------------------------------------------------------
+  # Fill outputs/e4_vjepa_reason/e4_StageC_reason_sft/StageC_summary.md from the JSONs.
+  # Upload picked adapter -> HF EviatarO/e4-stageC-lora. Download metrics/plots/excel local.
+==============================================================================
+ GATE / ACCEPTANCE (Stage C "works" iff)
+   (1) ΔCE-shuffle clearly > 0  (was ~0 in Stage B) — reasoning is clip-specific
+   (2) ΔCE-zero stays > 0       — still vision-dependent
+   (3) reasoning de-templated (lower pairwise similarity); JSON-parseable; low repetition
+   (4) regression guard: 18-val vision scores == Stage A
+   NOTE: vision AP does NOT move in Stage C (frozen score). AP-lift is Stage D.
+==============================================================================

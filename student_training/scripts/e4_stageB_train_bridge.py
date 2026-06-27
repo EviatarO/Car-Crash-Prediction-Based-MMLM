@@ -118,8 +118,13 @@ def train(args, cfg):
 
     amp_dtype = torch.bfloat16 if "bfloat16" in cfg.get("torch_dtype", "bfloat16") else torch.float16
 
-    print(f"Loading LLM: {cfg['llm']['model_id']}")
-    llm, tok = load_llm(cfg["llm"]["model_id"], dtype=amp_dtype)
+    # Env overrides let Phase 0 (Stage C) re-fit the projector to another LLM
+    # (e.g. Qwen3.5-4B) without editing this config.
+    model_id = os.environ.get("E4_LLM_MODEL_ID", cfg["llm"]["model_id"])
+    if os.environ.get("E4_PROJECTOR_OUT_DIM"):
+        cfg["projector"]["out_dim"] = int(os.environ["E4_PROJECTOR_OUT_DIM"])
+    print(f"Loading LLM: {model_id}")
+    llm, tok = load_llm(model_id, dtype=amp_dtype)
     projector = build_projector(cfg)
     bridge = StageBBridge(llm, projector).to(device)
     if tcfg.get("gradient_checkpointing", True) and hasattr(llm, "gradient_checkpointing_enable"):

@@ -1,0 +1,89 @@
+# =============================================================================
+# e4_stageC.yaml — Reasoning SFT (LoRA) on Qwen3.5-4B (Stage C of e4)
+# =============================================================================
+# Trains LoRA adapters on the LLM (score path + projector FROZEN). Loss = full-JSON
+# reasoning CE (verdict + reason). Headline prediction stays vision-only (frozen score).
+# Run target: RunPod GPU. Use --dry_run locally first (no GPU).
+# Prereq (Phase 0): re-fit the projector to Qwen3.5 embeddings (Stage B' with this model_id),
+#   producing projector_q35_best.pt — set projector.ckpt to it.
+# =============================================================================
+
+torch_dtype: "bfloat16"
+seed: 42
+
+# ── Frozen V-JEPA2 scorer (Stage-A contract; used only by the caching step) ───
+model:
+  hf_repo: "nexar-ai/BADAS-Open"
+  use_official_loader: true
+preprocess:
+  source: "manual"
+  img_size: 224
+  num_frames: 16
+  target_fps: 8
+  temperature: 2.0          # vision score = softmax(logits / 2.0)[1]
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std:  [0.229, 0.224, 0.225]
+
+# ── LLM (Qwen3.5-4B; LoRA ON in Stage C) ──────────────────────────────────────
+llm:
+  model_id: "Qwen/Qwen3.5-4B"     # verify hidden_size on pod; fallback "Qwen/Qwen3-4B"
+  fallback_model_id: "Qwen/Qwen3-4B"
+
+# ── LoRA (the trainable module) ───────────────────────────────────────────────
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"]
+
+# ── Projector (FROZEN in Stage C; loaded from Phase-0 re-fit) ──────────────────
+projector:
+  variant: "resampler"
+  in_dim: 1024
+  out_dim: 2560             # = Qwen3.5 hidden_size (CONFIRM on pod; edit if different)
+  num_queries: 64
+  hidden_dim: 512
+  n_heads: 8
+  ffn_mult: 4
+  dropout: 0.1
+  freeze: true              # reversible ablation: set false to co-train at low LR
+  co_train_lr_scale: 0.2    # projector LR = lr * this, only if freeze=false
+  ckpt: "projector_q35_best.pt"   # under E4_OUTPUT_DIR (Phase 0 output)
+
+# ── Data / paths ──────────────────────────────────────────────────────────────
+data:
+  frame_filename_pattern: "frame_{:05d}.jpg"
+  cache_dir:   "outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features"   # reuse B cache (env-overridable)
+  output_dir:  "outputs/e4_vjepa_reason/e4_StageC_reason_sft"
+  max_seq_len: 1024
+  num_workers: 0
+  supervise_verdict: true
+  # sources (passed to cache/eval steps via CLI):
+  #   train: dataset/teacher_labels/teacher_dataset_e3b.jsonl  (267 windows / 89 clips)
+  #   val  : dataset/manifests/val_e3a.jsonl                   (18 GT clips)
+  #   frames_root (pod): /workspace/data/train_HiRes
+  #   test vision scores: outputs/e4_vjepa_reason/StageA_scorer/badas_open_{private,public}.jsonl
+
+# ── Training (LoRA only) ──────────────────────────────────────────────────────
+train:
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  num_epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  early_stop_patience: 5
+  gradient_checkpointing: true
+  keep_top_k: 3             # keep top-3 checkpoints by val reasoning-CE
+
+# ── Eval / gate ───────────────────────────────────────────────────────────────
+gate:
+  neg_bucket: "MID"
+  max_new_tokens: 160
+  verdict_yes_strings: ["YES", "Yes", "yes"]
+  verdict_no_strings:  ["NO", "No", "no"]
+  # PASS signals (read when interpreting results):
+  shuffle_dCE_min: 0.05    # ΔCE-shuffle must flip from ~0 (Stage B) to clearly >0
+  zero_dCE_min: 0.05       # ΔCE-zero stays positive (still vision-dependent)

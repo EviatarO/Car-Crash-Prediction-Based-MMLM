@@ -225,13 +225,17 @@ class StageBBridge(nn.Module):
       "mask"    — attention masked off the visual positions (= text-only prior)
     """
 
-    def __init__(self, llm, projector: nn.Module):
+    def __init__(self, llm, projector: nn.Module, freeze_llm: bool = True):
         super().__init__()
         self.llm = llm
         self.projector = projector
-        for p in self.llm.parameters():          # freeze the LLM (LoRA OFF in Stage B)
-            p.requires_grad = False
-        self.llm.eval()                          # keep dropout off in the frozen LM
+        if freeze_llm:
+            for p in self.llm.parameters():      # freeze the LLM (LoRA OFF in Stage B)
+                p.requires_grad = False
+            self.llm.eval()                      # keep dropout off in the frozen LM
+        # Stage C (freeze_llm=False): the caller has wrapped `llm` with PEFT, so the
+        # base is already frozen and only LoRA params carry grads — leave them, and
+        # leave the module in train mode so LoRA dropout is active.
 
     @property
     def embed_dim(self) -> int:

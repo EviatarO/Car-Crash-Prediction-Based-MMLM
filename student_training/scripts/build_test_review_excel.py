@@ -43,13 +43,22 @@ EXPECTED_RED = 212
 COLUMNS = ["video_id", "group", "time_before_s", "ground_truth",
            "collision_verdict", "score", "verdict_reasoning"]
 
+# Stage C layout (e4): teacher reasoning after GT; vision score and the LLM
+# verdict/P(YES)/reasoning as explicit, separate columns. `collision_verdict`
+# is the VISION decision (vision-only headline); coloring compares vision vs LLM.
+COLUMNS_STAGEC = ["video_id", "group", "time_before_s", "ground_truth",
+                  "teacher_reasoning", "collision_verdict", "vision_score",
+                  "llm_verdict", "llm_p_yes", "llm_reasoning"]
+
 GREEN = PatternFill("solid", fgColor="C6EFCE")   # soft green   = score correct + verdict agrees
 RED = PatternFill("solid", fgColor="FFC7CE")     # soft red     = score wrong + verdict wrong (both wrong)
 ORANGE = PatternFill("solid", fgColor="FFE0B3")  # soft orange  = score correct BUT verdict disagrees w/ GT
 STRONG_ORANGE = PatternFill("solid", fgColor="FF9933")  # strong orange = score WRONG but verdict CORRECT
 HEADER_FILL = PatternFill("solid", fgColor="D9D9D9")
 WIDTHS = {"video_id": 10, "group": 8, "time_before_s": 14, "ground_truth": 13,
-          "collision_verdict": 17, "score": 10, "verdict_reasoning": 90, "status": 22}
+          "collision_verdict": 17, "score": 10, "verdict_reasoning": 90, "status": 22,
+          "teacher_reasoning": 80, "vision_score": 12, "llm_verdict": 11,
+          "llm_p_yes": 10, "llm_reasoning": 90}
 
 
 def load_rows(path: Path) -> list[dict]:
@@ -62,6 +71,75 @@ def load_rows(path: Path) -> list[dict]:
     return rows
 
 
+def build_stagec(args):
+    """Stage C (e4) review sheet: vision score + LLM verdict as explicit columns.
+    Coloring = tricolor by (vision-score correct) x (LLM-verdict correct)."""
+    columns = COLUMNS_STAGEC + ["status"]
+    rows = load_rows(Path(args.jsonl))
+    print(f"Loaded {len(rows)} rows from {Path(args.jsonl).name}  (layout=stagec)")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = args.title[:31]
+    for c, col in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=c, value=col)
+        cell.font = Font(bold=True); cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    n_green = n_orange = n_strong = n_red = 0
+    for r, row in enumerate(rows, start=2):
+        gt = int(row["ground_truth"])
+        vscore = float(row.get("vision_score", row.get("score")))
+        score_correct = ((1 if vscore >= args.threshold else 0) == gt)
+        llm_pred = 1 if str(row.get("llm_verdict", "")).upper() == "YES" else 0
+        llm_correct = (llm_pred == gt)
+
+        if score_correct and llm_correct:
+            fill, status = GREEN, "ok"; n_green += 1
+        elif score_correct and not llm_correct:
+            fill, status = ORANGE, "llm-mismatch"; n_orange += 1
+        elif (not score_correct) and llm_correct:
+            fill, status = STRONG_ORANGE, "vision-wrong-llm-right"; n_strong += 1
+        else:
+            fill, status = RED, "both-wrong"; n_red += 1
+
+        values = {
+            "video_id": str(row.get("video_id", "")).zfill(5),
+            "group": row.get("group", row.get("horizon_label")),
+            "time_before_s": row.get("time_before_s"),
+            "ground_truth": gt,
+            "teacher_reasoning": row.get("teacher_reasoning"),
+            "collision_verdict": "YES" if vscore >= args.threshold else "NO",  # vision decision
+            "vision_score": round(vscore, 4),
+            "llm_verdict": row.get("llm_verdict"),
+            "llm_p_yes": round(float(row.get("llm_p_yes", 0.0)), 4),
+            "llm_reasoning": row.get("llm_reasoning", row.get("verdict_reasoning")),
+            "status": status,
+        }
+        for c, col in enumerate(columns, start=1):
+            cell = ws.cell(row=r, column=c, value=values[col])
+            cell.fill = fill
+            if col in ("teacher_reasoning", "llm_reasoning"):
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+            elif col in ("vision_score", "llm_p_yes"):
+                cell.number_format = "0.0000"; cell.alignment = Alignment(horizontal="center")
+            else:
+                cell.alignment = Alignment(horizontal="center", vertical="top")
+
+    for c, col in enumerate(columns, start=1):
+        ws.column_dimensions[get_column_letter(c)].width = WIDTHS[col]
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(rows) + 1}"
+    out_xlsx = Path(args.out_xlsx); out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_xlsx)
+    print(f"Saved: {out_xlsx}")
+    print(f"  green (vision ok, llm ok)        = {n_green}")
+    print(f"  orange (vision ok, llm wrong)    = {n_orange}")
+    print(f"  strong-orange (vision wrong, llm right) = {n_strong}")
+    print(f"  red   (both wrong)               = {n_red}")
+    print(f"  LLM-vision agreement = {n_green + n_red}/{len(rows)}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build per-clip review Excel from an eval JSONL")
     ap.add_argument("--jsonl", default=str(JSONL))
@@ -69,11 +147,18 @@ def main():
     ap.add_argument("--title", default="E3a Test Epoch7")
     ap.add_argument("--expected_green", type=int, default=EXPECTED_GREEN)
     ap.add_argument("--expected_red", type=int, default=EXPECTED_RED)
+    ap.add_argument("--threshold", type=float, default=THRESHOLD)
+    ap.add_argument("--layout", choices=["e3a", "stagec"], default="e3a",
+                    help="'e3a' = original 7-col sheet; 'stagec' = e4 layout "
+                         "(teacher reasoning + explicit vision/LLM columns)")
     ap.add_argument("--color_mode", choices=["score", "tri"], default="score",
                     help="'score' = 2-colour by score>=0.5 (default); "
                          "'tri' = green/red by score + orange when score correct "
                          "but text verdict disagrees with GT (adds a 'status' column)")
     args = ap.parse_args()
+    if args.layout == "stagec":
+        build_stagec(args)
+        return
     jsonl_path = Path(args.jsonl)
     out_xlsx = Path(args.out_xlsx)
     tri = args.color_mode == "tri"

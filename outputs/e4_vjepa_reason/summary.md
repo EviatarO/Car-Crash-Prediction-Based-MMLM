@@ -11,7 +11,7 @@ coupling as the secondary AP-lift result.
 | Stage | Status | Output |
 |---|---|---|
 | A — scorer reproduce + freeze | **COMPLETE ✓ PASS** (2026-06-24) | StageA_scorer/ |
-| B — V-JEPA2→LLM bridge | **CODE READY, dry-run validated, not scored** (awaiting RunPod) | e4_StageB_bridge/ |
+| B — V-JEPA2→LLM bridge | **COMPLETE ✓ PASS** (2026-06-24) | e4_StageB_bridge/ |
 | C — reasoning SFT | not started | — |
 | D — AP-lift (ensemble + fusion head) | not started | — |
 | E — faithfulness | not started | — |
@@ -34,6 +34,18 @@ coupling as the secondary AP-lift result.
 **Acceptance:** PASS (|0.853−0.86|=0.007 ≤ 0.03 Private; |0.871−0.86|=0.011 ≤ 0.03 Public) ✓
 
 **New baseline: ~0.86 AP** (up from InternVL student 0.762). Stage B may proceed.
+
+## Stage B — V-JEPA2→projector→Qwen3-4B bridge (COMPLETE ✓ PASS, 2026-06-24)
+
+Trained ONLY the ResamplerProjector (64 queries, 6.08M params) on cached features; V-JEPA2 + Qwen3-4B frozen.
+- **① Δ-PPL (gate):** trained **10.19** vs random **20.19** / text-only **19.99** → **49.5% / 49.0%** gain (≥20% ✓). Best @ ep3, early-stopped.
+- **② Ablation:** ΔCE(zero)=**0.685** ✓ (uses visual tokens); ΔCE(shuffle)≈**0.001** (not clip-specific — generic hazard/safe prior).
+- **③ Gens:** 44.7 words, 100% parseable, 0% repetition; **clean pos/neg semantic separation** (t=1→"closing rapidly, high collision probability"; t=0→"constant speed, no risk"). Hazard-lexicon gap saturated (both 1.0) → uninformative metric.
+- **⑤ Per-TTE (frozen):** AP 0.979/0.942/0.888 (0.5/1.0/1.5s) — monotonic anticipation curve; scorer anchor intact.
+- **Tap point:** `temporal_processor` pre-hook (patch grid (2560,1024)); cache+out on `/root` (workspace quota).
+- **Carry-forward:** templated/generic reasoning (ΔCE-shuffle≈0) — Stage C LoRA → content-specific; Stage E → faithfulness.
+
+Detail: `e4_StageB_bridge/StageB_summary.md`. Artifacts on pod `/root/e4_stageB/`.
 
 ### Key discoveries during Stage A (RunPod)
 - `VJEPAModel` is NOT an `nn.Module` — the actual nn.Module is `vjepa.model`.
