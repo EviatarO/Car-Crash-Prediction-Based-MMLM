@@ -28,6 +28,7 @@ probe and the BADAS classifier are all frozen (LoRA is OFF — that is Stage C).
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -225,7 +226,8 @@ class StageBBridge(nn.Module):
       "mask"    — attention masked off the visual positions (= text-only prior)
     """
 
-    def __init__(self, llm, projector: nn.Module, freeze_llm: bool = True):
+    def __init__(self, llm, projector: nn.Module, freeze_llm: bool = True,
+                 match_embed_norm: Optional[bool] = None):
         super().__init__()
         self.llm = llm
         self.projector = projector
@@ -236,6 +238,21 @@ class StageBBridge(nn.Module):
         # Stage C (freeze_llm=False): the caller has wrapped `llm` with PEFT, so the
         # base is already frozen and only LoRA params carry grads — leave them, and
         # leave the module in train mode so LoRA dropout is active.
+
+        # Match injected visual tokens to the native token-embedding norm shell.
+        # Some LLMs (Qwen3.5: vocab 248k, emb-norm ~0.66) use a very different
+        # embedding scale than the projector's raw output (~80) — a 100x+ mismatch
+        # makes the LM treat visual tokens as noise. Env-gated (E4_MATCH_EMBED_NORM)
+        # so the existing Qwen3-4B projector path is unaffected by default.
+        if match_embed_norm is None:
+            match_embed_norm = os.environ.get("E4_MATCH_EMBED_NORM", "") not in ("", "0", "false")
+        self.match_embed_norm = match_embed_norm
+        if match_embed_norm:
+            with torch.no_grad():
+                w = self.llm.get_input_embeddings().weight.detach().float()
+                target = w.norm(dim=1).mean()
+            self.register_buffer("embed_target_norm", target.to(torch.float32))
+            print(f"  [bridge] match_embed_norm ON — target token norm = {float(target):.4f}")
 
     @property
     def embed_dim(self) -> int:
@@ -249,6 +266,10 @@ class StageBBridge(nn.Module):
         if ablate == "shuffle" and shuffle_feats is not None:
             vis_feats = shuffle_feats
         vis_tok = self.projector(vis_feats)                         # (B, Q, H)
+        if self.match_embed_norm:
+            # place visual tokens on the native embedding norm shell (direction kept)
+            vis_tok = F.normalize(vis_tok.float(), dim=-1).to(vis_tok.dtype) \
+                * self.embed_target_norm.to(vis_tok.dtype)
         if ablate == "zero":
             vis_tok = torch.zeros_like(vis_tok)
 
