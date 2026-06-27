@@ -279,11 +279,34 @@ class StageBBridge(nn.Module):
 
 
 def load_llm(model_id: str, dtype=torch.bfloat16):
-    """Load the standalone Qwen3-4B LM + tokenizer (frozen base for Stage B)."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    """Load a causal LM (Qwen3-4B) OR the text-reasoner of a VLM (Qwen3.5-4B is a
+    vision-language model whose LM tower we use; its native vision is unused — our
+    V-JEPA2 features are the vision path). Tries the causal-LM head first, then the
+    VLM heads, so the same StageBBridge (get_input_embeddings / inputs_embeds /
+    generate) works either way. Handles both the `dtype=` (transformers >=5) and the
+    older `torch_dtype=` kwargs.
+    """
+    import transformers as tf
+    from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
-    llm = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=dtype, trust_remote_code=True)
-    return llm, tok
+
+    def _from_pretrained(cls):
+        try:
+            return cls.from_pretrained(model_id, dtype=dtype, trust_remote_code=True)
+        except TypeError:
+            return cls.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+
+    errs = []
+    for name in ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModelForVision2Seq"):
+        cls = getattr(tf, name, None)
+        if cls is None:
+            continue
+        try:
+            llm = _from_pretrained(cls)
+            print(f"  [load_llm] {model_id} via {name} -> {type(llm).__name__}")
+            return llm, tok
+        except Exception as e:
+            errs.append(f"{name}: {type(e).__name__}: {str(e)[:140]}")
+    raise RuntimeError("could not load LLM:\n  " + "\n  ".join(errs))
