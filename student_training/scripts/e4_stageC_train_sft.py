@@ -260,11 +260,12 @@ def train(args, cfg):
                     vpos = b["verdict_pos"].to(device)               # (B,)
                     idx = (vpos - 1).clamp(min=0)                    # logit predicting verdict
                     sel = logits[torch.arange(logits.size(0), device=device), idx]  # (B, V)
-                    pair = sel[:, [no_id, yes_id]].float()
-                    p_yes = torch.softmax(pair, dim=-1)[:, 1].clamp(1e-4, 1 - 1e-4)
+                    # log-odds of YES vs NO = logit(p_yes); BCEWithLogits is autocast-safe
+                    logit_diff = (sel[:, yes_id] - sel[:, no_id]).float()
                     tgt = b["vision_score"].to(device).float().clamp(1e-4, 1 - 1e-4)
                     valid = (vpos >= 0).float()
-                    bce = torch.nn.functional.binary_cross_entropy(p_yes, tgt, reduction="none")
+                    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logit_diff, tgt, reduction="none")
                     loss_anchor = (bce * valid).sum() / valid.sum().clamp(min=1.0)
                     loss = loss_ce + anchor_w * loss_anchor
             (loss / grad_accum).backward()
