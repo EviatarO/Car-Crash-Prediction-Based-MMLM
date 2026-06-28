@@ -1,0 +1,85 @@
+# =============================================================================
+# e4_stageC_v2.yaml — Stage C, anchored + low-capacity (Qwen3.5-4B)
+# =============================================================================
+# v1 (r16/a32, pure reasoning-CE) overfit at epoch 1 on 89 scenes. v2 adds:
+#   (1) score-consistency ANCHOR: distill frozen BADAS score into the LLM verdict
+#       (BCE of p_yes@verdict vs vision score) — the regularizer the InternVL run had.
+#   (2) lower LoRA capacity (r8) + more dropout + lower LR — slows memorization.
+# Goal: train usefully past epoch 1 and show ΔCE-shuffle grounding on existing 267.
+# =============================================================================
+
+torch_dtype: "bfloat16"
+seed: 42
+
+model:
+  hf_repo: "nexar-ai/BADAS-Open"
+  use_official_loader: true
+preprocess:
+  source: "manual"
+  img_size: 224
+  num_frames: 16
+  target_fps: 8
+  temperature: 2.0
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std:  [0.229, 0.224, 0.225]
+
+llm:
+  model_id: "Qwen/Qwen3.5-4B"
+  fallback_model_id: "Qwen/Qwen3-4B"
+
+# ── LoRA: lower capacity than v1 (r16) to slow overfit on ~89 scenes ──────────
+lora:
+  r: 8
+  alpha: 16                 # keep alpha/r=2 (same effective update scale as v1)
+  dropout: 0.12
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"]
+
+# ── Score-consistency anchor (the key addition) ──────────────────────────────
+anchor:
+  enabled: true
+  weight: 1.0               # total = reasoning_CE + weight * BCE(p_yes, BADAS score)
+  yes_str: "YES"
+  no_str: "NO"
+
+projector:
+  variant: "resampler"
+  in_dim: 1024
+  out_dim: 2560
+  num_queries: 64
+  hidden_dim: 512
+  n_heads: 8
+  ffn_mult: 4
+  dropout: 0.1
+  freeze: true
+  co_train_lr_scale: 0.2
+  ckpt: "projector_q35_best.pt"
+  match_embed_norm: true    # REQUIRED for Qwen3.5 (123x scale fix)
+
+data:
+  frame_filename_pattern: "frame_{:05d}.jpg"
+  cache_dir:   "outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features"
+  output_dir:  "outputs/e4_vjepa_reason/e4_StageC_reason_sft"
+  max_seq_len: 1024
+  num_workers: 0
+  supervise_verdict: true
+
+train:
+  learning_rate: 1.0e-4     # lower than v1's 2e-4 — slower, less memorizing
+  weight_decay: 0.05        # stronger than v1's 0.01
+  num_epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  early_stop_patience: 6
+  gradient_checkpointing: true
+  keep_top_k: 3
+
+gate:
+  neg_bucket: "MID"
+  max_new_tokens: 160
+  verdict_yes_strings: ["YES", "Yes", "yes"]
+  verdict_no_strings:  ["NO", "No", "no"]
+  shuffle_dCE_min: 0.05
+  zero_dCE_min: 0.05

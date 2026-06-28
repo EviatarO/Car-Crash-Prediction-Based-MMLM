@@ -104,15 +104,20 @@ class StageBBridgeDataset(Dataset):
 
         if self.supervise_verdict:
             # Stage C: prompt ends at the assistant header; supervise the FULL JSON
-            # (verdict + reason) so the model learns to emit its own verdict.
-            target = self._enc(
-                f'{{"verdict": "{verdict}", "reason": "{reason}"}}<|im_end|>\n')
+            # (verdict + reason). Build the target in SEGMENTS so we know the exact
+            # index of the verdict token (for the score-consistency anchor).
+            seg_vp = self._enc('{"verdict": "')
+            seg_verdict = self._enc(verdict)                         # "YES" / "NO"
+            seg_rest = self._enc(f'", "reason": "{reason}"}}<|im_end|>\n')
+            target = seg_vp + seg_verdict + seg_rest
             prefix = header + vis_block + question
+            verdict_pos = len(prefix) + len(seg_vp)                  # first verdict token
         else:
             # Stage B: verdict prefix is MASKED; only the reason body is supervised.
             verdict_prefix = self._enc(f'{{"verdict": "{verdict}", "reason": "')
             target = self._enc(f'{reason}"}}<|im_end|>\n')
             prefix = header + vis_block + question + verdict_prefix
+            verdict_pos = -1
         all_ids = prefix + target
         prefix_len = len(prefix)
 
@@ -130,18 +135,23 @@ class StageBBridgeDataset(Dataset):
                 vstart = max(0, vstart - overflow)
                 vend = vstart + self.num_vis_tokens
                 prefix_len = max(0, prefix_len - overflow)
+            if verdict_pos >= 0:
+                verdict_pos = max(-1, verdict_pos - overflow)
 
         labels = [-100] * prefix_len + all_ids[prefix_len:]
         vis_mask = [False] * len(all_ids)
         for j in range(max(0, vstart), min(vend, len(all_ids))):
             vis_mask[j] = True
 
+        score = r.get("score")
         return {
             "vis_feats":      feats,
             "input_ids":      torch.tensor(all_ids, dtype=torch.long),
             "attention_mask": torch.ones(len(all_ids), dtype=torch.long),
             "labels":         torch.tensor(labels, dtype=torch.long),
             "vis_mask":       torch.tensor(vis_mask, dtype=torch.bool),
+            "verdict_pos":    torch.tensor(int(verdict_pos), dtype=torch.long),
+            "vision_score":   torch.tensor(float(score) if score is not None else 0.0),
             "meta": {
                 "video_id":      r.get("video_id"),
                 "horizon_label": r.get("horizon_label"),
@@ -162,7 +172,11 @@ class StageBBridgeDataset(Dataset):
         lbl   = torch.stack([pad(s["labels"], -100)        for s in batch])
         vmask = torch.stack([pad(s["vis_mask"], False)     for s in batch])
         feats = torch.stack([s["vis_feats"] for s in batch])           # (B, P, in_dim)
-        return {
+        out = {
             "vis_feats": feats, "input_ids": ids, "attention_mask": mask,
             "labels": lbl, "vis_mask": vmask, "meta": [s["meta"] for s in batch],
         }
+        if "verdict_pos" in batch[0]:                                  # Stage C score anchor
+            out["verdict_pos"] = torch.stack([s["verdict_pos"] for s in batch])
+            out["vision_score"] = torch.stack([s["vision_score"] for s in batch])
+        return out

@@ -203,6 +203,19 @@ def train(args, cfg):
                             collate_fn=StageBBridgeDataset.collate_fn,
                             num_workers=cfg["data"].get("num_workers", 0))
 
+    # Score-consistency anchor: distill the frozen BADAS score into the LLM's
+    # verdict probability (BCE of p_yes @ the verdict token vs the vision score).
+    # This re-introduces the regularizing, visually-grounded signal that let the
+    # InternVL student train past epoch 1 (pure reasoning-CE overfits immediately).
+    acfg = cfg.get("anchor", {})
+    anchor_on = bool(acfg.get("enabled", False)) and sv
+    anchor_w = float(acfg.get("weight", 1.0))
+    yes_id = tok.encode(acfg.get("yes_str", "YES"), add_special_tokens=False)[0]
+    no_id = tok.encode(acfg.get("no_str", "NO"), add_special_tokens=False)[0]
+    if anchor_on:
+        print(f"Score anchor ON: + {anchor_w} * BCE(p_yes@verdict, BADAS score)  "
+              f"[yes_id={yes_id} no_id={no_id}]")
+
     # Optimizer: LoRA params at lr; projector (if co-trained) at a lower lr.
     base_lr = tcfg["learning_rate"]
     if freeze_proj:
@@ -234,15 +247,30 @@ def train(args, cfg):
     for epoch in range(1, tcfg["num_epochs"] + 1):
         bridge.train()
         optim.zero_grad()
-        run_loss, run_n = 0.0, 0
+        run_loss, run_n, run_anchor = 0.0, 0, 0.0
         for i, b in enumerate(train_loader):
             with torch.cuda.amp.autocast(enabled=(device == "cuda"), dtype=amp_dtype):
-                loss, _ = bridge(
+                loss_ce, logits = bridge(
                     b["vis_feats"].to(device), b["input_ids"].to(device),
                     b["attention_mask"].to(device), b["labels"].to(device),
                     b["vis_mask"].to(device), ablate="none")
+                loss = loss_ce
+                loss_anchor = None
+                if anchor_on:
+                    vpos = b["verdict_pos"].to(device)               # (B,)
+                    idx = (vpos - 1).clamp(min=0)                    # logit predicting verdict
+                    sel = logits[torch.arange(logits.size(0), device=device), idx]  # (B, V)
+                    pair = sel[:, [no_id, yes_id]].float()
+                    p_yes = torch.softmax(pair, dim=-1)[:, 1].clamp(1e-4, 1 - 1e-4)
+                    tgt = b["vision_score"].to(device).float().clamp(1e-4, 1 - 1e-4)
+                    valid = (vpos >= 0).float()
+                    bce = torch.nn.functional.binary_cross_entropy(p_yes, tgt, reduction="none")
+                    loss_anchor = (bce * valid).sum() / valid.sum().clamp(min=1.0)
+                    loss = loss_ce + anchor_w * loss_anchor
             (loss / grad_accum).backward()
-            run_loss += float(loss.item()); run_n += 1
+            run_loss += float(loss_ce.item()); run_n += 1
+            if loss_anchor is not None:
+                run_anchor += float(loss_anchor.item())
             if (i + 1) % grad_accum == 0 or (i + 1) == len(train_loader):
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in bridge.parameters() if p.requires_grad],
@@ -251,7 +279,9 @@ def train(args, cfg):
 
         val_ppl, val_ce = evaluate_ce(bridge, val_loader, device, amp_dtype)
         tr_loss = run_loss / max(run_n, 1)
+        tr_anchor = run_anchor / max(run_n, 1)
         entry = {"epoch": epoch, "step": gstep, "train_loss": round(tr_loss, 5),
+                 "train_anchor": round(tr_anchor, 5),
                  "val_ce": round(val_ce, 5), "val_ppl": round(val_ppl, 4),
                  "lr": sched.get_last_lr()[0], "elapsed_min": round((time.time() - t0) / 60, 1)}
         with open(epoch_log, "a") as f:
@@ -271,7 +301,8 @@ def train(args, cfg):
             marker += " *best*"
         else:
             bad += 1
-        print(f"  ep {epoch:>3}  train_loss={tr_loss:.4f}  val_ce={val_ce:.4f}  "
+        anc = f"  anchor={tr_anchor:.4f}" if anchor_on else ""
+        print(f"  ep {epoch:>3}  train_ce={tr_loss:.4f}{anc}  val_ce={val_ce:.4f}  "
               f"val_ppl={val_ppl:.3f}{marker}")
         if bad >= patience:
             print(f"  early stop (no val_ce improvement in {patience} epochs)")
