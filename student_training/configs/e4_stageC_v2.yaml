@@ -74,7 +74,9 @@ train:
   max_grad_norm: 1.0
   early_stop_patience: 6
   gradient_checkpointing: true
-  keep_top_k: 3
+  keep_top_k: 99            # keep EVERY epoch (short run); val_ce is style-confounded
+                            # (teacher-style train vs human-GT val) -> pick the real best
+                            # at eval time by verdict-grounding, not by val_ce.
 
 gate:
   neg_bucket: "MID"
