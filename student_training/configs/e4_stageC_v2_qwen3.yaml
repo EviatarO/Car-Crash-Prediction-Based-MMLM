@@ -1,0 +1,85 @@
+# =============================================================================
+# e4_stageC_v2_qwen3.yaml — Stage C v2 on Qwen3-4B (weak-prior comparison)
+# =============================================================================
+# Same recipe as e4_stageC_v2.yaml (anchor + r8 + dropout) but LLM = Qwen3-4B.
+# Rationale: Qwen3.5 confabulated (strong prior, grounding only -4.9%). Qwen3-4B
+# grounds -48% (Stage B) and has a weak prior -> expected to confabulate less and
+# reason more faithfully on the same 89 scenes. One-variable swap from v2.
+#
+# Projector: the Stage-B Qwen3-4B projector (HF projector_best.pt). It was trained
+# WITHOUT norm-matching (Qwen3-4B's embedding scale already matched), so
+# match_embed_norm is OFF here (turning it on would break that projector's scale).
+# =============================================================================
+
+torch_dtype: "bfloat16"
+seed: 42
+
+model:
+  hf_repo: "nexar-ai/BADAS-Open"
+  use_official_loader: true
+preprocess:
+  source: "manual"
+  img_size: 224
+  num_frames: 16
+  target_fps: 8
+  temperature: 2.0
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std:  [0.229, 0.224, 0.225]
+
+llm:
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.12
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"]
+
+anchor:
+  enabled: true
+  weight: 1.0
+  yes_str: "YES"
+  no_str: "NO"
+
+projector:
+  variant: "resampler"
+  in_dim: 1024
+  out_dim: 2560
+  num_queries: 64
+  hidden_dim: 512
+  n_heads: 8
+  ffn_mult: 4
+  dropout: 0.1
+  freeze: true
+  co_train_lr_scale: 0.2
+  ckpt: "projector_best.pt"   # Stage-B Qwen3-4B projector (HF e4-stageB-projector)
+  match_embed_norm: false     # Qwen3-4B projector trained without it — keep OFF
+
+data:
+  frame_filename_pattern: "frame_{:05d}.jpg"
+  cache_dir:   "outputs/e4_vjepa_reason/e4_StageB_bridge/cached_features"
+  output_dir:  "outputs/e4_vjepa_reason/e4_StageC_reason_sft"
+  max_seq_len: 1024
+  num_workers: 0
+  supervise_verdict: true
+
+train:
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  num_epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  early_stop_patience: 6
+  gradient_checkpointing: true
+  keep_top_k: 99
+
+gate:
+  neg_bucket: "MID"
+  max_new_tokens: 160
+  verdict_yes_strings: ["YES", "Yes", "yes"]
+  verdict_no_strings:  ["NO", "No", "no"]
+  shuffle_dCE_min: 0.05
+  zero_dCE_min: 0.05
