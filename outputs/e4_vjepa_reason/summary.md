@@ -12,7 +12,7 @@ coupling as the secondary AP-lift result.
 |---|---|---|
 | A — scorer reproduce + freeze | **COMPLETE ✓ PASS** (2026-06-24) | StageA_scorer/ |
 | B — V-JEPA2→LLM bridge | **COMPLETE ✓ PASS** (2026-06-24) | e4_StageB_bridge/ |
-| C — reasoning SFT | not started | — |
+| C — reasoning SFT (LoRA, Qwen3.5-4B) | **CODE READY, dry-run validated** (awaiting RunPod) | e4_StageC_reason_sft/ |
 | D — AP-lift (ensemble + fusion head) | not started | — |
 | E — faithfulness | not started | — |
 | F — unfreeze ablation | not started | — |
