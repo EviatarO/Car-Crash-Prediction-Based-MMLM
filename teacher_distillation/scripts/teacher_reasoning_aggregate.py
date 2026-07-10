@@ -34,8 +34,13 @@ from openpyxl.utils import get_column_letter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "outputs" / "teacher_reasoning"
-ALL_JSONL = OUT_DIR / "Teacher_Reasoning_All_Clips.jsonl"
-ALL_XLSX = OUT_DIR / "Teacher_Reasoning_All_Clips.xlsx"
+
+
+def _paths(dataset: str):
+    """Per-dataset canonical files (test and train are kept in separate workbooks)."""
+    tag = "Test" if dataset == "test" else "Train"
+    return (OUT_DIR / f"Teacher_Reasoning_{tag}_All_Clips.jsonl",
+            OUT_DIR / f"Teacher_Reasoning_{tag}_All_Clips.xlsx")
 
 # Review-sheet columns, in the exact order requested (inputs then outputs).
 XLSX_COLUMNS = [
@@ -110,11 +115,12 @@ def _key(rec: dict) -> Tuple[str, str, str]:
     return (ds, _norm_vid(rec.get("video_id")), _resolve_tte(rec))
 
 
-def _load_all() -> Dict[Tuple[str, str, str], dict]:
-    if not ALL_JSONL.exists():
+def _load_all(dataset: str) -> Dict[Tuple[str, str, str], dict]:
+    jsonl_path, _ = _paths(dataset)
+    if not jsonl_path.exists():
         return {}
     out: Dict[Tuple[str, str, str], dict] = {}
-    for line in ALL_JSONL.read_text(encoding="utf-8").splitlines():
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             r = json.loads(line)
             out[_key(r)] = r
@@ -146,7 +152,7 @@ def _outcome(rec: dict) -> str:
     return "wrong"
 
 
-def write_xlsx(store: Dict[Tuple[str, str, str], dict]) -> None:
+def write_xlsx(store: Dict[Tuple[str, str, str], dict], xlsx_path: Path) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -193,7 +199,7 @@ def write_xlsx(store: Dict[Tuple[str, str, str], dict]) -> None:
         ws.column_dimensions[get_column_letter(XLSX_COLUMNS.index(name) + 1)].width = w
     ws.row_dimensions[1].height = 28
     ws.freeze_panes = "A2"
-    wb.save(ALL_XLSX)
+    wb.save(xlsx_path)
 
 
 def main() -> None:
@@ -204,7 +210,8 @@ def main() -> None:
                     help="stage JSONL path(s); repeatable")
     args = ap.parse_args()
 
-    store = _load_all()
+    jsonl_path, xlsx_path = _paths(args.dataset)
+    store = _load_all(args.dataset)
     before = len(store)
     added = updated = 0
     for sp in args.stage:
@@ -220,16 +227,16 @@ def main() -> None:
             store[k] = rec
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    with ALL_JSONL.open("w", encoding="utf-8") as f:
+    with jsonl_path.open("w", encoding="utf-8") as f:
         for r in sorted(store.values(),
                         key=lambda r: (r.get("dataset", ""), _norm_vid(r.get("video_id")),
                                        _tte_label(r.get("requested_time_to_event")))):
             f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
-    write_xlsx(store)
+    write_xlsx(store, xlsx_path)
 
-    print(f"Aggregate: {before} -> {len(store)} rows  (+{added} new, {updated} overwritten)")
-    print(f"  JSONL: {ALL_JSONL}")
-    print(f"  XLSX : {ALL_XLSX}")
+    print(f"Aggregate ({args.dataset}): {before} -> {len(store)} rows  (+{added} new, {updated} overwritten)")
+    print(f"  JSONL: {jsonl_path}")
+    print(f"  XLSX : {xlsx_path}")
 
 
 if __name__ == "__main__":

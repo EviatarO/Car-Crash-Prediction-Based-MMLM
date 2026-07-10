@@ -25,7 +25,12 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ALL_JSONL = REPO_ROOT / "outputs" / "teacher_reasoning" / "Teacher_Reasoning_All_Clips.jsonl"
+_TR_DIR = REPO_ROOT / "outputs" / "teacher_reasoning"
+
+
+def _all_jsonl(dataset: str) -> Path:
+    tag = "Test" if dataset == "test" else "Train"
+    return _TR_DIR / f"Teacher_Reasoning_{tag}_All_Clips.jsonl"
 TEST_PRIV = REPO_ROOT / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 TEST_PUB = REPO_ROOT / "dataset" / "manifests" / "test_manifest_public_hires.jsonl"
 TRAIN_CSV = Path(r"C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis"
@@ -60,14 +65,13 @@ def _resolve_tte(rec: dict) -> str:
 def _done_keys(dataset: str) -> Set[Tuple[str, str]]:
     """(video_id, TTE_label) already run for this dataset."""
     done: Set[Tuple[str, str]] = set()
-    if not ALL_JSONL.exists():
+    path = _all_jsonl(dataset)
+    if not path.exists():
         return done
-    for line in ALL_JSONL.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         r = json.loads(line)
-        if r.get("dataset") != dataset:
-            continue
         done.add((_norm_vid(r.get("video_id")), _resolve_tte(r)))
     return done
 
@@ -76,21 +80,59 @@ def _load_jsonl(p: Path) -> List[dict]:
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-def _next_test(n: int) -> List[dict]:
+def _next_test(n: int, split_filter: str = "both") -> List[dict]:
     done = _done_keys("test")
+    sources = []
+    if split_filter in ("private", "both"):
+        sources.append((TEST_PRIV, "private"))
+    if split_filter in ("public", "both"):
+        sources.append((TEST_PUB, "public"))
     pos, neg = [], []
-    for path, split in ((TEST_PRIV, "private"), (TEST_PUB, "public")):
+    for path, split in sources:
         for r in _load_jsonl(path):
             vid = _norm_vid(r["video_id"])
             tte = _tte_label(r.get("time_before_event_s"))
             if (vid, tte) in done:
                 continue
-            row = dict(r); row["video_id"] = vid; row["split"] = split
-            row["gt_verdict"] = "YES" if int(r.get("event_occurs", 0)) == 1 else "NO"
-            (pos if int(r.get("event_occurs", 0)) == 1 else neg).append(row)
+            occ = int(r.get("event_occurs", 0))
+            fi = r.get("frame_indices") or []
+            fps = float(r.get("fps", 30.0)) or 30.0
+            # Enrich so the row is a ready-to-run teacher replay record.
+            row = dict(r)
+            row["video_id"] = vid
+            row["split"] = split
+            row["gt_verdict"] = "YES" if occ == 1 else "NO"
+            row["target"] = occ
+            row["requested_time_to_event"] = r.get("time_before_event_s")
+            row["t_seconds"] = round(int(fi[-1]) / fps, 3) if fi else None
+            # keep frames_dir ("<id>_hires") so the teacher can locate HiRes frames
+            row.setdefault("frames_dir", f"{vid}_hires")
+            (pos if occ == 1 else neg).append(row)
     half = n // 2
-    batch = pos[:half] + neg[:half]
-    return batch
+    # Stratified proportional sample within each class so all TTE horizons appear
+    # (test TTE shape is inherited from the manifest, not forced equal).
+    return _strat_by_tte(pos, half) + _strat_by_tte(neg, half)
+
+
+def _strat_by_tte(rows: List[dict], k: int) -> List[dict]:
+    """Take k rows from `rows`, allocated across TTE buckets proportional to bucket size
+    (largest-remainder rounding so the parts sum to exactly k)."""
+    if k >= len(rows):
+        return rows[:k]
+    buckets: Dict[str, List[dict]] = defaultdict(list)
+    for r in rows:
+        buckets[_tte_label(r.get("requested_time_to_event"))].append(r)
+    total = len(rows)
+    quotas = {b: k * len(v) / total for b, v in buckets.items()}
+    alloc = {b: int(q) for b, q in quotas.items()}
+    # distribute the remainder to the largest fractional parts
+    rem = k - sum(alloc.values())
+    for b, _ in sorted(quotas.items(), key=lambda kv: kv[1] - int(kv[1]), reverse=True)[:rem]:
+        alloc[b] += 1
+    out: List[dict] = []
+    for b, v in buckets.items():
+        out.extend(v[:alloc[b]])
+    return out
 
 
 def _next_train(n: int) -> List[dict]:
@@ -131,10 +173,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True, choices=["test", "train"])
     ap.add_argument("--n", type=int, required=True, help="batch size (split ~50/50 TP/TN)")
+    ap.add_argument("--split", default="both", choices=["private", "public", "both"],
+                    help="test only: restrict to one manifest (default both)")
     ap.add_argument("--out", required=True, help="output batch JSONL (.todo)")
     args = ap.parse_args()
 
-    batch = _next_test(args.n) if args.dataset == "test" else _next_train(args.n)
+    batch = (_next_test(args.n, args.split) if args.dataset == "test"
+             else _next_train(args.n))
     out = Path(args.out if Path(args.out).is_absolute() else REPO_ROOT / args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:

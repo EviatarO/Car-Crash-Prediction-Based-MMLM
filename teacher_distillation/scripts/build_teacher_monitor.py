@@ -37,7 +37,10 @@ from openpyxl.utils import get_column_letter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "outputs" / "teacher_reasoning"
-ALL_JSONL = OUT_DIR / "Teacher_Reasoning_All_Clips.jsonl"
+# Per-dataset canonical files (with legacy combined file as a fallback).
+ALL_JSONLS = [OUT_DIR / "Teacher_Reasoning_Test_All_Clips.jsonl",
+              OUT_DIR / "Teacher_Reasoning_Train_All_Clips.jsonl",
+              OUT_DIR / "Teacher_Reasoning_All_Clips.jsonl"]
 OUT_MONITOR = OUT_DIR / "monitor_teacher_coverage.xlsx"
 
 TEST_PRIV = REPO_ROOT / "dataset" / "manifests" / "test_manifest_hires.jsonl"
@@ -111,14 +114,15 @@ def _outcome(rec: dict) -> str:
 def _load_outcomes() -> Dict[Tuple[str, str, str], str]:
     """(dataset, video_id, TTE_label) -> outcome."""
     out: Dict[Tuple[str, str, str], str] = {}
-    if not ALL_JSONL.exists():
-        return out
-    for line in ALL_JSONL.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    for path in ALL_JSONLS:
+        if not path.exists():
             continue
-        r = json.loads(line)
-        k = (r.get("dataset", ""), _norm_vid(r.get("video_id")), _resolve_tte(r))
-        out[k] = _outcome(r)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            k = (r.get("dataset", ""), _norm_vid(r.get("video_id")), _resolve_tte(r))
+            out[k] = _outcome(r)
     return out
 
 
