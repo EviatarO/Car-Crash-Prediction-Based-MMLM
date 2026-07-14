@@ -104,18 +104,25 @@ def _parse_reason(assistant_target) -> str:
     return str(obj).strip()
 
 
-def load_rows(split: str) -> list[dict]:
+def load_rows(split: str, train_jsonl: Path = TRAIN_JSONL, train_field: str = None) -> list[dict]:
+    """train_field=None -> Stage-1 behavior (teacher_dataset_e3a.jsonl, assistant_target.reason).
+    train_field=<name> -> read that field directly (e.g. 'final_reasoning' from
+    Teacher_Reasoning_Train_All_Clips.jsonl, matching what reversebert_finetune.py trained on)."""
     rows: list[dict] = []
     t_map = load_val_t_seconds()
 
     if split in ("train", "both"):
-        with open(TRAIN_JSONL, encoding="utf-8") as f:
+        with open(train_jsonl, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 r = json.loads(line)
-                reason = _parse_reason(r.get("assistant_target"))
+                reason = (
+                    str(r.get(train_field, "")).strip()
+                    if train_field
+                    else _parse_reason(r.get("assistant_target"))
+                )
                 if not reason:
                     continue
                 rows.append(
@@ -220,6 +227,11 @@ def main():
     ap.add_argument("--use-gte", action="store_true", help="ungated GTE fallback encoder")
     ap.add_argument("--lora-path", default=None, help="local fine-tuned adapter dir (overrides emoact repo)")
     ap.add_argument("--projector-path", default=None, help="local reverse_bert_projector.pt (with --lora-path)")
+    ap.add_argument("--train-jsonl", default=str(TRAIN_JSONL),
+                     help="train-split source jsonl (default: teacher_dataset_e3a.jsonl, 89 rows)")
+    ap.add_argument("--train-field", default=None,
+                     help="read this field directly instead of assistant_target.reason "
+                          "(e.g. final_reasoning, to match what reversebert_finetune.py trained on)")
     ap.add_argument(
         "--out",
         type=str,
@@ -231,7 +243,7 @@ def main():
     encoder_name = GTE_ENCODER if args.use_gte else ENCODER
     lora_repo = args.lora_path or (GTE_LORA_REPO if args.use_gte else LORA_REPO)
 
-    rows = load_rows(args.split)
+    rows = load_rows(args.split, train_jsonl=Path(args.train_jsonl), train_field=args.train_field)
     if args.limit:
         # keep a mix of train+val in smoke
         rows = rows[: args.limit] if args.split != "both" else (rows[:2] + rows[-2:])[: args.limit]
