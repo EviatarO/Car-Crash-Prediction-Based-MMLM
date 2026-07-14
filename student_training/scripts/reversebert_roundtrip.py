@@ -104,7 +104,12 @@ def _parse_reason(assistant_target) -> str:
     return str(obj).strip()
 
 
-def load_rows(split: str, train_jsonl: Path = TRAIN_JSONL, train_field: str = None) -> list[dict]:
+def load_rows(
+    split: str,
+    train_jsonl: Path = TRAIN_JSONL,
+    train_field: str = None,
+    val_jsonl: Path = VAL_JSONL,
+) -> list[dict]:
     """train_field=None -> Stage-1 behavior (teacher_dataset_e3a.jsonl, assistant_target.reason).
     train_field=<name> -> read that field directly (e.g. 'final_reasoning' from
     Teacher_Reasoning_Train_All_Clips.jsonl, matching what reversebert_finetune.py trained on)."""
@@ -137,7 +142,7 @@ def load_rows(split: str, train_jsonl: Path = TRAIN_JSONL, train_field: str = No
                 )
 
     if split in ("val", "both"):
-        with open(VAL_JSONL, encoding="utf-8") as f:
+        with open(val_jsonl, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -232,6 +237,9 @@ def main():
     ap.add_argument("--train-field", default=None,
                      help="read this field directly instead of assistant_target.reason "
                           "(e.g. final_reasoning, to match what reversebert_finetune.py trained on)")
+    ap.add_argument("--val-jsonl", default=str(VAL_JSONL),
+                     help="val-split source jsonl (default assumes repo layout; override on RunPod "
+                          "where files sit flat, e.g. /workspace/decoder_ft/val_e3a.jsonl)")
     ap.add_argument(
         "--out",
         type=str,
@@ -243,7 +251,12 @@ def main():
     encoder_name = GTE_ENCODER if args.use_gte else ENCODER
     lora_repo = args.lora_path or (GTE_LORA_REPO if args.use_gte else LORA_REPO)
 
-    rows = load_rows(args.split, train_jsonl=Path(args.train_jsonl), train_field=args.train_field)
+    rows = load_rows(
+        args.split,
+        train_jsonl=Path(args.train_jsonl),
+        train_field=args.train_field,
+        val_jsonl=Path(args.val_jsonl),
+    )
     if args.limit:
         # keep a mix of train+val in smoke
         rows = rows[: args.limit] if args.split != "both" else (rows[:2] + rows[-2:])[: args.limit]
