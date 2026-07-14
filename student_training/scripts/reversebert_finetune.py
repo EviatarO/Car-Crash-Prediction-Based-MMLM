@@ -113,8 +113,12 @@ def main():
     from peft import LoraConfig, PeftModel, get_peft_model
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_amp = device == "cuda"
-    dtype = torch.float16 if use_amp else torch.float32
+    # Train in fp32. Qwen3-0.6B is tiny (~80 optimizer steps), so fp32 costs almost
+    # nothing on GPU and avoids a real trap: loading the base in fp16 makes the LoRA
+    # + projector gradients fp16, which GradScaler cannot unscale
+    # ("Attempting to unscale FP16 gradients"). This is the path the CPU dry-run validated.
+    use_amp = False
+    dtype = torch.float32
     warm_start = not args.from_scratch
     print(f"[cfg] device={device} amp={use_amp} warm_start={warm_start} "
           f"epochs={args.epochs} eff_batch={args.batch_size*args.grad_accum}")
