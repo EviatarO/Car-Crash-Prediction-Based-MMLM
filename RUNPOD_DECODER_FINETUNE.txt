@@ -1,0 +1,92 @@
+========================================================================
+RUNPOD — Stage 2: crash-domain decoder fine-tune (predict-embed-decode)
+========================================================================
+Goal: fine-tune the ReverseBERT decoder (projector + Qwen3-0.6B LoRA) to
+reconstruct CRASH reasonings, then round-trip-eval on the 18 human val set.
+Encoder (EmbeddingGemma-300m) stays FROZEN. Text-only; no video.
+
+Plan: ~/.claude/plans/lets-leave-for-a-bubbly-wadler.md
+Local dry-run already validated the loop (2 steps, loss 0.79, warm-start OK).
+
+------------------------------------------------------------------------
+0) POD
+------------------------------------------------------------------------
+GPU: RTX 4090 24GB (comfortable) or RTX A4000/A5000 16-24GB (cheaper).
+     Job is tiny (~80 optimizer steps) -> minutes of compute.
+Image: any recent PyTorch CUDA image (cu121/cu124), Python 3.10+.
+Est. cost: <$1 compute; budget ~$2 incl. setup/idle.
+
+------------------------------------------------------------------------
+1) CACHE GUARD (CLAUDE.md rule — avoid /workspace 20GB overflow)
+------------------------------------------------------------------------
+export HF_HOME=/root/.cache/huggingface
+ls -la /root/.cache/huggingface   # if it is a symlink into /workspace:
+# rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+
+------------------------------------------------------------------------
+2) CODE + DATA
+------------------------------------------------------------------------
+# get the repo (git clone your remote, or rsync/scp the working tree)
+cd /workspace && git clone <YOUR_REPO_URL> MMLM_AI && cd MMLM_AI
+# Ensure these SMALL data files are present (upload if gitignored as outputs):
+#   outputs/teacher_reasoning/Teacher_Reasoning_Train_All_Clips.jsonl   (267 train reasonings)
+#   dataset/manifests/val_e3a.jsonl                                     (18 human val)
+#   dataset/teacher_labels/teacher_dataset_e3a.jsonl                    (89, for train-sanity eval)
+
+------------------------------------------------------------------------
+3) DEPS
+------------------------------------------------------------------------
+pip install -U torch transformers peft sentence-transformers bert_score \
+    openpyxl pandas huggingface_hub accelerate
+
+------------------------------------------------------------------------
+4) HF AUTH (EmbeddingGemma is gated — license must be accepted on the account)
+------------------------------------------------------------------------
+HF_HOME=/root/.cache/huggingface hf auth login   # paste token (read scope)
+
+------------------------------------------------------------------------
+5) TRAIN  (warm-start from emoact checkpoint; 267 reasonings; 10 epochs)
+------------------------------------------------------------------------
+export HF_HOME=/root/.cache/huggingface
+python student_training/scripts/reversebert_finetune.py \
+    --train-jsonl outputs/teacher_reasoning/Teacher_Reasoning_Train_All_Clips.jsonl \
+    --field final_reasoning \
+    --epochs 10 --batch-size 2 --grad-accum 16 --max-len 256 --lr 1e-4 \
+    --save \
+    --out-dir outputs/decoder_roundtrip/finetuned
+# Saves per-epoch: outputs/decoder_roundtrip/finetuned/epoch_NN/{adapter, reverse_bert_projector.pt}
+# Fallback if outputs stay emoact-biased: add  --from-scratch
+
+------------------------------------------------------------------------
+6) EVAL  (round-trip with the fine-tuned weights; baseline-rescaled BERTScore)
+------------------------------------------------------------------------
+# pick the final (or best) epoch dir, e.g. epoch_10
+EP=outputs/decoder_roundtrip/finetuned/epoch_10
+python student_training/scripts/reversebert_roundtrip.py \
+    --split both \
+    --lora-path      $EP/adapter \
+    --projector-path $EP/reverse_bert_projector.pt \
+    --max-new-tokens 160 \
+    --out outputs/decoder_roundtrip/finetuned_roundtrip_raw.jsonl
+# Prints BERTScore F1 (baseline-rescaled) overall/train/val.
+# (Optional) also eval epoch_05 to compare and pick best on val.
+
+------------------------------------------------------------------------
+7) BRING RESULTS BACK
+------------------------------------------------------------------------
+# Download to local for the qualitative pass + final xlsx:
+#   outputs/decoder_roundtrip/finetuned_roundtrip_raw.jsonl
+#   (optionally) the chosen epoch_NN/ adapter+projector, or push to EviatarO/ HF:
+#   HF_HOME=/root/.cache/huggingface hf upload EviatarO/reversebert-crash-ep10 $EP
+
+------------------------------------------------------------------------
+8) BACK LOCALLY (Claude)
+------------------------------------------------------------------------
+# I build outputs/decoder_roundtrip/e3a_decoder_roundtrip_finetuned.xlsx
+# (source vs reconstruction, split, BERTScore, quality 0-10 + explanation)
+# and update summary.md with the go/no-go vs the emoact baseline (~0 faithful).
+
+SANITY CHECKS
+- Training loss should fall from ~0.8 toward <0.2 within a few epochs (tiny set).
+- Success = val reconstructions preserve the collision cause/agent/verdict,
+  not just generic driving text; baseline-rescaled BERTScore clearly > 0.
