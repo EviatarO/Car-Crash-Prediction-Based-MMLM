@@ -24,6 +24,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
@@ -88,7 +89,8 @@ def main():
     for epoch in range(1, args.epochs + 1):
         predictor.train()
         total_loss = 0.0
-        for ex in train_ex:
+        pbar = tqdm(train_ex, desc=f"epoch {epoch}/{args.epochs}", leave=False)
+        for i, ex in enumerate(pbar, 1):
             opt.zero_grad()
             pred = predict(ex)
             tgt = target(ex)
@@ -96,6 +98,7 @@ def main():
             loss.backward()
             opt.step()
             total_loss += loss.item()
+            pbar.set_postfix(loss=f"{total_loss/i:.4f}")
         avg = total_loss / max(1, len(train_ex))
         print(f"  epoch {epoch}/{args.epochs}  train_loss={avg:.4f}  ({time.time()-t0:.1f}s)")
 
