@@ -1,0 +1,158 @@
+========================================================================
+RUNPOD — Semantic-Supervision FAST VALIDATION PASS (A0 -> B1 -> A1 -> B)
+========================================================================
+Goal: confirm the WHOLE pipeline runs end-to-end on the 267 examples we
+already have (89 clips x TTE_0.5/1.0/1.5 + negatives), BEFORE scaling
+captioning to ~4.5k. Numbers from this pass are NOT meaningful science
+(267 < the ~500/1000 minimums for B1/A1/B) - this is a plumbing check.
+
+Plan: ~/.claude/plans/lets-leave-for-a-bubbly-wadler.md
+New code (already written + locally smoke-tested for data loading):
+  student_training/scripts/semsup_common.py   (data + BADAS wrapper + SigLIP)
+  student_training/scripts/semsup_b1_probe.py (Stage B1)
+  student_training/scripts/semsup_train.py    (Stage A1 and B, one script)
+Local smoke test already passed: all 267/267 caption rows resolve to real
+16-frame folders on disk (0 skipped) - the data plumbing is solid.
+
+------------------------------------------------------------------------
+0) POD + CACHE GUARD
+------------------------------------------------------------------------
+GPU: any >=16GB (RTX 4090/A5000). BADAS is a ViT-L; LoRA keeps it light.
+export HF_HOME=/root/.cache/huggingface
+ls -la /root/.cache/huggingface   # if symlinked into /workspace:
+# rm -rf /root/.cache/huggingface && mkdir -p /root/.cache/huggingface
+
+------------------------------------------------------------------------
+1) CODE + DATA
+------------------------------------------------------------------------
+# Upload (no git needed - these are self-contained beyond project-relative imports):
+#   student_training/scripts/semsup_common.py
+#   student_training/scripts/semsup_b1_probe.py
+#   student_training/scripts/semsup_train.py
+#   student_training/scripts/e4_stageA_badas_open_eval.py   (reused as-is)
+#   student_training/models/vjepa_reason.py                 (reused as-is)
+#   student_training/configs/e4_stageA.yaml
+#   outputs/semantic_captions/Caption_Train_All_Clips.jsonl (267 rows)
+#   dataset/teacher_labels/*.jsonl        (frames_dir resolution index)
+#   dataset/train/<...>_hires*/           (the frame folders the 267 rows reference)
+#   dataset/manifests/test_manifest_hires.jsonl  (677 Private test, for A0 + final eval)
+#   dataset/test/<...>_hires/             (677 test frame folders)
+# Preserve the relative layout above (semsup_*.py import from ../models and ../scripts
+# by relative path resolution, and semsup_common.py's PROJECT_ROOT = parents[2]).
+
+------------------------------------------------------------------------
+2) DEPS + AUTH
+------------------------------------------------------------------------
+pip install -U transformers peft huggingface_hub pyyaml scikit-learn \
+    albumentations sentencepiece
+# albumentations: required by the badas package's internal transform fallback.
+# sentencepiece: required by SigLIP's tokenizer.
+# NOTE: do NOT blindly `pip install -U torch` on a pod whose torch/torchvision/CUDA
+# are already matched to the driver - only add torch if genuinely missing (see the
+# ReverseBERT session's postmortem: this exact mistake broke a pod once).
+HF_HOME=/root/.cache/huggingface hf auth login   # for gated repos if any
+
+# REQUIRED on every run (Windows-local testing hit a cp1255 UnicodeEncodeError on
+# an emoji print inside the badas package; harmless on Linux pods but cheap insurance):
+export PYTHONIOENCODING=utf-8 PYTHONUTF8=1
+
+------------------------------------------------------------------------
+3) STEP 0 — DISCOVER BADAS'S REAL MODULE NAMES  (DONE - already confirmed)
+------------------------------------------------------------------------
+Already run and verified locally (2026-07-21). BADAS-Open's backbone is a plain
+V-JEPA2 ViT-L: `backbone.encoder.layer.{0..23}.attention.{query,key,value,proj}`
++ `.mlp.{fc1,fc2}`. These names exist ONLY under `backbone` (verified zero
+overlap with `pooler`/`classifier` = the crash head), so LoRA on them cannot
+touch the crash head.
+
+  --lora-target-modules query,key,value
+
+(Only re-run the discovery command below if BADAS-Open's weights are ever
+updated and this assumption needs re-checking:)
+  cd student_training/scripts
+  PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python semsup_common.py --dry-run-modules \
+      --config ../configs/e4_stageA.yaml --out /root/badas_modules.txt
+
+------------------------------------------------------------------------
+4) STAGE A0 — frozen baseline  (DONE - already confirmed 2026-06-24)
+------------------------------------------------------------------------
+Already run: outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl (677
+rows) -> AP=0.853, AUC=0.864 (within 0.86+/-0.03). Per-TTE: 0.5s=0.862, 1.0s=0.864,
+1.5s=0.856. No need to re-run. (Command below only for reference/re-verification.)
+
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python e4_stageA_badas_open_eval.py \
+    --config ../configs/e4_stageA.yaml \
+    --manifest ../../dataset/manifests/test_manifest_hires.jsonl \
+    --frames_root ../../dataset/test \
+    --split Private \
+    --output /root/semsup/a0/badas_open_private.jsonl
+
+------------------------------------------------------------------------
+5) STAGE B1 — predictor-only probe (frozen vision + frozen SigLIP)
+------------------------------------------------------------------------
+STATUS: mechanics fully verified locally on CPU (8-clip/2-epoch smoke test) -
+BADAS load, hook capture, SigLIP encode, predictor train, cosine loss, held-out
+eval, checkpoint save all confirmed working. Only the DATA SCALE changes for the
+real run below. Local timing (~7-14s/clip on CPU) => 216 train x 15 epochs would
+be ~9h on CPU - this real run needs the pod.
+
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python semsup_b1_probe.py \
+    --config ../configs/e4_stageA.yaml \
+    --epochs 15 --out-dir /root/semsup/b1
+# 216 train / 51 val clips, frozen everything except a tiny predictor.
+# Watch: held-out mean_cosine and retrieval_top1_acc (diagnostic, not AP).
+
+------------------------------------------------------------------------
+6) STAGE A1 — crash-only LoRA fine-tune (control)
+------------------------------------------------------------------------
+STATUS: NOT yet locally smoke-tested (deferred - B1 first). Code is written and
+compiles; the LoRA target names (query,key,value) are confirmed to exist and not
+overlap the crash head (step 3), but the actual training loop (backward through
+LoRA, checkpoint save) has not been run even at small scale yet.
+
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python semsup_train.py \
+    --config ../configs/e4_stageA.yaml \
+    --lora-target-modules query,key,value \
+    --semantic-weight 0.0 --epochs 8 --grad-accum 8 \
+    --out-dir /root/semsup/a1 \
+    --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
+    --test-frames-root ../../dataset/test
+# Fast validation: if slow, add --test-limit 100 to score only 100 test clips
+# for the plumbing check (skip for the real run later).
+# Watch: "LoRA applied: trainable=X" prints X > 0. val_ap may barely move at
+# n=216 - that's expected/fine for this smoke pass.
+
+------------------------------------------------------------------------
+7) STAGE B — crash + semantic-aux LoRA fine-tune (treatment)
+------------------------------------------------------------------------
+STATUS: NOT yet locally smoke-tested (deferred - B1 first, and this needs a B1
+checkpoint to warm-start from anyway). Same caveat as A1, plus the semantic
+branch (predictor warm-start, SigLIP target, combined loss) is untested.
+
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python semsup_train.py \
+    --config ../configs/e4_stageA.yaml \
+    --lora-target-modules query,key,value \
+    --semantic-weight 0.3 --predictor-init /root/semsup/b1/predictor_b1.pt \
+    --epochs 8 --grad-accum 8 \
+    --out-dir /root/semsup/b \
+    --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
+    --test-frames-root ../../dataset/test
+
+------------------------------------------------------------------------
+8) BRING RESULTS BACK
+------------------------------------------------------------------------
+# Download:
+#   /root/semsup/a0/badas_open_private.jsonl
+#   /root/semsup/b1/{predictor_b1.pt, b1_metrics.json}
+#   /root/semsup/a1/{train_metrics.json, test_results.jsonl}
+#   /root/semsup/b/{train_metrics.json, test_results.jsonl}
+# Locally I'll run evaluate_metrics.py on the two test_results.jsonl files and
+# build a comparison table (A0 / A1 / B) + summary.md.
+
+SANITY CHECKS (read before declaring "it works")
+- A0 AP within 0.86 +/- 0.03. If not, stop - base setup is broken.
+- B1: trainable predictor params > 0; loss decreases across epochs.
+- A1/B: "LoRA applied: trainable=X" prints X > 0 (script raises if X==0).
+- A1/B: crash_loss decreases across epochs (even on 216 examples it should move).
+- This IS a smoke test: DO NOT read A1-vs-B AP deltas as a real result at n=267.
+  The only claim this pass supports is "the pipeline runs end-to-end correctly."
