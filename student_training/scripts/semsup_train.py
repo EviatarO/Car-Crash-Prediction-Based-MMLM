@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,7 @@ from semsup_common import (  # noqa: E402
 )
 from vjepa_reason import ResamplerProjector  # noqa: E402
 from e4_stageA_badas_open_eval import load_manifest, frame_paths_for  # noqa: E402
+from metrics_core import metrics_from_arrays  # noqa: E402
 
 
 def evaluate_crash_ap(badas, examples, device):
@@ -136,7 +138,7 @@ def main():
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
 
-    best_ap, best_epoch = -1.0, -1
+    saved = []          # [(val_ap, epoch)] for every epoch, ranked at the end
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         badas.nn_model.train()
@@ -183,57 +185,93 @@ def main():
         badas.nn_model.save_pretrained(str(ep_dir / "lora_adapter"))
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
-        if val_ap == val_ap and val_ap > best_ap:  # NaN-safe
-            best_ap, best_epoch = val_ap, epoch
+        saved.append((val_ap, epoch))
 
-    print(f"\n[done] best held-out val_ap={best_ap:.4f} @ epoch {best_epoch}")
+    # Rank epochs: highest val_ap first; NaN -> -inf so a degenerate run (single-
+    # class val split) falls back to the LAST epochs by number. Ties -> later
+    # epoch wins. Keep the top-3 checkpoints, prune the rest (mirrors B1).
+    ranked = sorted(saved, key=lambda r: (r[0] if r[0] == r[0] else float("-inf"), r[1]),
+                    reverse=True)
+    top3 = ranked[:3]
+    keep = {e for _, e in top3}
+    for _, e in saved:
+        if e not in keep:
+            shutil.rmtree(out_dir / f"epoch_{e:02d}", ignore_errors=True)
+    best_ap, best_epoch = top3[0]
+    print(f"\n[done] top-3 by val_ap: " +
+          ", ".join(f"ep{e} (val_ap={va:.4f})" for va, e in top3))
     with open(out_dir / "train_metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"stage": stage, "best_val_ap": best_ap, "best_epoch": best_epoch,
+        json.dump({"stage": stage,
+                    "best_val_ap": (None if best_ap != best_ap else round(best_ap, 4)),
+                    "best_epoch": best_epoch,
+                    "top3": [{"epoch": e, "val_ap": (None if va != va else round(va, 4))}
+                             for va, e in top3],
                     "n_train": len(train_ex), "n_val": len(val_ex),
                     "semantic_weight": args.semantic_weight}, f, indent=2)
 
-    # Restore the BEST epoch's weights before test scoring. Without this,
-    # badas.nn_model still holds whatever the LAST epoch left it at, which is
-    # not necessarily the best one (val_ap can peak mid-training - this is
-    # exactly what happened in B1's real run, best at epoch 8 of 23).
-    if best_epoch == -1:
-        print("[warn] no epoch had a valid val_ap (val split may be single-class) "
-              "- test-scoring with the LAST epoch's weights, not a selected best")
-    else:
-        from safetensors.torch import load_file
-        from peft.utils import set_peft_model_state_dict
-        best_dir = out_dir / f"epoch_{best_epoch:02d}"
-        adapter_sd = load_file(str(best_dir / "lora_adapter" / "adapter_model.safetensors"))
-        set_peft_model_state_dict(badas.nn_model, adapter_sd)
-        if predictor is not None:
-            predictor.load_state_dict(torch.load(best_dir / "predictor.pt", map_location=device))
-        print(f"[reload] restored epoch {best_epoch} (val_ap={best_ap:.4f}) before test scoring")
+    if not (args.test_manifest and args.test_frames_root):
+        return
 
-    if args.test_manifest and args.test_frames_root:
-        print(f"\n[test] scoring 677-Private test set with epoch {best_epoch} checkpoint ...")
+    # ---- Test-score EACH of the top-3 checkpoints on the real test set. ----
+    # At n~267, which epoch "wins" on val is noisy, so scoring all 3 shows the
+    # spread rather than betting the headline on one checkpoint.
+    from safetensors.torch import load_file
+    from peft.utils import set_peft_model_state_dict
+
+    records = load_manifest(args.test_manifest)
+    if args.test_limit:
+        records = records[: args.test_limit]
+    pattern = stagea_cfg["data"]["frame_filename_pattern"]
+    gt_field = stagea_cfg["data"]["gt_field"]
+
+    def score_checkpoint(epoch):
+        adapter_sd = load_file(str(out_dir / f"epoch_{epoch:02d}" / "lora_adapter"
+                                   / "adapter_model.safetensors"))
+        set_peft_model_state_dict(badas.nn_model, adapter_sd)
         badas.nn_model.eval()
-        records = load_manifest(args.test_manifest)
-        if args.test_limit:
-            records = records[: args.test_limit]
-        pattern = stagea_cfg["data"]["frame_filename_pattern"]
-        gt_field = stagea_cfg["data"]["gt_field"]
-        out_test = out_dir / "test_results.jsonl"
-        ys, yt = [], []
-        with open(out_test, "w", encoding="utf-8") as f:
-            for r in records:
-                paths = frame_paths_for(r, args.test_frames_root, pattern)
-                with torch.no_grad():
-                    logits, _ = badas.forward(paths)
-                    score = float(torch.softmax(logits, dim=1)[0, 1].item())
-                f.write(json.dumps({
-                    "video_id": r["video_id"], "ground_truth": int(r[gt_field]),
-                    "group": r.get("group"), "score": round(score, 4),
-                }) + "\n")
-                ys.append(score)
-                yt.append(int(r[gt_field]))
-        test_ap = average_precision_score(yt, ys)
-        print(f"[test] n={len(records)}  test_AP={test_ap:.4f}  -> {out_test}")
-        print("       (run evaluate_metrics.py on this file for the full report)")
+        ys, yt, grp, vids = [], [], [], []
+        for r in records:
+            paths = frame_paths_for(r, args.test_frames_root, pattern)
+            with torch.no_grad():
+                logits, _ = badas.forward(paths)
+                ys.append(float(torch.softmax(logits, dim=1)[0, 1].item()))
+            yt.append(int(r[gt_field])); grp.append(r.get("group"))
+            vids.append(r["video_id"])
+        return vids, yt, ys, grp
+
+    summary = []
+    for rank, (va, epoch) in enumerate(top3, 1):
+        print(f"\n[test] scoring top-{rank} checkpoint (epoch {epoch}, "
+              f"val_ap={va:.4f}) on {len(records)} clips ...")
+        vids, yt, ys, grp = score_checkpoint(epoch)
+        res_path = out_dir / f"test_results_ep{epoch:02d}.jsonl"
+        with open(res_path, "w", encoding="utf-8") as f:
+            for vid, g, gt, s in zip(vids, grp, yt, ys):
+                f.write(json.dumps({"video_id": vid, "ground_truth": gt,
+                                     "group": g, "score": round(s, 4)}) + "\n")
+        m = metrics_from_arrays(yt, ys, groups=grp, threshold=0.5)
+        with open(out_dir / f"metrics_ep{epoch:02d}.json", "w", encoding="utf-8") as f:
+            json.dump({"stage": stage, "epoch": epoch, "rank": rank,
+                       "val_ap": (None if va != va else round(va, 4)), **m}, f, indent=2)
+        per = m.get("per_tte_ap", {})
+        print(f"       test_AP={m['ap']}  AUC={m['auc_roc']}  F1={m['f1']} "
+              f"(F1*={m['f1_optimal']}@{m['optimal_threshold']})  "
+              f"recall={m['recall_sensitivity_tpr']}  spec={m['specificity_tnr']}  "
+              f"acc={m['accuracy']}  Brier={m['brier']}  ECE={m['ece']}")
+        print(f"       per-TTE AP: " +
+              "  ".join(f"{k}={v['ap']}(n={v['n']})" for k, v in per.items()))
+        summary.append({"rank": rank, "epoch": epoch,
+                        "val_ap": (None if va != va else round(va, 4)),
+                        "test_ap": m["ap"], "auc_roc": m["auc_roc"], "f1": m["f1"],
+                        "f1_optimal": m["f1_optimal"], "recall": m["recall_sensitivity_tpr"],
+                        "specificity": m["specificity_tnr"], "brier": m["brier"],
+                        "ece": m["ece"], "per_tte_ap": per})
+
+    with open(out_dir / "test_summary.json", "w", encoding="utf-8") as f:
+        json.dump({"stage": stage, "semantic_weight": args.semantic_weight,
+                   "n_test": len(records), "checkpoints": summary}, f, indent=2)
+    print(f"\n[test] wrote per-checkpoint metrics + {out_dir / 'test_summary.json'} "
+          f"(best = top-1, epoch {best_epoch})")
 
 
 if __name__ == "__main__":

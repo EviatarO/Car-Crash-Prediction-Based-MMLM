@@ -50,6 +50,10 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+# Pure-math metrics live in metrics_core (numpy/sklearn only) so the training
+# scripts can reuse them without pulling in matplotlib/seaborn/pandas.
+from metrics_core import expected_calibration_error, metrics_from_arrays  # noqa: F401
+
 
 # =============================================================================
 # Load results
@@ -115,6 +119,11 @@ def compute_metrics(df: pd.DataFrame, threshold: float) -> dict:
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
 
+    # Specificity (TNR) = TN/(TN+FP); Brier + ECE for calibration (E3 additions).
+    specificity = float(tn) / (tn + fp) if (tn + fp) else 0.0
+    brier = float(np.mean((y_score - y_true) ** 2))
+    ece   = expected_calibration_error(y_true, y_score) if (n_pos and n_neg) else float("nan")
+
     # Optimal F1 threshold (sweep)
     precisions, recalls, thresholds_pr = precision_recall_curve(y_true, y_score)
     f1_scores = np.where(
@@ -136,6 +145,9 @@ def compute_metrics(df: pd.DataFrame, threshold: float) -> dict:
         "f1":                round(float(f1), 4),
         "precision":         round(float(prec), 4),
         "recall":            round(float(rec), 4),
+        "specificity":       round(float(specificity), 4),
+        "brier":             round(float(brier), 4),
+        "ece":               (None if ece != ece else round(float(ece), 4)),
         "tp":                int(tp),
         "fp":                int(fp),
         "tn":                int(tn),
@@ -398,10 +410,13 @@ def main():
     print(f"  -----------------------------------------")
     print(f"  Average Precision : {metrics['ap']:.4f}  <- primary metric")
     print(f"  AUC-ROC           : {metrics['auc_roc']:.4f}")
+    ece_str = "nan" if metrics["ece"] is None else f"{metrics['ece']:.4f}"
     print(f"  F1  (thr={args.threshold})  : {metrics['f1']:.4f}")
     print(f"  Precision         : {metrics['precision']:.4f}")
-    print(f"  Recall            : {metrics['recall']:.4f}")
+    print(f"  Recall (TPR)      : {metrics['recall']:.4f}")
+    print(f"  Specificity (TNR) : {metrics['specificity']:.4f}")
     print(f"  Accuracy          : {metrics['accuracy']:.4f}")
+    print(f"  Brier / ECE       : {metrics['brier']:.4f} / {ece_str}")
     print(f"  -----------------------------------------")
     print(f"  Confusion Matrix  (threshold={args.threshold}):")
     print(f"    TP={metrics['tp']}  FP={metrics['fp']}")
