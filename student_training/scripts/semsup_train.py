@@ -108,6 +108,12 @@ def main():
         stagea_cfg, lora_target_modules=target_modules,
         lora_r=args.lora_r, lora_alpha=args.lora_alpha,
     )
+    # peft's save_pretrained() auto-generates a model card BEFORE writing any
+    # adapter weights, and assumes base_model.config supports `in` (a HF
+    # PretrainedConfig). BADAS's V-JEPA2 uses a plain ModelArgs dataclass
+    # instead, so that step crashes save_pretrained() every time, before any
+    # checkpoint is written. We don't need the model card - skip it.
+    badas.nn_model.create_or_update_model_card = lambda *a, **k: None
     trainable = [p for p in badas.nn_model.parameters() if p.requires_grad]
 
     predictor = None
@@ -185,6 +191,23 @@ def main():
         json.dump({"stage": stage, "best_val_ap": best_ap, "best_epoch": best_epoch,
                     "n_train": len(train_ex), "n_val": len(val_ex),
                     "semantic_weight": args.semantic_weight}, f, indent=2)
+
+    # Restore the BEST epoch's weights before test scoring. Without this,
+    # badas.nn_model still holds whatever the LAST epoch left it at, which is
+    # not necessarily the best one (val_ap can peak mid-training - this is
+    # exactly what happened in B1's real run, best at epoch 8 of 23).
+    if best_epoch == -1:
+        print("[warn] no epoch had a valid val_ap (val split may be single-class) "
+              "- test-scoring with the LAST epoch's weights, not a selected best")
+    else:
+        from safetensors.torch import load_file
+        from peft.utils import set_peft_model_state_dict
+        best_dir = out_dir / f"epoch_{best_epoch:02d}"
+        adapter_sd = load_file(str(best_dir / "lora_adapter" / "adapter_model.safetensors"))
+        set_peft_model_state_dict(badas.nn_model, adapter_sd)
+        if predictor is not None:
+            predictor.load_state_dict(torch.load(best_dir / "predictor.pt", map_location=device))
+        print(f"[reload] restored epoch {best_epoch} (val_ap={best_ap:.4f}) before test scoring")
 
     if args.test_manifest and args.test_frames_root:
         print(f"\n[test] scoring 677-Private test set with epoch {best_epoch} checkpoint ...")
