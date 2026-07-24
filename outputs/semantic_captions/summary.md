@@ -17,7 +17,7 @@ data scale changes.
 | Stage 0 (captions) | 267 rows / 89 clips | **PARTIAL** — rephrased from existing teacher `final_reasoning`, not fresh vision-captioning. Target ~4.5k (1500 clips × 3 TTE), not yet scaled |
 | B1 (predictor-only probe) | 216 train / 51 val (267 total) | **DONE** (2026-07-21, real GPU run) | retrieval_top1_acc=0.0196 == chance/control (0.0196) — **no evidence of learned video-caption alignment at this scale** |
 | A1 (crash-only LoRA control) | 216 train / 51 val (267 total) | **DONE** (2026-07-23, real GPU run) | test_AP=0.865 (best ckpt, ep7) vs A0's 0.853 — **essentially flat, within noise** |
-| B (crash+semantic LoRA treatment) | — | **SMOKE-TESTED** (2026-07-23, local CPU, mechanics confirmed) — real pod run next | — |
+| B (crash+semantic LoRA treatment) | 216 train / 51 val (267 total) | **DONE** (2026-07-23, real GPU run) | val-selected test_AP=0.8574 — **slightly below A1 (0.8638)**, still above A0. 3.5× more variance across checkpoints than A1 |
 
 ## B1 real run — 2026-07-21
 
@@ -107,7 +107,54 @@ on the full 677-clip Private test set.
   `test_summary.json`, per-checkpoint `metrics_ep{01,07,08}.json` +
   `test_results_ep{01,07,08}.jsonl`.
 
-## A1/B script hardening — 2026-07-23
+## B real run — 2026-07-23
+
+**Setup:** identical to A1 (216/51 split, LoRA r=16/α=32 on `query,key,value`, 8 epochs,
+grad-accum=8, lr=2e-4), plus `semantic_weight=0.3` and predictor warm-started from B1's
+real checkpoint (`/workspace/semsup/b1/predictor_b1.pt`).
+
+**Result:**
+
+| Checkpoint | val_ap (n=51) | test_AP | AUC | F1 | recall | specificity | ECE |
+|---|---|---|---|---|---|---|---|
+| ep1 (best val) | 0.9742 | 0.8574 | 0.8685 | 0.7903 | 0.8639 | 0.6785 | 0.1750 |
+| ep8 | 0.9701 | 0.8742 | 0.8816 | 0.8005 | 0.8669 | 0.7021 | 0.1573 |
+| ep2 | 0.9688 | 0.8592 | 0.8687 | 0.7979 | 0.9112 | 0.6283 | 0.1790 |
+
+- **Per the pre-registered selection rule (best val_ap)**: B = 0.8574 vs A1 = 0.8638 —
+  B is slightly *below* the control. This is the number that counts; reporting ep8
+  (0.8742, val-rank #2) instead because it scores best on test would be post-hoc
+  cherry-picking and is explicitly rejected as a comparison.
+- **The more informative signal is variance, not the mean**: B's 3 checkpoints span
+  0.8574–0.8742 (spread 0.0168) vs A1's 0.8600–0.8647 (spread 0.0047) — B is ~3.5×
+  noisier across epochs. Consistent with the framing going in: at n=267 the semantic
+  loss adds instability, not signal — not damaging (still above A0=0.853), not helping.
+- **val_ap vs test_AP rank order is inverted for B** (val's best checkpoint is test's
+  worst) — the real trigger for the val-split investigation below.
+- Artifacts: `/workspace/semsup/b/{epoch_01,epoch_02,epoch_08}/{lora_adapter,predictor.pt}`,
+  `test_summary.json`, per-checkpoint `metrics_ep{01,02,08}.json`.
+
+## Val-split diagnostic — 2026-07-23
+
+Investigated why val_ap fails to predict test_AP (triggered by B's inverted ranking
+above). Computed the actual `clip_level_split(seed=0, val_frac=0.2)` composition locally:
+
+- **51 val rows are only 17 unique clips** (9 positive / 8 negative — well balanced,
+  not a class-skew problem) — each clip contributes 2-3 correlated rows (same video,
+  different TTE offset), so the *effective* independent sample size is ~17, not 51.
+- TTE-bucket proportions in val closely match train (no skew there either).
+- **Root cause: sample-size ceiling, not stratification.** With only ~17 independent
+  clips, a reasonably-trained model ranks them almost perfectly regardless of small
+  checkpoint differences, which is why val_ap saturates at 0.96-0.98 for both A1 and B
+  and can't discriminate between epochs — it's measuring near the ceiling, not signal.
+- **Implication:** val-based checkpoint selection is unreliable at this data scale for
+  both A1 and B equally, so it doesn't bias the A1-vs-B comparison in one direction,
+  but it does make any single "best" pick (by either method) untrustworthy.
+- **Fixes**: (a) free now — use a fixed selection rule (e.g. last epoch) applied
+  identically to both arms instead of trusting val_ap; (b) structural — val naturally
+  grows ~15x at the 4.5k caption scale, which should resolve the saturation on its own.
+
+## Infra notes
 
 - Working repo on RunPod: **`/workspace/MMLM_AI`** (persistent network volume — NOT `/root`,
   which is wiped on every new pod).
@@ -130,8 +177,27 @@ on the full 677-clip Private test set.
   onto a pod instead of transferred by hand.
 
 ## Next step
-Real B run on the pod (semantic_weight=0.3, warm-started from B1's real checkpoint) —
-same 216/51 split, same 8-epoch/top-3 setup as A1, for direct comparison. Not
-expecting an AP improvement at n=267 (per the literature-scale reasoning already in
-this doc) — the goal of this run is just confirming B doesn't fall *below* A1's
-~0.86 bar. A real signal, if any, is only expected once captions scale to ~4.5k.
+
+A0→B1→A1→B is now fully validated end-to-end at n=267: mechanism correct, no crashes,
+no evidence of a semantic-supervision benefit at this scale, no evidence it hurts either
+(B1: retrieval == chance; A1 vs A0: flat; B vs A1: flat/inconclusive, dominated by
+checkpoint-selection noise). This was the explicit purpose of the 267-scale pass per the
+original runbook — decide now whether to scale captions to ~4.5k. Open, undecided:
+
+1. **Full scale-up (267 → ~4.5k)** — the originally planned target. Real cost: fresh
+   vision-captioning of ~1500 clips × 3 TTE, previously flagged as having hit real
+   friction (wrong TTE window selected, a silent unattended-run failure, higher
+   per-clip token cost than estimated — see DECISIONS.md).
+2. **Intermediate scale-up first (e.g. ~500-1000 captions)** — an order of magnitude
+   cheaper than (1), re-run B1's retrieval-vs-control diagnostic only (no LoRA needed)
+   to check for an upward trend before committing to the full 4.5k captioning effort.
+3. **Fix checkpoint selection first, independent of scale** — switch to a fixed rule
+   (e.g. last epoch, applied identically to both arms) so any future A1-vs-B result
+   isn't compromised by the val-selection noise documented above.
+4. **Deprioritize this thread** — per the earlier literature check, no crash-anticipation
+   precedent trains language as a strictly train-only signal with vision-only inference;
+   the domain's best AP (LATTE) uses no language at all. Redirect effort to the
+   faithfulness-focused e4 work, which has stronger existing footing.
+
+(3) is cheap and worth doing regardless of which of (1)/(2)/(4) is chosen. The
+1-vs-2-vs-4 choice is a cost/timeline call — not yet made.
