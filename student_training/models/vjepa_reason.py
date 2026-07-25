@@ -134,8 +134,16 @@ class ResamplerProjector(nn.Module):
         self.ln_kv  = nn.LayerNorm(d)
         self.cross  = nn.MultiheadAttention(d, n_heads, dropout=dropout, batch_first=True)
 
-        self.ln_s   = nn.LayerNorm(d)
-        self.selfa  = nn.MultiheadAttention(d, n_heads, dropout=dropout, batch_first=True)
+        # Self-attention over the query tokens only has content to attend to
+        # when there's more than one of them. At num_queries=1, softmax over a
+        # single key is identically 1.0, so this block reduces exactly to
+        # out_proj(v_proj(q)) - a plain affine map, not attention (verified,
+        # 2026-07-25 review, A-2). Skip constructing it entirely in that case
+        # rather than building ~1M dead-but-trainable params.
+        self.use_selfattn = num_queries > 1
+        if self.use_selfattn:
+            self.ln_s  = nn.LayerNorm(d)
+            self.selfa = nn.MultiheadAttention(d, n_heads, dropout=dropout, batch_first=True)
 
         self.ln_f   = nn.LayerNorm(d)
         self.ffn    = nn.Sequential(
@@ -156,9 +164,10 @@ class ResamplerProjector(nn.Module):
         attn, _ = self.cross(self.ln_q(q), kv, kv, need_weights=False)
         q = q + attn
 
-        s = self.ln_s(q)
-        sa, _ = self.selfa(s, s, s, need_weights=False)
-        q = q + sa
+        if self.use_selfattn:
+            s = self.ln_s(q)
+            sa, _ = self.selfa(s, s, s, need_weights=False)
+            q = q + sa
 
         q = q + self.ffn(self.ln_f(q))
         return self.out(self.ln_out(q))                                   # (B, Q, out_dim)

@@ -60,14 +60,33 @@ from metrics_core import metrics_from_arrays  # noqa: E402
 
 
 def evaluate_crash_ap(badas, examples, device):
+    """AP computed per CLIP, not per row. `examples` are TTE windows of the
+    same clip and share one label (verified: every clip in the caption set is
+    single-label across its TTE variants), so scoring per row and computing AP
+    over 51 correlated rows silently inflates AP - the real independent
+    sample size is ~17 clips, not 51 rows (see EXPERIMENTS.md's val-split
+    diagnostic: val_ap saturated at 0.96-0.98 and ranked checkpoints in the
+    OPPOSITE order from test_AP). Aggregate (mean) a clip's row scores into
+    one point before computing AP. Applies identically to A1 and B, since
+    both call this same function - no arm-specific tuning."""
     badas.nn_model.eval()
-    ys, yt = [], []
+    from collections import defaultdict
+    by_clip = defaultdict(list)
     with torch.no_grad():
         for ex in examples:
             logits, _ = badas.forward(ex["frame_paths"])
             score = float(torch.softmax(logits, dim=1)[0, 1].item())
-            ys.append(score)
-            yt.append(ex["label"])
+            by_clip[ex["video_id"]].append((score, ex["label"]))
+    ys, yt = [], []
+    for pairs in by_clip.values():
+        scores = [s for s, _ in pairs]
+        labels = {l for _, l in pairs}
+        # Verified empirically every clip is single-label across its TTE
+        # windows; majority-vote as a defensive fallback rather than crash if
+        # that ever stops holding (e.g. a future mixed-label caption source).
+        label = next(iter(labels)) if len(labels) == 1 else round(sum(l for _, l in pairs) / len(pairs))
+        ys.append(sum(scores) / len(scores))
+        yt.append(label)
     if len(set(yt)) < 2:
         return float("nan")
     return average_precision_score(yt, ys)
@@ -139,8 +158,16 @@ def main():
         siglip_model, siglip_tok = load_siglip(args.siglip_model, device)
         dt = siglip_model.config.text_config.hidden_size if hasattr(siglip_model.config, "text_config") \
             else siglip_model.config.hidden_size
-        predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=1,
-                                        hidden_dim=512, n_heads=8).to(device)
+        # num_queries=8 (not 1), hidden_dim=256 (not 512): the old num_queries=1
+        # config was ~5.13M params - 1.8x the LoRA trainable count it was meant
+        # to gently steer - AND its self-attention block was mathematically a
+        # no-op (softmax over 1 key), so ~1M of those params were dead weight
+        # (2026-07-25 review, A-2). This config is ~1.25M params, genuinely
+        # "small/weak" relative to the ~2.8M LoRA trunk. Multi-token output is
+        # mean-pooled to a single Dt vector before comparison to the SigLIP
+        # target (see predictor(...).mean(dim=1) below).
+        predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=8,
+                                        hidden_dim=256, n_heads=8, ffn_mult=2).to(device)
         if args.predictor_init:
             predictor.load_state_dict(torch.load(args.predictor_init, map_location=device))
             print(f"[load] warm-started predictor from {args.predictor_init}")
@@ -186,7 +213,10 @@ def main():
                 # differentiable cast (autograd supports it) so the semantic-loss
                 # gradient still flows back into the LoRA-unfrozen trunk.
                 patches32 = patches.unsqueeze(0).to(dtype=torch.float32)
-                pred = predictor(patches32).squeeze(1)
+                # mean over the num_queries=8 tokens -> one Dt vector, comparable
+                # to the single SigLIP caption embedding (was .squeeze(1) when
+                # num_queries was 1 - see the predictor construction comment).
+                pred = predictor(patches32).mean(dim=1)
                 pred = F.normalize(pred, dim=-1)
                 tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
                 sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()

@@ -99,8 +99,14 @@ def main():
     dt = siglip_model.config.text_config.hidden_size if hasattr(siglip_model.config, "text_config") \
         else siglip_model.config.hidden_size
 
-    predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=1,
-                                    hidden_dim=512, n_heads=8).to(device)
+    # num_queries=8 (not 1), hidden_dim=256 (not 512): the old config was
+    # ~5.13M params - 1.8x the trunk's ~2.8M LoRA trainable count it's meant to
+    # gently steer - AND its self-attention block was mathematically a no-op
+    # (softmax over 1 key), so ~1M of those params were dead weight (2026-07-25
+    # review, A-2). This config is ~1.25M params. Multi-token output is
+    # mean-pooled to one Dt vector before comparison to the SigLIP target.
+    predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=8,
+                                    hidden_dim=256, n_heads=8, ffn_mult=2).to(device)
     trainable = list(predictor.parameters())
     log_tau = None
     if args.loss == "infonce":
@@ -143,20 +149,26 @@ def main():
         torch.cuda.empty_cache()
 
     def evaluate(X, Y, vids):
-        """Returns (loss, mean_cosine, retrieval_top1_acc, retrieval_top1_acc_sibling_ok)
-        on a cached split. `loss` here is always the (1-cosine) diagnostic regardless
-        of --loss, so runs trained with different objectives stay comparable on one
-        number. retrieval_top1_acc is exact-row match (the strict metric used
-        throughout prior runs, kept for continuity); the _sibling_ok variant also
-        counts a hit when the retrieved row is a different TTE window of the SAME
-        clip (near-duplicate caption) - see EXPERIMENTS.md T-8: exact-match alone is
-        a pessimistically-biased diagnostic since sibling captions are near-synonyms."""
+        """Returns (loss, mean_cosine, retrieval_top1_acc, retrieval_top1_acc_sibling_ok,
+        retrieval_top1_acc_clip) on a cached split. `loss`/`mean_cosine` are row-level
+        (row independence doesn't matter for a plain average). The three retrieval
+        numbers differ in what counts as a "hit":
+          - retrieval_top1_acc: exact-row match (the original, strict metric).
+          - _sibling_ok: also counts a hit against a different TTE window of the
+            SAME clip (near-duplicate caption) - see EXPERIMENTS.md T-8.
+          - _clip (T-3, PRIMARY): rows are first pooled per clip (mean, renorm) so
+            retrieval happens among ~17 real clips, not 51 correlated TTE-window
+            rows. This is the metric that should actually be trusted - row-level
+            retrieval silently inflates/deflates because most "candidates" are
+            near-duplicates of each other (see EXPERIMENTS.md's val-split
+            diagnostic: row-level val_ap ranked checkpoints in the OPPOSITE order
+            from test_AP for Stage B)."""
         predictor.eval()
         preds = []
         with torch.no_grad():
             for i in range(0, len(X), args.batch_size):
                 xb = X[i:i + args.batch_size].to(device)
-                preds.append(F.normalize(predictor(xb).squeeze(1), dim=-1))
+                preds.append(F.normalize(predictor(xb).mean(dim=1), dim=-1))
         P = torch.cat(preds, dim=0)
         T = Y.to(device)
         diag = F.cosine_similarity(P, T, dim=-1)
@@ -170,7 +182,26 @@ def main():
             device=device, dtype=torch.float32,
         )
         acc_sibling_ok = sib_hit.mean().item()
-        return loss, diag.mean().item(), acc, acc_sibling_ok
+        acc_clip = clip_level_retrieval_acc(P, T, vids_arr)
+        return loss, diag.mean().item(), acc, acc_sibling_ok, acc_clip
+
+    def clip_level_retrieval_acc(P, T, vids_list):
+        """Pool rows sharing a video_id (mean, renormalize) before retrieval, so
+        the candidate pool is the real independent sample size (~17 clips), not
+        51 correlated TTE-window rows. See evaluate()'s docstring."""
+        from collections import defaultdict
+        by_p, by_t = defaultdict(list), defaultdict(list)
+        for i, v in enumerate(vids_list):
+            by_p[v].append(P[i])
+            by_t[v].append(T[i])
+        clip_ids = list(by_p.keys())
+        if len(clip_ids) < 2:
+            return float("nan")
+        Pc = torch.stack([F.normalize(torch.stack(by_p[v]).mean(0), dim=-1) for v in clip_ids])
+        Tc = torch.stack([F.normalize(torch.stack(by_t[v]).mean(0), dim=-1) for v in clip_ids])
+        top1c = (Pc @ Tc.T).argmax(dim=1)
+        idxc = torch.arange(len(clip_ids), device=P.device)
+        return (top1c == idxc).float().mean().item()
 
     def infonce_loss(pred, tgt, vids_batch, log_tau):
         """In-batch contrastive loss. Same-video (sibling-TTE) rows are masked out
@@ -204,9 +235,10 @@ def main():
         device=device, dtype=torch.float32,
     )
     base_acc_sibling_ok = base_sib_hit.mean().item()
+    base_acc_clip = clip_level_retrieval_acc(mean_emb.expand_as(Tva), Tva, vids_va)
     print(f"[control] constant mean-embedding baseline: mean_cosine={base_cos:.4f}  "
-          f"retrieval_top1_acc={base_acc:.4f}  (sibling_ok={base_acc_sibling_ok:.4f})  "
-          f"(chance={1/max(1,len(Xva)):.4f})")
+          f"retrieval_top1_acc={base_acc:.4f}  (sibling_ok={base_acc_sibling_ok:.4f}, "
+          f"clip={base_acc_clip:.4f})  (chance={1/max(1,len(Xva)):.4f})")
 
     print(f"\n[train] Predictor only (BADAS + SigLIP frozen)  loss={args.loss}")
     t0 = time.time()
@@ -224,7 +256,7 @@ def main():
             xb, yb = Xtr[idx].to(device), Ytr[idx].to(device)
             vb = [vids_tr[j] for j in idx.tolist()]
             opt.zero_grad()
-            pred = F.normalize(predictor(xb).squeeze(1), dim=-1)
+            pred = F.normalize(predictor(xb).mean(dim=1), dim=-1)
             if args.loss == "infonce":
                 loss = infonce_loss(pred, yb, vb, log_tau)
             else:
@@ -236,13 +268,15 @@ def main():
             pbar.set_postfix(loss=f"{total_loss/nb:.4f}")
 
         tr_loss = total_loss / max(1, nb)
-        va_loss, va_cos, va_acc, va_acc_sib = evaluate(Xva, Yva, vids_va)
+        va_loss, va_cos, va_acc, va_acc_sib, va_acc_clip = evaluate(Xva, Yva, vids_va)
         history.append({"epoch": epoch, "train_loss": tr_loss, "val_loss": va_loss,
                         "val_mean_cosine": va_cos, "val_retrieval_top1_acc": va_acc,
-                        "val_retrieval_top1_acc_sibling_ok": va_acc_sib})
+                        "val_retrieval_top1_acc_sibling_ok": va_acc_sib,
+                        "val_retrieval_top1_acc_clip": va_acc_clip})
         print(f"  epoch {epoch}/{args.epochs}  train_loss={tr_loss:.4f}  "
               f"val_loss={va_loss:.4f}  val_cos={va_cos:.4f}  val_ret@1={va_acc:.4f}  "
-              f"val_ret@1_sib={va_acc_sib:.4f}  ({time.time()-t0:.1f}s)")
+              f"val_ret@1_sib={va_acc_sib:.4f}  val_ret@1_clip={va_acc_clip:.4f}  "
+              f"({time.time()-t0:.1f}s)")
 
         # Keep the 3 lowest-val_loss checkpoints.
         ckpt = out_dir / f"predictor_b1_ep{epoch:03d}.pt"
@@ -266,19 +300,21 @@ def main():
     best_loss, best_epoch, best_path = best[0]
     predictor.load_state_dict(torch.load(best_path, map_location=device))
     torch.save(predictor.state_dict(), out_dir / "predictor_b1.pt")
-    final_loss, mean_cos, retrieval_acc, retrieval_acc_sib = evaluate(Xva, Yva, vids_va)
+    final_loss, mean_cos, retrieval_acc, retrieval_acc_sib, retrieval_acc_clip = evaluate(Xva, Yva, vids_va)
 
     print(f"\n[eval] BEST checkpoint (epoch {best_epoch}, n_val={len(val_ex)}): "
           f"mean_cosine={mean_cos:.4f}  retrieval_top1_acc={retrieval_acc:.4f}  "
-          f"retrieval_top1_acc_sibling_ok={retrieval_acc_sib:.4f}")
+          f"sibling_ok={retrieval_acc_sib:.4f}  clip={retrieval_acc_clip:.4f}")
     print(f"[eval] vs. collapse control:  mean_cosine={base_cos:.4f}  "
-          f"retrieval_top1_acc={base_acc:.4f}  sibling_ok={base_acc_sibling_ok:.4f}")
-    # Verdict uses the exact-match metric (the strict one) to decide "learned
-    # something" - the sibling-tolerant number is reported alongside as context,
-    # not substituted in, so this isn't quietly relaxing the bar for a pass.
-    verdict = ("LEARNED something video-specific" if retrieval_acc > base_acc
+          f"retrieval_top1_acc={base_acc:.4f}  sibling_ok={base_acc_sibling_ok:.4f}  "
+          f"clip={base_acc_clip:.4f}")
+    # Verdict uses the PER-CLIP metric (T-3: the statistically sound one - see
+    # evaluate()'s docstring for why row-level retrieval is unreliable at this
+    # scale) rather than the exact-row metric used by earlier runs.
+    verdict = ("LEARNED something video-specific" if retrieval_acc_clip > base_acc_clip
                else "NO evidence beyond the constant-embedding baseline")
-    print(f"[verdict] {verdict}")
+    print(f"[verdict] {verdict}  (decided on clip-level retrieval, n_clips="
+          f"{len(set(vids_va))})")
 
     with open(out_dir / "b1_metrics.json", "w", encoding="utf-8") as f:
         json.dump({
@@ -287,13 +323,17 @@ def main():
             "infonce_tau_final": (float(log_tau.exp().clamp(min=1e-2, max=1.0).item())
                                   if log_tau is not None else None),
             "n_train": len(train_ex), "n_val": len(val_ex),
+            "n_val_clips": len(set(vids_va)),
             "best_epoch": best_epoch, "best_val_loss": best_loss,
             "held_out_mean_cosine": mean_cos,
             "held_out_retrieval_top1_acc": retrieval_acc,
             "held_out_retrieval_top1_acc_sibling_ok": retrieval_acc_sib,
+            "held_out_retrieval_top1_acc_clip": retrieval_acc_clip,
             "control_mean_embedding": {"mean_cosine": base_cos, "retrieval_top1_acc": base_acc,
                                         "retrieval_top1_acc_sibling_ok": base_acc_sibling_ok,
-                                        "chance_retrieval": 1 / max(1, len(val_ex))},
+                                        "retrieval_top1_acc_clip": base_acc_clip,
+                                        "chance_retrieval": 1 / max(1, len(val_ex)),
+                                        "chance_retrieval_clip": 1 / max(1, len(set(vids_va)))},
             "top3_checkpoints": [{"epoch": e, "val_loss": l, "path": str(p)}
                                   for l, e, p in best],
             "epochs_run": len(history), "epochs_max": args.epochs,
