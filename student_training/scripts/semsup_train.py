@@ -92,18 +92,32 @@ def main():
     ap.add_argument("--test-manifest", default=None, help="e.g. test_manifest_hires.jsonl (677 Private)")
     ap.add_argument("--test-frames-root", default=None, help="e.g. dataset/test")
     ap.add_argument("--test-limit", type=int, default=0, help="debug: score only first N test clips")
+    ap.add_argument("--seed", type=int, default=0,
+                     help="seeds random/torch RNG (LoRA init, example shuffle) so A1 "
+                          "and B are comparable runs, not confounded by different init")
+    ap.add_argument("--min-examples", type=int, default=1,
+                     help="fail fast if fewer than this many training examples load "
+                          "(catches a partially-synced/missing frames volume early)")
     args = ap.parse_args()
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     import yaml
     with open(args.config, encoding="utf-8") as f:
         stagea_cfg = yaml.safe_load(f)
+    for section, key in (("data", "frame_filename_pattern"), ("data", "gt_field")):
+        if section not in stagea_cfg or key not in stagea_cfg[section]:
+            raise KeyError(f"{args.config} missing required key: {section}.{key}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stage = "B (crash+semantic)" if args.semantic_weight > 0 else "A1 (crash-only)"
     print(f"[cfg] stage={stage}  semantic_weight={args.semantic_weight}  "
-          f"lora_target_modules={args.lora_target_modules}")
+          f"lora_target_modules={args.lora_target_modules}  seed={args.seed}")
 
     target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
     badas = TrainableBadasWrapper(
@@ -135,7 +149,14 @@ def main():
     opt = torch.optim.AdamW(trainable, lr=args.lr)
 
     examples = load_training_examples(limit=args.limit)
-    train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac)
+    if len(examples) < args.min_examples:
+        raise RuntimeError(
+            f"Only {len(examples)} training examples loaded (< --min-examples "
+            f"{args.min_examples}). This usually means dataset/train is missing or "
+            f"partially synced - check the symlink/volume before training on a "
+            f"silently-shrunk dataset."
+        )
+    train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
 
     saved = []          # [(val_ap, epoch)] for every epoch, ranked at the end
@@ -146,9 +167,16 @@ def main():
             predictor.train()
         random.shuffle(train_ex)
         opt.zero_grad()
-        total_crash, total_sem, n = 0.0, 0.0, 0
+        total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
         for step, ex in enumerate(train_ex):
-            logits, patches = badas.forward(ex["frame_paths"])
+            try:
+                logits, patches = badas.forward(ex["frame_paths"])
+            except (OSError, RuntimeError) as e:
+                # A truncated/missing frame mid-run must not kill an 8-epoch GPU
+                # job outright - skip the example, keep going, but surface it loudly.
+                n_failed += 1
+                print(f"  [warn] skipping {ex['video_id']} (tte={ex['tte']}): {e}")
+                continue
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
 
@@ -173,12 +201,25 @@ def main():
                 opt.step()
                 opt.zero_grad()
         if n % args.grad_accum != 0:
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
             opt.zero_grad()
+        if n_failed:
+            print(f"  [warn] {n_failed}/{len(train_ex)} examples failed to load this epoch")
 
         val_ap = evaluate_crash_ap(badas, val_ex, device)
-        print(f"  epoch {epoch}/{args.epochs}  crash_loss={total_crash/n:.4f}  "
-              f"sem_loss={total_sem/n:.4f}  val_ap={val_ap:.4f}  ({time.time()-t0:.1f}s)")
+        elapsed = time.time() - t0
+        avg_crash = total_crash / n if n else float("nan")
+        avg_sem = total_sem / n if n else float("nan")
+        print(f"  epoch {epoch}/{args.epochs}  crash_loss={avg_crash:.4f}  "
+              f"sem_loss={avg_sem:.4f}  val_ap={val_ap:.4f}  ({elapsed:.1f}s)")
+
+        with open(out_dir / "epoch_metrics.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "epoch": epoch, "crash_loss": avg_crash, "sem_loss": avg_sem,
+                "val_ap": None if val_ap != val_ap else val_ap,
+                "n_failed": n_failed, "elapsed_s": round(elapsed, 1),
+            }) + "\n")
 
         ep_dir = out_dir / f"epoch_{epoch:02d}"
         ep_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +248,11 @@ def main():
                     "top3": [{"epoch": e, "val_ap": (None if va != va else round(va, 4))}
                              for va, e in top3],
                     "n_train": len(train_ex), "n_val": len(val_ex),
-                    "semantic_weight": args.semantic_weight}, f, indent=2)
+                    "semantic_weight": args.semantic_weight,
+                    # Full run config, so "was B run identical to A1 except for
+                    # semantic_weight" is a fact checkable from disk, not an
+                    # assertion in a markdown file.
+                    "args": vars(args)}, f, indent=2)
 
     if not (args.test_manifest and args.test_frames_root):
         return
@@ -224,31 +269,42 @@ def main():
     pattern = stagea_cfg["data"]["frame_filename_pattern"]
     gt_field = stagea_cfg["data"]["gt_field"]
 
-    def score_checkpoint(epoch):
+    def score_checkpoint(epoch, res_path):
         adapter_sd = load_file(str(out_dir / f"epoch_{epoch:02d}" / "lora_adapter"
                                    / "adapter_model.safetensors"))
         set_peft_model_state_dict(badas.nn_model, adapter_sd)
         badas.nn_model.eval()
-        ys, yt, grp, vids = [], [], [], []
-        for r in records:
-            paths = frame_paths_for(r, args.test_frames_root, pattern)
-            with torch.no_grad():
-                logits, _ = badas.forward(paths)
-                ys.append(float(torch.softmax(logits, dim=1)[0, 1].item()))
-            yt.append(int(r[gt_field])); grp.append(r.get("group"))
-            vids.append(r["video_id"])
-        return vids, yt, ys, grp
+        yt, ys, grp = [], [], []
+        n_failed = 0
+        # Stream + flush per clip: a failure at clip 500/677 must not discard the
+        # 500 already-scored clips (this scores the top-3 checkpoints back-to-back,
+        # so a late failure previously meant re-running everything before it too).
+        with open(res_path, "w", encoding="utf-8") as f:
+            for r in records:
+                paths = frame_paths_for(r, args.test_frames_root, pattern)
+                try:
+                    with torch.no_grad():
+                        logits, _ = badas.forward(paths)
+                        s = float(torch.softmax(logits, dim=1)[0, 1].item())
+                except (OSError, RuntimeError) as e:
+                    n_failed += 1
+                    print(f"  [warn] skipping test clip {r.get('video_id')}: {e}")
+                    continue
+                gt, g = int(r[gt_field]), r.get("group")
+                f.write(json.dumps({"video_id": r["video_id"], "ground_truth": gt,
+                                     "group": g, "score": round(s, 4)}) + "\n")
+                f.flush()
+                yt.append(gt); ys.append(s); grp.append(g)
+        if n_failed:
+            print(f"  [warn] {n_failed}/{len(records)} test clips failed to score")
+        return yt, ys, grp
 
     summary = []
     for rank, (va, epoch) in enumerate(top3, 1):
         print(f"\n[test] scoring top-{rank} checkpoint (epoch {epoch}, "
               f"val_ap={va:.4f}) on {len(records)} clips ...")
-        vids, yt, ys, grp = score_checkpoint(epoch)
         res_path = out_dir / f"test_results_ep{epoch:02d}.jsonl"
-        with open(res_path, "w", encoding="utf-8") as f:
-            for vid, g, gt, s in zip(vids, grp, yt, ys):
-                f.write(json.dumps({"video_id": vid, "ground_truth": gt,
-                                     "group": g, "score": round(s, 4)}) + "\n")
+        yt, ys, grp = score_checkpoint(epoch, res_path)
         m = metrics_from_arrays(yt, ys, groups=grp, threshold=0.5)
         with open(out_dir / f"metrics_ep{epoch:02d}.json", "w", encoding="utf-8") as f:
             json.dump({"stage": stage, "epoch": epoch, "rank": rank,

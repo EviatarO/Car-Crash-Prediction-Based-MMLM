@@ -45,11 +45,41 @@ def _norm_verdict(v):
 # Data: resolve frames_dir, load the caption/label training set
 # =============================================================================
 
-def build_frames_dir_index() -> dict:
-    """(video_id, str(requested_time_to_event)) -> frames_dir, from teacher_labels/*.jsonl."""
-    import glob
-    idx = {}
-    for fp in glob.glob(TEACHER_LABELS_GLOB):
+DEFAULT_LABEL_FILES = ["teacher_dataset_e3b.jsonl"]  # covers all 267 caption keys (verified)
+
+
+def _norm_tte(tte) -> str:
+    """Normalize a TTE value to a stable string key. Numeric TTEs (0.5, 1, 1.0, 1.5)
+    must collapse to one key regardless of how a given writer serialized the float
+    ('1' vs '1.0') - otherwise two label files can silently disagree on the same
+    clip+TTE without ever comparing equal. Non-numeric TTEs (offset labels like
+    '-4.0_offset', 'TN_MIDPOINT') pass through unchanged."""
+    try:
+        return str(float(tte))
+    except (TypeError, ValueError):
+        return str(tte)
+
+
+def build_frames_dir_index(label_files: list | None = None) -> dict:
+    """(video_id, _norm_tte(requested_time_to_event)) -> frames_dir.
+
+    Reads only `label_files` (default: DEFAULT_LABEL_FILES, which alone covers all
+    267 current caption keys) rather than globbing every file under
+    dataset/teacher_labels/ - that directory holds 28 files across many experiment
+    generations, and blindly merging all of them risks a silent collision the
+    moment two files disagree on the same (video_id, TTE). Pass label_files=None
+    and TEACHER_LABELS_GLOB is still available for an explicit full-glob call.
+
+    Raises on a genuine conflict (same key, different frames_dir across files) -
+    a silently-resolved-wrong frames_dir is a much worse failure than a crash.
+    """
+    if label_files is None:
+        label_files = DEFAULT_LABEL_FILES
+    fps = [str(PROJECT_ROOT / "dataset" / "teacher_labels" / name) for name in label_files]
+
+    idx: dict = {}
+    source: dict = {}
+    for fp in fps:
         with open(fp, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -57,8 +87,17 @@ def build_frames_dir_index() -> dict:
                     continue
                 r = json.loads(line)
                 vid, tte, fd = r.get("video_id"), r.get("requested_time_to_event"), r.get("frames_dir")
-                if vid and fd:
-                    idx[(vid, str(tte))] = fd
+                if not vid or not fd:
+                    continue
+                key = (vid, _norm_tte(tte))
+                prev = idx.get(key)
+                if prev is not None and prev != fd:
+                    raise ValueError(
+                        f"frames_dir conflict for {key}: {prev!r} (from {source[key]}) "
+                        f"vs {fd!r} (from {fp})"
+                    )
+                idx[key] = fd
+                source[key] = fp
     return idx
 
 
@@ -69,7 +108,7 @@ def load_training_examples(limit: int = 0, require_frames: bool = True) -> list:
     rows = [json.loads(l) for l in open(CAPTIONS_JSONL, encoding="utf-8") if l.strip()]
     out, skipped = [], 0
     for r in rows:
-        key = (r["video_id"], str(r["requested_time_to_event"]))
+        key = (r["video_id"], _norm_tte(r["requested_time_to_event"]))
         fd = idx.get(key)
         if not fd:
             skipped += 1

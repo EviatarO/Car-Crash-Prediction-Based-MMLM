@@ -41,18 +41,15 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import (
     average_precision_score,
-    confusion_matrix,
-    f1_score,
     precision_recall_curve,
-    precision_score,
-    recall_score,
-    roc_auc_score,
     roc_curve,
 )
 
 # Pure-math metrics live in metrics_core (numpy/sklearn only) so the training
 # scripts can reuse them without pulling in matplotlib/seaborn/pandas.
-from metrics_core import expected_calibration_error, metrics_from_arrays  # noqa: F401
+# compute_metrics() below delegates to this instead of re-deriving the same
+# formulas independently (see its docstring for why that used to be a problem).
+from metrics_core import metrics_from_arrays
 
 
 # =============================================================================
@@ -93,68 +90,50 @@ def load_results(jsonl_path: str) -> pd.DataFrame:
 # =============================================================================
 
 def compute_metrics(df: pd.DataFrame, threshold: float) -> dict:
-    """Compute all scalar metrics."""
+    """Compute all scalar metrics.
+
+    Delegates the actual formulas to metrics_core.metrics_from_arrays, the same
+    function the training scripts use, instead of an independent re-implementation.
+    Previously this function duplicated every metric by hand and the two versions
+    had quietly diverged (single-class AP/AUC: 0.0 here vs NaN/null in
+    metrics_core; different key names for the same quantities), so a degenerate
+    split could report a valid-looking AP=0.0 through this pipeline while the
+    training pipeline correctly reported "undefined" for the identical scores.
+    """
     y_true  = df["ground_truth"].astype(int).values
     y_score = df["score"].astype(float).values
     y_pred  = (y_score >= threshold).astype(int)
 
-    # Guard against single-class data (cannot compute AUC/AP)
-    n_pos = y_true.sum()
-    n_neg = (1 - y_true).sum()
-    if n_pos == 0 or n_neg == 0:
-        print(f"  WARNING: Only one class present (pos={n_pos}, neg={n_neg}). "
-              f"AUC/AP will be 0.")
-        auc  = 0.0
-        ap   = 0.0
-    else:
-        auc = roc_auc_score(y_true, y_score)
-        ap  = average_precision_score(y_true, y_score)
+    m = metrics_from_arrays(y_true, y_score, threshold=threshold)
+    if m["n_positive"] == 0 or m["n_negative"] == 0:
+        print(f"  WARNING: Only one class present (pos={m['n_positive']}, "
+              f"neg={m['n_negative']}). AUC/AP will be 0.")
 
-    # F1 at given threshold
-    f1   = f1_score(y_true, y_pred, zero_division=0)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec  = recall_score(y_true, y_pred, zero_division=0)
-
-    # Confusion matrix
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-
-    # Specificity (TNR) = TN/(TN+FP); Brier + ECE for calibration (E3 additions).
-    specificity = float(tn) / (tn + fp) if (tn + fp) else 0.0
-    brier = float(np.mean((y_score - y_true) ** 2))
-    ece   = expected_calibration_error(y_true, y_score) if (n_pos and n_neg) else float("nan")
-
-    # Optimal F1 threshold (sweep)
+    # PR-curve raw arrays are plot-only (not a metric metrics_core exposes).
     precisions, recalls, thresholds_pr = precision_recall_curve(y_true, y_score)
-    f1_scores = np.where(
-        (precisions + recalls) > 0,
-        2 * precisions * recalls / (precisions + recalls),
-        0
-    )
-    best_idx = np.argmax(f1_scores[:-1]) if len(f1_scores) > 1 else 0
-    optimal_threshold = float(thresholds_pr[best_idx]) if len(thresholds_pr) > 0 else threshold
-    optimal_f1 = float(f1_scores[best_idx])
 
     return {
         "n_total":           len(df),
-        "n_positive":        int(n_pos),
-        "n_negative":        int(n_neg),
+        "n_positive":        m["n_positive"],
+        "n_negative":        m["n_negative"],
         "threshold":         threshold,
-        "ap":                round(float(ap), 4),
-        "auc_roc":           round(float(auc), 4),
-        "f1":                round(float(f1), 4),
-        "precision":         round(float(prec), 4),
-        "recall":            round(float(rec), 4),
-        "specificity":       round(float(specificity), 4),
-        "brier":             round(float(brier), 4),
-        "ece":               (None if ece != ece else round(float(ece), 4)),
-        "tp":                int(tp),
-        "fp":                int(fp),
-        "tn":                int(tn),
-        "fn":                int(fn),
-        "accuracy":          round((tp + tn) / max(len(df), 1), 4),
-        "optimal_threshold": round(optimal_threshold, 4),
-        "optimal_f1":        round(optimal_f1, 4),
+        # This pipeline's convention (unlike metrics_core's) is 0.0 for a
+        # single-class split, kept for backward compat with existing callers.
+        "ap":                0.0 if m["ap"] is None else m["ap"],
+        "auc_roc":           0.0 if m["auc_roc"] is None else m["auc_roc"],
+        "f1":                m["f1"],
+        "precision":         m["precision"],
+        "recall":            m["recall_sensitivity_tpr"],
+        "specificity":       m["specificity_tnr"],
+        "brier":             m["brier"],
+        "ece":               m["ece"],
+        "tp":                m["tp"],
+        "fp":                m["fp"],
+        "tn":                m["tn"],
+        "fn":                m["fn"],
+        "accuracy":          m["accuracy"],
+        "optimal_threshold": m["optimal_threshold"],
+        "optimal_f1":        m["f1_optimal"],
         "mean_score_pos":    round(float(df[df["ground_truth"] == 1]["score"].mean()), 4),
         "mean_score_neg":    round(float(df[df["ground_truth"] == 0]["score"].mean()), 4),
         # Raw arrays for plotting
