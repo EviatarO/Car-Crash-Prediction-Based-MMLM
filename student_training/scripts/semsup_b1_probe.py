@@ -18,9 +18,26 @@ near-synonymous crash captions are anisotropic, a predictor that ignores the vid
 entirely still scores a high mean_cosine. retrieval_top1_acc vs. that baseline is
 the honest signal.
 
+--loss cosine (default): 1 - cos(pred, target). PROVEN DEGENERATE (2026-07-25
+project review, verified against the recorded metrics): the analytic minimizer
+for a video-blind predictor is target_mean/||target_mean||, worth 1-||target_mean||.
+On the 267-caption set that floor is ~0.1352; the real (trained) run reached
+0.1345 - beating the floor by 0.53% of the available range, with retrieval@1
+exactly at chance. Scaling data will not fix an objective sitting at its own
+degenerate optimum.
+
+--loss infonce: batched in-batch-negatives contrastive loss (CLIP/SigLIP-style).
+The shared target-mean direction contributes equally to every column of the
+softmax and CANCELS, so the collapse solution scores at chance instead of at
+0.865 - this is what actually distinguishes "the objective was wrong" from
+"the data is too small". Sibling-TTE rows of the same video_id are masked out
+of the negative set (their captions are near-duplicates - see
+docs_agents/EXPERIMENTS.md's val-split diagnostic), since treating them as
+false negatives would penalize a correct near-match.
+
 Usage (RunPod):
   python semsup_b1_probe.py --config ../configs/e4_stageA.yaml \
-      --epochs 100 --out-dir /workspace/semsup/b1
+      --loss infonce --epochs 100 --out-dir /workspace/semsup/b1_infonce
 """
 from __future__ import annotations
 
@@ -58,6 +75,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="debug: use only N examples")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--loss", choices=["cosine", "infonce"], default="cosine",
+                    help="cosine = proven-degenerate regression (see module docstring); "
+                         "infonce = in-batch contrastive, sibling-TTE-masked")
+    ap.add_argument("--infonce-tau-init", type=float, default=0.07,
+                    help="initial temperature (learnable), CLIP/SigLIP-standard init")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -79,7 +101,14 @@ def main():
 
     predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=1,
                                     hidden_dim=512, n_heads=8).to(device)
-    opt = torch.optim.AdamW(predictor.parameters(), lr=args.lr)
+    trainable = list(predictor.parameters())
+    log_tau = None
+    if args.loss == "infonce":
+        # Learnable temperature (CLIP/SigLIP convention). log-parameterized so it
+        # can't go negative; clamped at use-time to a sane range.
+        log_tau = torch.nn.Parameter(torch.log(torch.tensor(args.infonce_tau_init)).to(device))
+        trainable = trainable + [log_tau]
+    opt = torch.optim.AdamW(trainable, lr=args.lr)
 
     examples = load_training_examples(limit=args.limit)
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac)
@@ -91,7 +120,7 @@ def main():
     # ~15x wasted ViT-L forward passes. Cached on CPU, moved per batch.
     # -------------------------------------------------------------------------
     def build_cache(exs, tag):
-        patches, targets = [], []
+        patches, targets, vids = [], [], []
         for ex in tqdm(exs, desc=f"[cache] {tag}", leave=False):
             with torch.no_grad():
                 _, p = badas.forward(ex["frame_paths"])
@@ -99,12 +128,13 @@ def main():
             # BADAS may run in fp16; the Predictor is fp32 - cast at this boundary.
             patches.append(p.to(dtype=torch.float32).cpu())
             targets.append(t.squeeze(0).cpu())
-        return torch.stack(patches), torch.stack(targets)  # (N,P,D), (N,Dt)
+            vids.append(ex["video_id"])  # needed to mask sibling-TTE false negatives
+        return torch.stack(patches), torch.stack(targets), vids  # (N,P,D), (N,Dt), list[N]
 
     print("\n[cache] precomputing frozen BADAS patches + SigLIP targets")
     tc = time.time()
-    Xtr, Ytr = build_cache(train_ex, "train")
-    Xva, Yva = build_cache(val_ex, "val")
+    Xtr, Ytr, vids_tr = build_cache(train_ex, "train")
+    Xva, Yva, vids_va = build_cache(val_ex, "val")
     print(f"[cache] done in {time.time()-tc:.1f}s  train={tuple(Xtr.shape)}  val={tuple(Xva.shape)}")
 
     # BADAS is no longer needed - free ~4GB of GPU before training.
@@ -112,8 +142,15 @@ def main():
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    def evaluate(X, Y):
-        """Returns (loss, mean_cosine, retrieval_top1_acc) on a cached split."""
+    def evaluate(X, Y, vids):
+        """Returns (loss, mean_cosine, retrieval_top1_acc, retrieval_top1_acc_sibling_ok)
+        on a cached split. `loss` here is always the (1-cosine) diagnostic regardless
+        of --loss, so runs trained with different objectives stay comparable on one
+        number. retrieval_top1_acc is exact-row match (the strict metric used
+        throughout prior runs, kept for continuity); the _sibling_ok variant also
+        counts a hit when the retrieved row is a different TTE window of the SAME
+        clip (near-duplicate caption) - see EXPERIMENTS.md T-8: exact-match alone is
+        a pessimistically-biased diagnostic since sibling captions are near-synonyms."""
         predictor.eval()
         preds = []
         with torch.no_grad():
@@ -125,8 +162,30 @@ def main():
         diag = F.cosine_similarity(P, T, dim=-1)
         loss = (1 - diag).mean().item()
         top1 = (P @ T.T).argmax(dim=1)
-        acc = (top1 == torch.arange(len(X), device=device)).float().mean().item()
-        return loss, diag.mean().item(), acc
+        idx_arange = torch.arange(len(X), device=device)
+        acc = (top1 == idx_arange).float().mean().item()
+        vids_arr = list(vids)
+        sib_hit = torch.tensor(
+            [vids_arr[int(top1[i])] == vids_arr[i] for i in range(len(X))],
+            device=device, dtype=torch.float32,
+        )
+        acc_sibling_ok = sib_hit.mean().item()
+        return loss, diag.mean().item(), acc, acc_sibling_ok
+
+    def infonce_loss(pred, tgt, vids_batch, log_tau):
+        """In-batch contrastive loss. Same-video (sibling-TTE) rows are masked out
+        of the negative set - their captions are near-duplicates, so treating them
+        as false negatives would penalize a correct near-match instead of a wrong
+        one. Unlike cosine regression, the shared target-mean direction cancels in
+        the softmax, so the collapse solution scores at chance, not at ||E[t]||."""
+        tau = log_tau.exp().clamp(min=1e-2, max=1.0)
+        logits = (pred @ tgt.T) / tau
+        vb = list(vids_batch)
+        same_vid = torch.tensor([[a == b for b in vb] for a in vb], device=pred.device)
+        mask = same_vid & ~torch.eye(len(vb), dtype=torch.bool, device=pred.device)
+        logits = logits.masked_fill(mask, float("-inf"))
+        labels = torch.arange(len(vb), device=pred.device)
+        return F.cross_entropy(logits, labels)
 
     # -------------------------------------------------------------------------
     # Collapse control. SigLIP embeddings of 267 near-synonymous crash captions
@@ -140,10 +199,16 @@ def main():
     base_cos = F.cosine_similarity(mean_emb.expand_as(Tva), Tva, dim=-1).mean().item()
     base_top1 = (mean_emb.expand_as(Tva) @ Tva.T).argmax(dim=1)
     base_acc = (base_top1 == torch.arange(len(Xva), device=device)).float().mean().item()
+    base_sib_hit = torch.tensor(
+        [vids_va[int(base_top1[i])] == vids_va[i] for i in range(len(Xva))],
+        device=device, dtype=torch.float32,
+    )
+    base_acc_sibling_ok = base_sib_hit.mean().item()
     print(f"[control] constant mean-embedding baseline: mean_cosine={base_cos:.4f}  "
-          f"retrieval_top1_acc={base_acc:.4f}  (chance={1/max(1,len(Xva)):.4f})")
+          f"retrieval_top1_acc={base_acc:.4f}  (sibling_ok={base_acc_sibling_ok:.4f})  "
+          f"(chance={1/max(1,len(Xva)):.4f})")
 
-    print("\n[train] Predictor only (BADAS + SigLIP frozen)")
+    print(f"\n[train] Predictor only (BADAS + SigLIP frozen)  loss={args.loss}")
     t0 = time.time()
     history, best = [], []          # best = [(val_loss, epoch, path)], keep 3
     best_loss, since_improved = float("inf"), 0
@@ -157,9 +222,13 @@ def main():
         for i in pbar:
             idx = perm[i:i + args.batch_size]
             xb, yb = Xtr[idx].to(device), Ytr[idx].to(device)
+            vb = [vids_tr[j] for j in idx.tolist()]
             opt.zero_grad()
             pred = F.normalize(predictor(xb).squeeze(1), dim=-1)
-            loss = (1 - F.cosine_similarity(pred, yb, dim=-1)).mean()
+            if args.loss == "infonce":
+                loss = infonce_loss(pred, yb, vb, log_tau)
+            else:
+                loss = (1 - F.cosine_similarity(pred, yb, dim=-1)).mean()
             loss.backward()
             opt.step()
             total_loss += loss.item()
@@ -167,12 +236,13 @@ def main():
             pbar.set_postfix(loss=f"{total_loss/nb:.4f}")
 
         tr_loss = total_loss / max(1, nb)
-        va_loss, va_cos, va_acc = evaluate(Xva, Yva)
+        va_loss, va_cos, va_acc, va_acc_sib = evaluate(Xva, Yva, vids_va)
         history.append({"epoch": epoch, "train_loss": tr_loss, "val_loss": va_loss,
-                        "val_mean_cosine": va_cos, "val_retrieval_top1_acc": va_acc})
+                        "val_mean_cosine": va_cos, "val_retrieval_top1_acc": va_acc,
+                        "val_retrieval_top1_acc_sibling_ok": va_acc_sib})
         print(f"  epoch {epoch}/{args.epochs}  train_loss={tr_loss:.4f}  "
               f"val_loss={va_loss:.4f}  val_cos={va_cos:.4f}  val_ret@1={va_acc:.4f}  "
-              f"({time.time()-t0:.1f}s)")
+              f"val_ret@1_sib={va_acc_sib:.4f}  ({time.time()-t0:.1f}s)")
 
         # Keep the 3 lowest-val_loss checkpoints.
         ckpt = out_dir / f"predictor_b1_ep{epoch:03d}.pt"
@@ -196,22 +266,33 @@ def main():
     best_loss, best_epoch, best_path = best[0]
     predictor.load_state_dict(torch.load(best_path, map_location=device))
     torch.save(predictor.state_dict(), out_dir / "predictor_b1.pt")
-    final_loss, mean_cos, retrieval_acc = evaluate(Xva, Yva)
+    final_loss, mean_cos, retrieval_acc, retrieval_acc_sib = evaluate(Xva, Yva, vids_va)
 
     print(f"\n[eval] BEST checkpoint (epoch {best_epoch}, n_val={len(val_ex)}): "
-          f"mean_cosine={mean_cos:.4f}  retrieval_top1_acc={retrieval_acc:.4f}")
+          f"mean_cosine={mean_cos:.4f}  retrieval_top1_acc={retrieval_acc:.4f}  "
+          f"retrieval_top1_acc_sibling_ok={retrieval_acc_sib:.4f}")
     print(f"[eval] vs. collapse control:  mean_cosine={base_cos:.4f}  "
-          f"retrieval_top1_acc={base_acc:.4f}")
+          f"retrieval_top1_acc={base_acc:.4f}  sibling_ok={base_acc_sibling_ok:.4f}")
+    # Verdict uses the exact-match metric (the strict one) to decide "learned
+    # something" - the sibling-tolerant number is reported alongside as context,
+    # not substituted in, so this isn't quietly relaxing the bar for a pass.
     verdict = ("LEARNED something video-specific" if retrieval_acc > base_acc
                else "NO evidence beyond the constant-embedding baseline")
     print(f"[verdict] {verdict}")
 
     with open(out_dir / "b1_metrics.json", "w", encoding="utf-8") as f:
         json.dump({
+            "loss": args.loss,
+            "infonce_tau_init": args.infonce_tau_init if args.loss == "infonce" else None,
+            "infonce_tau_final": (float(log_tau.exp().clamp(min=1e-2, max=1.0).item())
+                                  if log_tau is not None else None),
             "n_train": len(train_ex), "n_val": len(val_ex),
             "best_epoch": best_epoch, "best_val_loss": best_loss,
-            "held_out_mean_cosine": mean_cos, "held_out_retrieval_top1_acc": retrieval_acc,
+            "held_out_mean_cosine": mean_cos,
+            "held_out_retrieval_top1_acc": retrieval_acc,
+            "held_out_retrieval_top1_acc_sibling_ok": retrieval_acc_sib,
             "control_mean_embedding": {"mean_cosine": base_cos, "retrieval_top1_acc": base_acc,
+                                        "retrieval_top1_acc_sibling_ok": base_acc_sibling_ok,
                                         "chance_retrieval": 1 / max(1, len(val_ex))},
             "top3_checkpoints": [{"epoch": e, "val_loss": l, "path": str(p)}
                                   for l, e, p in best],
