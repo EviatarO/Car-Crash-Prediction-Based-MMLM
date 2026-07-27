@@ -161,9 +161,11 @@ Full runbook: `RUNPOD_SEMANTIC_SUPERVISION.txt`. Running status doc:
 `outputs/semantic_captions/summary.md` (auto-maintained per stage — keep updating it).
 
 ## Git state
-Branch `main`, pushed and up to date with `origin/main` as of this write-up (the earlier
-`b23b16b`-era unpushed commits were pushed; two more real-result commits landed since:
-`9dc7afa` real B1-InfoNCE result, `bd0eac5` restore `b1_metrics.json`).
+Branch `main`. **HEAD = `952082e` (prompt bake-off harness), 1 commit AHEAD of `origin/main` —
+unpushed.** Everything before it (`bd0eac5` restore `b1_metrics.json`, `9dc7afa` real
+B1-InfoNCE result, and the `b23b16b`-era chain) is pushed. Working tree otherwise clean except
+`outputs/semantic_captions/Caption_Train_All_Clips.xlsx`, which shows modified but predates
+this session entirely — not touched, left for the user to resolve.
 
 Also new this session (untracked, not a code change): `~/.claude/skills/project-review/
 SKILL.md` — user-level `/project-review` skill (deliberately not named `/code-review`,
