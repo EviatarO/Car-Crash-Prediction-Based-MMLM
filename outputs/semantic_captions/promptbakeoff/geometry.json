@@ -1,0 +1,13 @@
+[
+  {
+    "label": "incumbent_267",
+    "path": "outputs\\semantic_captions\\Caption_Train_All_Clips.jsonl",
+    "n": 267,
+    "anisotropy": 0.8547325134277344,
+    "mean_pairwise_cosine": 0.7295547723770142,
+    "effective_rank": 27.727405548095703,
+    "nn_purity_by_class": 0.8913857677902621,
+    "nn_purity_by_tte": 0.30337078651685395,
+    "centroid_separation_pos_neg": 0.0368918776512146
+  }
+]

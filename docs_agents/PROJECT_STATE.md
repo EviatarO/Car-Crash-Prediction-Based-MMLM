@@ -139,6 +139,20 @@ python -u semsup_b1_probe.py --config ../configs/e4_stageA.yaml \
 
 # Local CPU smoke test of either (mechanics only; --limit 8 hits the single-class val path)
 #   add: --epochs 2 --grad-accum 1 --limit 8 --test-limit 3
+
+# Prompt bake-off harness (2026-07-27) - run on the POD for the real distinct-video ceiling
+python student_training/scripts/semsup_sample_clips.py --n 300 --dry-run   # preflight only
+python student_training/scripts/semsup_sample_clips.py --n 300            # writes the manifest
+# then caption the manifest manually with prompts/PROMPT_SEMSUP_V2.py, one JSON row per clip
+python student_training/scripts/semsup_caption_qa.py --input <raw_captions.jsonl> \
+    --manifest dataset/manifests/semsup_promptbakeoff_300.jsonl   # Gate 0 + builds arm_a/b/c.jsonl
+python student_training/scripts/semsup_caption_geometry.py \
+    --inputs outputs/semantic_captions/promptbakeoff/arm_a.jsonl ... --labels A B C   # Gate 1, free/CPU
+python student_training/scripts/semsup_b1_probe.py --config ../configs/e4_stageA.yaml \
+    --loss infonce --captions outputs/semantic_captions/promptbakeoff/arm_a.jsonl \
+    --out-dir /workspace/semsup/bakeoff_a   # Gate 2, repeat per arm
+python student_training/scripts/semsup_promptbakeoff_report.py \
+    --arm-a .../b1_metrics.json --arm-b ... --arm-c ...   # collates + applies the decision rule
 ```
 New-pod setup: `pip install -U transformers peft huggingface_hub pyyaml scikit-learn
 albumentations sentencepiece protobuf` then `hf auth login`.
@@ -147,12 +161,9 @@ Full runbook: `RUNPOD_SEMANTIC_SUPERVISION.txt`. Running status doc:
 `outputs/semantic_captions/summary.md` (auto-maintained per stage — keep updating it).
 
 ## Git state
-Branch `main`. **HEAD = `b23b16b` and is 3 commits AHEAD of `origin/main` — unpushed.**
-Working tree otherwise clean except untracked `docs_agents/`.
-Recent: `b23b16b` (A-2 predictor resize + T-3 per-clip val) ← `c266226` (A-1 InfoNCE) ←
-`131316c` (7 review fixes: T-1/R1/C2/C4/Q1/R2/R3) ← `6021d89` (B result + val-split
-diagnostic) ← `acdcc19` (A1 result) ← `113c3c3` (metrics expansion + top-3) ← `88102a9`
-(two A1/B checkpoint bugfixes).
+Branch `main`, pushed and up to date with `origin/main` as of this write-up (the earlier
+`b23b16b`-era unpushed commits were pushed; two more real-result commits landed since:
+`9dc7afa` real B1-InfoNCE result, `bd0eac5` restore `b1_metrics.json`).
 
 Also new this session (untracked, not a code change): `~/.claude/skills/project-review/
 SKILL.md` — user-level `/project-review` skill (deliberately not named `/code-review`,
@@ -169,12 +180,28 @@ Note: `outputs/` and `reports/` are both **gitignored**; tracked files under the
 B1 null was the cosine objective's fault, not proof the data carries nothing. Full numbers:
 EXPERIMENTS.md.
 
-**New next step, agreed 2026-07-26:** before any 4.5k-scale caption spend, run a ~300-clip
-intermediate check — 150 TP/150 TN from **distinct videos** (no sibling-TTE reuse, cleaner
-InfoNCE negatives than the current 267's ~89-video pool), captioned with **two prompt
-variants** (at least one genuinely frame-grounded, not rephrase-only — the current 267 never
-saw a frame), then re-run the InfoNCE check on that set. Not started: no code exists yet for
-the new clip sampling or the frame-grounded captioning prompt.
+**Prompt bake-off harness (Gates 0-2) is DONE and verified (2026-07-27)** — see
+`~/.claude/plans/CCP based MMLM - Student/2026-07-27_Plan-Prompt-bakeoff-harness-semantic-captions-Gates-0-2.md`
+and the new "Prompt bake-off harness" section in EXPERIMENTS.md. Captioning design changed
+from the originally-proposed two separate prompts to **one prompt, three arms built from its
+JSON output** (Arm A = neutral description, Arm B = +risk clause, Arm C = label-only control) —
+a paired, not independent, comparison. Every gate is built and calibration-tested; nothing has
+been run on real new captions yet (captioning itself is manual/out of scope of the harness).
+
+**Immediate next step: run `semsup_sample_clips.py --n 300 --dry-run` on the POD**, not
+locally. The preflight discovered that positive and negative clips use *different* windowing
+conventions (`TTE_0.5/1.0/1.5` for positives vs `MID/MID-4/MID-8` for negatives, since
+negatives have no event to count down to) — and that **locally the achievable pool is 89
+videos / 267 rows, identical to what already exists** (42 pos + 47 neg, zero new distinct
+videos beyond the incumbent set). The real ceiling depends entirely on the pod's 295
+`train_HiRes` folders, not yet checked against this logic.
+
+**After that:** caption whatever the pod's real ceiling turns out to be, using
+`prompts/PROMPT_SEMSUP_V2.py` (single prompt, JSON output: `caption_neutral` / `risk_clause` /
+`verdict` / `confidence`), run `semsup_caption_qa.py` (Gate 0) →
+`semsup_caption_geometry.py` (Gate 1, free/CPU) → `semsup_b1_probe.py --loss infonce
+--captions arm_X.jsonl` per arm (Gate 2) → `semsup_promptbakeoff_report.py`, which applies the
+pre-written decision rule (DECISIONS.md) mechanically.
 
 **Separately still open, not yet started:** porting `--loss infonce` into `semsup_train.py`
 (Stage B) — it currently only exists in `semsup_b1_probe.py`. B1's positive result is about
@@ -182,7 +209,8 @@ video↔caption alignment only; nothing yet shows it moves actual crash AP. Note
 2026-07-25 review, blocked on a batching prerequisite not yet built.
 
 Pod is currently **stopped** (network volume persists; restart + `git pull` before any of the
-above — the pod's checkout was found stale by one commit during this session's InfoNCE run).
+above — the pod's checkout was found stale by one commit during the InfoNCE run, so always
+`git pull` on a fresh pod session before trusting it has the latest scripts).
 
 **Longer-standing, still a cost/scope decision, not a task** — four options, laid out in
 DECISIONS.md:

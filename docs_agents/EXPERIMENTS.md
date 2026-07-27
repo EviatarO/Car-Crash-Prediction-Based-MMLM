@@ -257,6 +257,56 @@ where the exit code matters. Separately: two processes both loading BADAS-Open c
 on this machine can silently crash one of them (same on-disk HF cache) — run local smoke
 tests sequentially, not as parallel background jobs, when they both load BADAS.
 
+## Prompt bake-off harness built + calibration-verified (2026-07-27)
+Before any caption scale-up spend, built the measurement harness to choose a caption style at
+n≈300 rather than guess. Full design in
+`~/.claude/plans/CCP based MMLM - Student/2026-07-27_Plan-Prompt-bakeoff-harness-semantic-captions-Gates-0-2.md`.
+Two findings changed the original two-prompt plan before any code was written:
+
+- **SigLIP truncates at 64 tokens** (confirmed: `tok.model_max_length == 64`). The incumbent
+  267 captions measure 12-24 tokens; a representative 70-120-word caption in the originally
+  drafted prompt style measured **128 tokens — 50% discarded**, always losing the outcome
+  clause (written last). Redesigned to a single prompt, `caption_neutral` capped at 40 words
+  (measured 24-30 tokens on realistic examples), outcome-relevant content stated first.
+- **Positives and negatives use different windowing conventions on disk**: positives are
+  pre-extracted at `TTE_0.5/1.0/1.5`; negatives (no event exists) at `MID/MID-4/MID-8`. This
+  matches how the incumbent 267-caption set already works (`teacher_dataset_e3b.jsonl`:
+  47 negatives at MID/MID-4/MID-8, 42 positives at TTE_0.5/1.0/1.5 — the origin of "267" is
+  exactly `42×3 + 47×3`).
+
+**Design change**: two separate prompts → **one prompt, three arms** built from its structured
+JSON output (`caption_neutral`, `risk_clause`, `verdict`, `confidence`). Arm A = neutral
+description only; Arm B = neutral + risk clause (identical descriptive content, isolating one
+variable); Arm C = a zero-cost label-only template (falsification control). This makes the
+comparison **paired** (same descriptive content between A/B) instead of independent, which is
+where the statistical power comes from at n≈300 — plain end-to-end AP was already shown
+underpowered for a much bigger intervention (A1-vs-B's CI above).
+
+**Calibration tests, all run for real against the incumbent 267-caption set (not synthetic):**
+- Gate 0 self-test (`semsup_caption_qa.py --input Caption_Train_All_Clips.jsonl`): reproduced
+  0% token truncation and correctly **flagged** the known 267/267 verdict-leakage artifact
+  (documented 2026-07-25) rather than treating it as success — proves the leakage check fires.
+- Gate 1 (`semsup_caption_geometry.py`): reproduced anisotropy `‖mean(E)‖ = 0.8547` **exactly**,
+  matching the earlier hand-calculated figure. Also produced new numbers not measured before:
+  effective rank 27.73, `nn_purity_by_class = 0.8914` (embeddings cluster by pos/neg) alongside
+  `centroid_separation = 0.0369` (small) — flagged as the exact structure-vs-leakage ambiguity
+  Arm C is designed to resolve.
+- Sampler preflight (`semsup_sample_clips.py --n 300 --dry-run`, local run): **correctly
+  refused** rather than silently shrinking — the achievable local pool is 89 videos / 267 rows,
+  identical to what already exists (42 pos, 47 neg). Zero new distinct videos are reachable
+  locally; the real ceiling depends on the pod's 295 `train_HiRes` folders, not yet checked.
+- Gate 2 mechanics (toy run, n=14 real clips from the incumbent set, real BADAS+SigLIP forward
+  passes, CPU): `semsup_b1_probe.py --captions arm_X.jsonl` ran end-to-end for A/B/C, and
+  `semsup_promptbakeoff_report.py` correctly computed exact-binomial and paired-bootstrap
+  statistics from real per-clip hit data and rendered `summary.md`. No real conclusion drawn
+  (n=14 toy set) — mechanics only, per plan verification step 6.
+- `_build_promptbakeoff_xlsx.py`: banned-word (amber) and over-token (lavender) cell coloring
+  verified by direct cell inspection on the toy set, alongside the reused green/red verdict
+  coloring convention from `_build_caption_xlsx.py`.
+
+**Not yet done**: real captioning against the prompt, and everything downstream of it. The
+harness is proven correct; no new scientific result exists yet.
+
 ## Literature check (2026-07-23, web)
 - **BADAS-2.0** (arXiv 2604.05767, Apr 2026) tested general VLMs against their specialised
   architecture and both lost clearly: Cosmos-BADAS F1 0.817 and Gemini-BADAS F1 0.662 (tuned)

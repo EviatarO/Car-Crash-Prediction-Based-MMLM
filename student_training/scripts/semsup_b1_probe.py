@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 
 from semsup_common import (  # noqa: E402
     TrainableBadasWrapper, load_siglip, siglip_text_embed,
-    load_training_examples, clip_level_split,
+    load_training_examples, clip_level_split, CAPTIONS_JSONL,
 )
 from vjepa_reason import ResamplerProjector  # noqa: E402
 
@@ -80,6 +80,10 @@ def main():
                          "infonce = in-batch contrastive, sibling-TTE-masked")
     ap.add_argument("--infonce-tau-init", type=float, default=0.07,
                     help="initial temperature (learnable), CLIP/SigLIP-standard init")
+    ap.add_argument("--captions", default=None,
+                    help="override caption JSONL (default: the 267-row "
+                         "Caption_Train_All_Clips.jsonl). Use for the prompt-bakeoff "
+                         "arm_{a,b,c}.jsonl files from semsup_caption_qa.py.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -116,7 +120,7 @@ def main():
         trainable = trainable + [log_tau]
     opt = torch.optim.AdamW(trainable, lr=args.lr)
 
-    examples = load_training_examples(limit=args.limit)
+    examples = load_training_examples(limit=args.limit, captions_path=args.captions)
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split, Dt={dt})")
 
@@ -185,23 +189,34 @@ def main():
         acc_clip = clip_level_retrieval_acc(P, T, vids_arr)
         return loss, diag.mean().item(), acc, acc_sibling_ok, acc_clip
 
-    def clip_level_retrieval_acc(P, T, vids_list):
+    def clip_level_retrieval_detail(P, T, vids_list):
         """Pool rows sharing a video_id (mean, renormalize) before retrieval, so
         the candidate pool is the real independent sample size (~17 clips), not
-        51 correlated TTE-window rows. See evaluate()'s docstring."""
+        51 correlated TTE-window rows. See evaluate()'s docstring. Returns
+        (clip_ids SORTED for a canonical cross-run order, per-clip hit 0/1 list)
+        so a paired arm-vs-arm comparison (semsup_promptbakeoff_report.py) can
+        resample clips together across two separately-trained arms - the
+        aggregate accuracy alone can't support that."""
         from collections import defaultdict
         by_p, by_t = defaultdict(list), defaultdict(list)
         for i, v in enumerate(vids_list):
             by_p[v].append(P[i])
             by_t[v].append(T[i])
-        clip_ids = list(by_p.keys())
+        clip_ids = sorted(by_p.keys())
         if len(clip_ids) < 2:
-            return float("nan")
+            return [], []
         Pc = torch.stack([F.normalize(torch.stack(by_p[v]).mean(0), dim=-1) for v in clip_ids])
         Tc = torch.stack([F.normalize(torch.stack(by_t[v]).mean(0), dim=-1) for v in clip_ids])
         top1c = (Pc @ Tc.T).argmax(dim=1)
         idxc = torch.arange(len(clip_ids), device=P.device)
-        return (top1c == idxc).float().mean().item()
+        hits = (top1c == idxc).int().tolist()
+        return clip_ids, hits
+
+    def clip_level_retrieval_acc(P, T, vids_list):
+        clip_ids, hits = clip_level_retrieval_detail(P, T, vids_list)
+        if not clip_ids:
+            return float("nan")
+        return sum(hits) / len(hits)
 
     def infonce_loss(pred, tgt, vids_batch, log_tau):
         """In-batch contrastive loss. Same-video (sibling-TTE) rows are masked out
@@ -302,6 +317,18 @@ def main():
     torch.save(predictor.state_dict(), out_dir / "predictor_b1.pt")
     final_loss, mean_cos, retrieval_acc, retrieval_acc_sib, retrieval_acc_clip = evaluate(Xva, Yva, vids_va)
 
+    # Per-clip hit/miss at the best checkpoint, for a paired cross-arm comparison
+    # (semsup_promptbakeoff_report.py) - the aggregate number above can't support
+    # resampling clips together across two separately-trained arms.
+    predictor.eval()
+    with torch.no_grad():
+        preds_final = []
+        for i in range(0, len(Xva), args.batch_size):
+            xb = Xva[i:i + args.batch_size].to(device)
+            preds_final.append(F.normalize(predictor(xb).mean(dim=1), dim=-1))
+        P_final = torch.cat(preds_final, dim=0)
+    val_clip_ids, val_clip_hits = clip_level_retrieval_detail(P_final, Yva.to(device), vids_va)
+
     print(f"\n[eval] BEST checkpoint (epoch {best_epoch}, n_val={len(val_ex)}): "
           f"mean_cosine={mean_cos:.4f}  retrieval_top1_acc={retrieval_acc:.4f}  "
           f"sibling_ok={retrieval_acc_sib:.4f}  clip={retrieval_acc_clip:.4f}")
@@ -329,6 +356,7 @@ def main():
             "held_out_retrieval_top1_acc": retrieval_acc,
             "held_out_retrieval_top1_acc_sibling_ok": retrieval_acc_sib,
             "held_out_retrieval_top1_acc_clip": retrieval_acc_clip,
+            "val_clip_ids": val_clip_ids, "val_clip_hits": val_clip_hits,
             "control_mean_embedding": {"mean_cosine": base_cos, "retrieval_top1_acc": base_acc,
                                         "retrieval_top1_acc_sibling_ok": base_acc_sibling_ok,
                                         "retrieval_top1_acc_clip": base_acc_clip,
@@ -339,6 +367,7 @@ def main():
             "epochs_run": len(history), "epochs_max": args.epochs,
             "lr": args.lr, "batch_size": args.batch_size, "patience": args.patience,
             "seed": args.seed, "siglip_model": args.siglip_model,
+            "captions_path": str(args.captions or CAPTIONS_JSONL),
             "history": history,
         }, f, indent=2)
     print(f"[save] {out_dir / 'predictor_b1.pt'} (best)  {out_dir / 'b1_metrics.json'}")

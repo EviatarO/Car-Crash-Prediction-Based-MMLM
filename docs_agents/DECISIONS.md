@@ -74,6 +74,34 @@
   observed to silently crash one of them (shared on-disk HF cache contention); the identical
   command succeeded when re-run alone. Run sequentially when both load BADAS.
 
+### Prompt bake-off design (2026-07-27)
+- **Two separate captioning prompts (Driving-Semantic vs Risk-Aware-Causal)** → rejected before
+  writing any code. The two drafts were too similar to distinguish at n≈300 (paired bootstrap
+  already showed n≈300 is barely powered even for a MUCH bigger intervention), and running them
+  as two independent teacher passes would let the teacher describe the same scene differently
+  each time, confounding the one variable actually worth isolating. Replaced with **one prompt,
+  three arms built from its structured JSON output** — see EXPERIMENTS.md.
+- **70-120 word captions in the original prompt draft** → rejected: measured at 128 SigLIP
+  tokens against a hard 64-token truncation limit, discarding the outcome clause every time
+  (it was written last). Capped at 40 words, outcome-relevant content first.
+- **"Consistency over variety" as a blanket instruction** → rejected: it's exactly the
+  mechanism that produced the 0.8547 anisotropy collapse risk if applied to *content*, not just
+  *relational vocabulary*. Scoped instead: canonical terms only for relations/motion
+  (`braking`, `merging`, ...); content (actor, direction, proximity) must be clip-specific,
+  enforced by an automated duplicate-sentence check, not just prompt wording.
+- **Trusting the prompt's "don't mention risk in caption_neutral" instruction alone** →
+  rejected: VLMs editorialize about danger on dashcam footage regardless of instruction. Backed
+  by an automated banned-word check + regenerate loop (`semsup_caption_qa.py`), because Arm A's
+  entire validity depends on it actually being neutral.
+- **Decision rule for the bake-off, written down 2026-07-27 before any real captions exist**
+  (implemented mechanically in `semsup_promptbakeoff_report.py`'s `decide()`):
+  - A beats C, B ≈ A → structure carries it, verdict adds nothing → scale Arm A. Strongest claim.
+  - A beats C, B beats A → both channels contribute → scale Arm B, report the split.
+  - A ≈ C, B beats A → the gain is the label, not the language → drop the structure claim, use
+    label smoothing instead.
+  - Neither beats → nothing works at this scale → deprioritize (see option 4 below).
+  - REF (incumbent 267) beats both new arms → stop, diagnose the captioning, don't scale anything.
+
 ## Unresolved design questions
 
 - **Which scale-up path?** **Gate resolved 2026-07-25/26**: the B1-InfoNCE re-run (see

@@ -101,15 +101,34 @@ def build_frames_dir_index(label_files: list | None = None) -> dict:
     return idx
 
 
-def load_training_examples(limit: int = 0, require_frames: bool = True) -> list:
-    """Load Caption_Train_All_Clips.jsonl, resolve frames_dir, verify 16 frames on
-    disk, attach label (0/1 from gt_verdict). Skips unresolvable/missing rows."""
+def load_training_examples(limit: int = 0, require_frames: bool = True,
+                            captions_path=None) -> list:
+    """Load a caption-schema JSONL (default: Caption_Train_All_Clips.jsonl),
+    resolve frames_dir, verify 16 frames on disk, attach label (0/1 from
+    gt_verdict). Skips unresolvable/missing rows.
+
+    captions_path: override the caption file (e.g. one of the prompt-bakeoff
+    arm_{a,b,c}.jsonl files - see semsup_caption_qa.py). If a row already
+    carries an explicit 'frames_dir' field (the bakeoff arm files always do,
+    since they're built directly from the sampler's manifest), that value is
+    used AS-IS instead of going through build_frames_dir_index(). This matters
+    because the default index only covers teacher_dataset_e3b.jsonl's 267 keys
+    - a fresh distinct-video sample drawn from other teacher_labels generations
+    would not resolve through it, and merging all 29 label files into one
+    index risks the exact silent-collision failure build_frames_dir_index()
+    was written to prevent (see its docstring). Rows WITHOUT an explicit
+    'frames_dir' (the original 267-caption file) are resolved exactly as
+    before - this is a strict superset of the old behavior, not a change to it.
+    """
+    path = Path(captions_path) if captions_path else CAPTIONS_JSONL
     idx = build_frames_dir_index()
-    rows = [json.loads(l) for l in open(CAPTIONS_JSONL, encoding="utf-8") if l.strip()]
+    rows = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
     out, skipped = [], 0
     for r in rows:
-        key = (r["video_id"], _norm_tte(r["requested_time_to_event"]))
-        fd = idx.get(key)
+        fd = r.get("frames_dir")
+        if not fd:
+            key = (r["video_id"], _norm_tte(r["requested_time_to_event"]))
+            fd = idx.get(key)
         if not fd:
             skipped += 1
             continue
