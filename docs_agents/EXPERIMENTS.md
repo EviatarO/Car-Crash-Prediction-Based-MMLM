@@ -98,6 +98,45 @@ The one real signal is **variance**: B's checkpoints span 0.0168 AP, A1's span 0
 At n=267 the semantic loss adds instability, not signal. Nothing is damaged (both stay above
 A0), nothing is gained.
 
+### B1-InfoNCE re-run — the objective was broken, not (only) the data (2026-07-25/26)
+Real GPU run on the pod (`--loss infonce`, same 267 captions, same 216/51 clip-level split,
+`num_queries=8` predictor). Early-stopped at epoch 28, best checkpoint = **epoch 13** (val_loss
+0.8918). Cache step (135.7s) reproduced the original B1 cosine run's collapse-control numbers
+exactly (`mean_cosine=0.8648`, `retrieval_top1_acc=0.0196`), confirming same data/frozen
+features — only the loss changed.
+
+| Metric (best ckpt, epoch 13, n_val=51 / n_clips=17) | InfoNCE | Collapse control | Chance |
+|---|---|---|---|
+| Clip-level retrieval@1 | **0.2353** (4/17) | 0.0588 | 0.0588 |
+| Row-level retrieval@1 | 0.0784 (4/51) | 0.0196 | 0.0196 |
+| Sibling-tolerant retrieval@1 | 0.1765 (9/51) | 0.0588 | 0.0588 |
+| mean_cosine | 0.1082 | 0.8648 | — |
+
+**Verdict, printed by the script itself: "LEARNED something video-specific" (decided on
+clip-level retrieval).** Exact one-sided binomial tests against chance (not just "beats the
+control"): clip-level p=0.0154, row-level p=0.0178, sibling-tolerant p=0.0027 — real signal
+across all three aggregation rules, which is itself notable since A1-vs-B's aggregation-rule
+sensitivity was exactly what made that comparison inconclusive. `mean_cosine` dropping to 0.108
+(from 0.865 under cosine) is *expected and correct* — InfoNCE optimizes relative ranking, not
+absolute cosine, so the metric that mattered under the old (broken) objective is no longer the
+one to read.
+
+**Caveat, stated plainly:** n_clips=17 is tiny. 4/17 correct vs ~1 expected by chance is a real
+effect, but the *size* of the effect (0.24 retrieval@1) is not a reliable estimate at this n —
+one flipped clip moves it by ~6 points. Epoch 13 was also both the val_loss optimum and the
+retrieval peak (legitimate — selection was on val_loss — but worth flagging as a mild lucky
+alignment, not a fully independent confirmation).
+
+**What this resolves:** A-1's analytic argument (the cosine objective's own degenerate optimum
+explained 99.47% of the original null) is now confirmed empirically, not just by hand-calculation.
+The original B1 null was an artifact of the loss function, not proof that no video↔caption
+signal exists at n=267. This unblocks the scale-up decision — see DECISIONS.md.
+
+Artifacts: `/workspace/semsup/b1_infonce/{predictor_b1.pt, b1_metrics.json,
+predictor_b1_ep{013,020,024}.pt}`. Not yet pulled locally — a stale copy of the *old* cosine
+run's `b1_metrics.json` was pulled by mistake and lives at
+`outputs/semantic_captions/b1_metrics2.json` (ignore/replace it, don't cite it as InfoNCE data).
+
 ### C1 + T-2 — real per-clip test scores pulled off the pod, paired bootstrap CI (2026-07-25)
 Pod was stopped (network volume persisted the results); restarted once, 6 files pulled
 directly from `/workspace/semsup/{a1,b}/test_results_ep*.jsonl` (677 rows each — one row per

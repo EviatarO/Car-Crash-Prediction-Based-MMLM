@@ -164,14 +164,25 @@ Note: `outputs/` and `reports/` are both **gitignored**; tracked files under the
 `git add` exit nonzero — it still stages, but it breaks `&&` chains.
 
 ## Next step
-**Immediate, unblocked, highest priority:** run the real B1 diagnostic with `--loss infonce`
-at n=267 (same scale as the original null result, on the pod — GPU makes this minutes, and
-it needs no new captions). This is the test that actually distinguishes "the objective was
-broken" from "the data is too small" for the whole thread. Command: same as B1's usual real
-run (see Important commands) plus `--loss infonce`. Pod is currently **stopped**; needs a
-restart to run this (network volume persists, so `/workspace/semsup/` and deps set up so far
-are intact — but per "New-pod setup" above, pip installs may need reinstalling if this is a
-genuinely new pod rather than the same one resumed).
+**B1-InfoNCE re-run is DONE (2026-07-25/26) — real signal found.** Clip-level retrieval@1
+0.2353 vs chance/control 0.0588 (n_clips=17, p=0.015). Confirms A-1's diagnosis: the original
+B1 null was the cosine objective's fault, not proof the data carries nothing. Full numbers:
+EXPERIMENTS.md.
+
+**New next step, agreed 2026-07-26:** before any 4.5k-scale caption spend, run a ~300-clip
+intermediate check — 150 TP/150 TN from **distinct videos** (no sibling-TTE reuse, cleaner
+InfoNCE negatives than the current 267's ~89-video pool), captioned with **two prompt
+variants** (at least one genuinely frame-grounded, not rephrase-only — the current 267 never
+saw a frame), then re-run the InfoNCE check on that set. Not started: no code exists yet for
+the new clip sampling or the frame-grounded captioning prompt.
+
+**Separately still open, not yet started:** porting `--loss infonce` into `semsup_train.py`
+(Stage B) — it currently only exists in `semsup_b1_probe.py`. B1's positive result is about
+video↔caption alignment only; nothing yet shows it moves actual crash AP. Noted as A-5 in the
+2026-07-25 review, blocked on a batching prerequisite not yet built.
+
+Pod is currently **stopped** (network volume persists; restart + `git pull` before any of the
+above — the pod's checkout was found stale by one commit during this session's InfoNCE run).
 
 **Longer-standing, still a cost/scope decision, not a task** — four options, laid out in
 DECISIONS.md:

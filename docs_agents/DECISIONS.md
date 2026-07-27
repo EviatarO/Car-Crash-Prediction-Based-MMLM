@@ -76,25 +76,34 @@
 
 ## Unresolved design questions
 
-- **Which scale-up path?** **Partially resolved 2026-07-25**: before choosing (1) full
-  267→~4.5k captioning, (2) intermediate ~500–1000, or (3) deprioritizing the thread — first
-  run the free re-diagnostic: B1 with `--loss infonce` at the current n=267 (mechanism
-  verified, just not yet executed for real). If it shows a real signal, scaling captions is
-  well-motivated; if it's still at chance, the problem may be that text-derived (not
-  vision-derived) captions carry no per-clip visual signal to learn (see EXPERIMENTS.md's
-  documentation-consistency finding: the 267 captions never saw a frame), which scaling alone
-  won't fix either. **The scale-up choice itself is still not decided** — this just adds a
-  cheap, informative step before making it.
+- **Which scale-up path?** **Gate resolved 2026-07-25/26**: the B1-InfoNCE re-run (see
+  EXPERIMENTS.md) found real, statistically-supported video↔caption signal at n=267
+  (clip-level retrieval@1 4× chance, p=0.015) — the original null was the cosine objective's
+  fault, not proof the data carries nothing. Scale-up is now well-motivated in principle.
+  **But the choice is reframed, not just "how many captions":** the current 267 are
+  text-to-text rephrasings of the teacher's `final_reasoning` that never saw a frame, so
+  whatever signal InfoNCE just found is coming through *indirectly* (via the teacher's own
+  reasoning text), not from fresh visual grounding. Proposed next step (not yet started):
+  ~300 new clips from **distinct videos** (150 TP/150 TN, no sibling-TTE reuse — cleaner
+  InfoNCE negatives than the current 267's ~89-video pool), captioned with **two prompt
+  variants**, at least one of which does genuine frame-grounded captioning (not rephrase-only)
+  — then re-run the InfoNCE check on that set before committing to the full 4.5k spend. This
+  replaces the old three-option framing (full/intermediate/deprioritize): the informed choice
+  is now "which prompt variant, and does frame-grounding actually add signal over the
+  rephrase-only baseline," decided on ~300 clips before any 4.5k-scale spend.
 - **How to fix checkpoint selection** → **Resolved 2026-07-25 (T-3)**: per-clip aggregation,
   not a fixed-epoch rule. See the "Trust val_ap" entry above.
 - **Does the semantic-aux loss beat crash-only LoRA on AP at a data scale where it could?**
   Still the central question, and now sharper: at n=267 with the (broken) cosine objective the
   answer was "not measurable" — B1 showed no video↔caption alignment above chance, and B added
-  ~3.5× the checkpoint variance of A1 without a mean shift. **Whether that was the data or the
-  objective is exactly what the pending InfoNCE re-run is designed to answer** — see the
-  scale-up entry above and PROJECT_STATE.md's Next step. (T-2's bootstrap CI is now in hand and
-  confirms the n=267 A1-vs-B gap is noise, not signal, under the current cosine objective — see
-  EXPERIMENTS.md. It doesn't change what the InfoNCE re-run still needs to test.)
+  ~3.5× the checkpoint variance of A1 without a mean shift. T-2's bootstrap CI confirms that
+  n=267 A1-vs-B gap is noise under the cosine objective (see EXPERIMENTS.md). **Still genuinely
+  open**: B1-InfoNCE now shows real video↔caption alignment exists at n=267 (see EXPERIMENTS.md)
+  — but Stage B (the actual crash-prediction LoRA run) still uses the cosine loss;
+  `semsup_train.py` was never given the `--loss infonce` option (noted as A-5 in the 2026-07-25
+  review, blocked on a batching prerequisite). So the open question is now: does porting
+  InfoNCE into Stage B, and/or the frame-grounded caption experiment above, actually move crash
+  AP — neither has been tested yet.
 - **LoRA target_modules (`query,key,value`) match both the 24 encoder layers AND the 12
   V-JEPA2 predictor-layer attention blocks** (same substring, both under `backbone`). Not
   decided whether to restrict to encoder-only via a more specific path pattern.
