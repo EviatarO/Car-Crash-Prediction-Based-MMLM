@@ -38,7 +38,7 @@ TRAIN_FRAMES_ROOT = PROJECT_ROOT / "dataset" / "train"
 INCUMBENT_CAPTIONS = PROJECT_ROOT / "outputs" / "semantic_captions" / "Caption_Train_All_Clips.jsonl"
 TEST_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 VAL_E3A_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "val_e3a.jsonl"
-DEFAULT_OUT = PROJECT_ROOT / "dataset" / "manifests" / "semsup_promptbakeoff_300.jsonl"
+DEFAULT_OUT = PROJECT_ROOT / "dataset" / "manifests" / "semsup_promptbakeoff.jsonl"
 
 POS_BUCKETS = ("TTE_0.5", "TTE_1.0", "TTE_1.5")
 NEG_BUCKETS = ("MID", "MID-4", "MID-8")
