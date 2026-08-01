@@ -221,7 +221,7 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--frames_root", required=True)
-    ap.add_argument("--split", required=True, choices=["Private", "Public"])
+    ap.add_argument("--split", required=True, choices=["Private", "Public", "Train"])
     ap.add_argument("--output", help="Output JSONL path (required unless --dry_run)")
     ap.add_argument("--dry_run", action="store_true",
                     help="Validate manifest/frames only. No GPU, no scoring.")
