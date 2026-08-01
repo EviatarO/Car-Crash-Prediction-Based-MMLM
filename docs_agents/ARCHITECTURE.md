@@ -89,6 +89,56 @@ under the LUPI regime* (see EXPERIMENTS.md literature check).
   instead. A "3 buckets per class" sampling scheme must use these two different bucket sets,
   not one shared TTE axis. Every (video_id, bucket) pair needing a frame window that isn't
   already extracted on disk is unreachable — no raw video exists in this repo to extract more.
+- **Raw Nexar MP4s DO exist locally after all** (2026-07-28), in a sibling project folder not
+  previously checked — this reverses the previous constraint for NEW extractions (the 500-clip
+  bake-off set was extracted locally, no pod trip needed). The `dataset/train/`-resident
+  extracted-frames constraint above still holds for anything reading pre-existing folders.
+- **Positive windows use `train.csv`'s `time_of_event`** to place the TTE_0.5/1.0/1.5 windows;
+  negative windows use the clip's own midpoint (MID/MID-4/MID-8) since no event exists to
+  anchor to — same convention as the incumbent 267-caption set, now also used by
+  `semsup_extract_promptbakeoff_frames.py` for the 500 new clips.
+- **OpenRouter `preview`-tagged model aliases are not stable snapshots** (see PROJECT_STATE.md's
+  gotchas) — `google/gemini-3.1-pro-preview`'s behavior changed between the historical v6
+  baseline and a same-day rerun. Any comparison against a "current teacher" baseline must use
+  a fresh same-day run, never a stored historical number, for any `preview`-tagged model.
+- **The under-calling / recall problem is (evidence suggests) a calibration issue, not a
+  perception issue.** Three different teacher candidates (Qwen3.7 Flash, GPT-5.6 Luna Pro,
+  Qwen3-VL-235B-Thinking), two different prompts (v6 unmodified, and a from-scratch prompt with
+  an explicit anti-under-calling instruction), all produce the identical confusion matrix on
+  the 18-clip val set: TP=2, FP=0, TN=9, FN=7. On clip `00687`, the model's own caption
+  correctly describes the hazard ("gray SUV merging into ego lane") while its verdict still says
+  NO and its risk_clause says "normal merging traffic" — the perception is right, the decision
+  layer discounts it. **Extended through 6 more prompt versions (V5-V9) and confirmed
+  statistically inconclusive at this sample size**: every accuracy delta across all rounds sat
+  inside every other's 95% CI (McNemar p>=0.125 throughout) - n=18 cannot distinguish these
+  prompts. One robust result did survive: unmodified v6 on `google/gemini-3.6-flash` scored
+  best on both axes (72.2% acc, 0 FP, best caption fidelity) while the *same prompt* on
+  Qwen3-VL-235B-Thinking collapsed to 0/18 YES predictions - model-family x prompt interaction
+  dominates prompt wording. This 18-clip screening approach is now superseded by inference-only
+  failure-mining on the real ~4,500-window train pool (see PROJECT_STATE.md's
+  "train4500-inference pipeline"), which has real statistical power and measures the frozen
+  scorer directly instead of a caption-quality proxy.
+- **Negative-window convention changed: `MID` moved from offset 0.0 (exact clip midpoint) to
+  −10.0 (renamed `MID-10`)** — discovered 2026-08-01 via real A0 scoring on `train4500`'s
+  chunk 0: the exact-midpoint window produced 42.8% error, 100% false positives, at 0.99+
+  confidence, isolated to that one bucket (`build_train4500_manifest.py`'s `NEG_BUCKETS`,
+  `semsup_extract_promptbakeoff_frames.py`'s matching constant). Root cause: `train.csv`'s
+  label is clip-level, but a naturalistic ~40s clip's literal midpoint can look genuinely risky
+  without ever becoming a collision — a real hard-negative the label can't express. Falls back
+  to the pre-existing `T_FLOOR=2.0` mechanism for short clips (no new fallback logic needed).
+  Any script that hardcodes the string `"MID"` as a bucket label is now wrong — check
+  `build_caption_monitor.py`'s `_resolve_caption_bucket()` for the pattern (legacy
+  `TN_MIDPOINT` captions at offset ~0 are deliberately left unresolved, not remapped to
+  `MID-10`, since it's a genuinely different window).
+- **`teacher_distillation/scripts/teacher_bakeoff.py` and `Teacher_dataset_distill_v11.py`
+  both have a pre-existing broken top-level import** (`prompts/PROMPT_G2.py` and
+  `prompts/templates.py` respectively no longer exist at those paths - the prompts they held
+  now live under `prompts/old prompts/`, from an earlier reorganization). Discovered
+  2026-07-28/29, unrelated to and not fixed by this thread's work. Any new script needing
+  their helpers (image encoding, retry/backoff, JSON extraction) should copy the needed
+  functions rather than import the module, until/unless someone deliberately fixes the
+  reorg fallout - `semsup_caption_promptbakeoff.py` and `semsup_v6_control_rerun.py` both do
+  this already.
 
 ## Files that matter
 | Path | Purpose |
@@ -115,6 +165,22 @@ under the LUPI regime* (see EXPERIMENTS.md literature check).
 | `student_training/scripts/semsup_caption_geometry.py` | **NEW.** Gate 1: SigLIP-embedding geometry (anisotropy, mean pairwise cosine, effective rank, NN purity, centroid separation) per arm — free, CPU-only |
 | `student_training/scripts/semsup_promptbakeoff_report.py` | **NEW.** Gate 2 collation: per-arm exact binomial test vs chance, paired bootstrap between arms on shared val clips, mechanical decision-rule application, writes `summary.md` |
 | `outputs/semantic_captions/_build_promptbakeoff_xlsx.py` | **NEW.** Reviewable spreadsheet for the raw bake-off captions, reusing `_build_caption_xlsx.py`'s styling plus new banned-word/over-token QA colors |
+| `student_training/scripts/semsup_extract_promptbakeoff_frames.py` | **NEW (2026-07-28).** Extracts 16-frame windows from the sibling project's raw Nexar MP4s for new distinct-video clips (positives at TTE_0.5/1.0/1.5 from `train.csv`'s `time_of_event`, negatives at MID/MID-4/MID-8) - produced the 500-clip bake-off set |
+| `prompts/PROMPT_SEMSUP_V3_COT.py` | **NEW.** v6-style chain-of-thought pipeline (STEP 1-7) then distill into the same caption_neutral/risk_clause/verdict/confidence schema as V2, plus 3 extra CoT-audit fields (scene_context/dynamic_objects/temporal_analysis) |
+| `prompts/PROMPT_SEMSUP_V4_QWEN.py` | **NEW.** Written in Qwen's own recommended prompt structure (Role/Task/Context/Instructions-with-forced-thinking/worked-examples/Do-NOT/Priority); adds an explicit anti-under-calling instruction. Did not fix the under-calling pattern (see Constraints) but scored the highest caption-fidelity mean of anything tested |
+| `student_training/scripts/semsup_caption_promptbakeoff.py` | **NEW.** Calls any OpenRouter vision model with `--prompt {v2,v3,v4}` to caption a manifest; self-contained (copies, doesn't import, the retry/JSON-extraction/image-encoding helpers - see a Constraints note on why); resumable; `--max-tokens` for thinking models |
+| `student_training/scripts/semsup_v6_control_rerun.py` | **NEW.** Runs the UNMODIFIED `PROMPT_G_OPT_v6_balanced` against any `--model` on the 18 val_e3a clips - built as a same-day reproducibility control, became the generic teacher-model bake-off runner. `--resume` supported |
+| `teacher_distillation/scripts/reasoning_analysis_semsup_val18.py` | **NEW.** Scores V2/V3/Gemini-rerun captions against GT on the 18 val clips (0-10 rubric + BERTScore), modeled on `reasoning_analysis_v6_debate.py` |
+| `teacher_distillation/scripts/reasoning_analysis_teacher_bakeoff.py` | **NEW.** Same scoring, comparing Gemini-today vs Qwen3.7 Flash vs GPT-5.6 Luna Pro (all on unmodified v6) |
+| `teacher_distillation/scripts/reasoning_analysis_qwen3vl_val18.py` | Same scoring for V4/Qwen3-VL-235B, formatted to match `v11_100clips/results_v6_debate_v11.xlsb.xlsx`'s whole-row green/orange/red convention |
+| `prompts/PROMPT_SEMSUP_V5_BALANCED.py` .. `PROMPT_SEMSUP_V9_MINIMAL.py` | 5 more captioning-prompt versions from the (now-superseded) 18-clip screen — V5 risk-score+pre-mortem, V6 kinematic, V7 ego-frame, V8 narrative, V9 minimal. None statistically distinguishable at n=18 (see the "under-calling" constraint note). Not deleted; kept as a record of what was tried |
+| `student_training/scripts/build_train4500_manifest.py` | **NEW (2026-08-01).** Emits the 4,446-window train manifest in the Stage-A scorer's schema (`event_occurs`/`group`/`frame_indices`/`frames_dir`), excludes val_e3a's 18 clips (drawn from the same train.csv pool, used for Stage-C checkpoint selection), fails loudly on any test/val overlap. Owns `NEG_BUCKETS` (the `MID-10`/`MID-4`/`MID-8` definitions) |
+| `student_training/scripts/run_train4500_pipeline.py` | **NEW.** Chunked orchestrator: local extraction (`--chunk-size`/`--start-chunk`/`--stop-after-chunk`) + prints the exact rsync/pod-scoring commands per chunk (does not itself touch the pod). Class-interleaves videos before chunking (see gotcha) |
+| `student_training/scripts/mine_train_failures.py` | **NEW.** Joins scorer output back to the manifest via `(video_id, group)`, emits `failures.jsonl` + a per-bucket taxonomy, and prints the automated A0-test-error-rate gap checkpoint (>5pp = stop-and-diagnose) plus a systematic-vs-diffuse classifier that recommends failure-targeted vs uniform caption allocation |
+| `teacher_distillation/scripts/build_caption_monitor.py` | **NEW.** The coverage monitor the original Stage-0 plan specified but never built. Clones `build_teacher_monitor.py`'s train-sheet grid (4,500 rows, `video_id × GT_verdict × TTE`), adds a `model_verdict` column/color pass so caption coverage and frozen-scorer correctness show on the same grid |
+| `RUNPOD_TRAIN4500_STAGEA.sh` | **NEW.** Pod-side runbook for scoring train4500 chunks — chunked (not one-shot like `RUNPOD_E4_STAGEA_RUN.sh`), does not self-terminate the pod, safe to re-run (skips already-scored chunks) |
+| `student_training/scripts/semsup_extract_promptbakeoff_frames.py` | Extended (2026-08-01): `--manifest`/`--workers`/`--chunk-size`/`--chunk-index` for driving from `build_train4500_manifest.py`'s output instead of only its own sampler; **sequential per-window decode** (1 seek + sequential read instead of 16 seeks/window — 3.9× faster, verified byte-identical output); label JSONL is now upsert-append instead of truncate-on-open |
+| `student_training/scripts/e4_stageA_badas_open_eval.py` | `--split` gained a `"Train"` choice (cosmetic — written to output, never read by scoring logic) |
 
 ## APIs / functions — semantic-supervision
 - `TrainableBadasWrapper(stagea_cfg, lora_target_modules=None|[...], lora_r, lora_alpha, lora_dropout)`

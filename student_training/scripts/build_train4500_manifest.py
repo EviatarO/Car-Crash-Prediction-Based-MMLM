@@ -66,7 +66,18 @@ T_FLOOR = 2.0
 
 # (param, horizon_label, dir_suffix, group_index)
 POS_BUCKETS = [(0.5, "TTE_0.5", "tte05", 0), (1.0, "TTE_1.0", "tte10", 1), (1.5, "TTE_1.5", "tte15", 2)]
-NEG_BUCKETS = [(0.0, "MID", "mid0", 0), (-4.0, "MID-4", "neg4", 1), (-8.0, "MID-8", "neg8", 2)]
+# MID was originally offset 0.0 (the exact clip midpoint). Chunk 0's real scoring run found
+# it produced 107/250 false positives (42.8% error, 0 FN) at extreme confidence (0.99+),
+# vs 14.4% for MID-4/MID-8 - isolated entirely to this bucket. Diagnosis: train.csv's label
+# is CLIP-LEVEL ("no collision anywhere in this ~40s clip"), but the literal midpoint of a
+# naturalistic driving clip can easily contain a near-miss or tense moment that never becomes
+# a collision - a real "hard negative" the clip-level label can't capture. Moved to offset
+# -10.0 (renamed MID-10) to push further from the midpoint, matching the logic that already
+# makes MID-4/MID-8 well-behaved. Falls back to the existing T_FLOOR mechanism for short
+# clips (verified: 44/250 = 17.6% of chunk 0's negatives have duration <= 24s and would floor
+# to T_FLOOR=2.0s, same well-tested fallback MID-4/MID-8 already rely on for short clips -
+# no new fallback logic needed).
+NEG_BUCKETS = [(-10.0, "MID-10", "mid10", 0), (-4.0, "MID-4", "neg4", 1), (-8.0, "MID-8", "neg8", 2)]
 
 
 def load_train_labels() -> dict:

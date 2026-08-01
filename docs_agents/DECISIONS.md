@@ -102,6 +102,55 @@
   - Neither beats → nothing works at this scale → deprioritize (see option 4 below).
   - REF (incumbent 267) beats both new arms → stop, diagnose the captioning, don't scale anything.
 
+### Teacher-model bake-off (2026-07-28/29)
+- **Compare a candidate teacher against the historical v6 baseline (83.3%/6.78)** → rejected:
+  a same-day rerun of the identical unmodified v6 prompt scored 50.0%/4.61 on the same clips -
+  the historical number is stale (likely model drift on the `google/gemini-3.1-pro-preview`
+  `preview` alias). Any teacher comparison must use a fresh same-day baseline. See
+  EXPERIMENTS.md's "Round 0."
+- **Conclude a candidate teacher is "better" from verdict accuracy alone on this balanced
+  18-clip set** → rejected: both Qwen3.7 Flash and GPT-5.6 Luna Pro scored 61.1% (vs Gemini's
+  50.0%) purely by predicting "no collision" on 16/18 clips (recall 0.22, same as Gemini's
+  worst case). On a 9-pos/9-neg set, extreme conservatism is rewarded by accuracy without
+  reflecting genuine detection capability. Always report recall/precision alongside accuracy
+  for this kind of screen.
+- **Assume an explicit anti-under-calling prompt instruction fixes the conservative bias** →
+  refuted empirically: `PROMPT_SEMSUP_V4_QWEN.py` explicitly instructs against defaulting to
+  NO and provides worked examples calibrating the threshold, run against a third, different
+  model (`qwen/qwen3-vl-235b-a22b-thinking`) - identical confusion matrix (TP=2, FP=0, TN=9,
+  FN=7) resulted anyway. 3x-replicated across 2 prompts x 3 models. See EXPERIMENTS.md
+  "Round 2" and the `00687` finding (model perceives the hazard correctly, decision layer
+  overrides it) - the fix, if any, is more likely in the decision structure (binary
+  verdict + hard gates) than in surrounding instruction text.
+- **Import `teacher_bakeoff.py` / `Teacher_dataset_distill_v11.py` directly for their
+  OpenRouter helper functions** → both have a pre-existing broken top-level import
+  (`prompts/PROMPT_G2.py` / `prompts/templates.py`, moved during an earlier reorg, unrelated
+  to this thread and not fixed here). New scripts copy the needed functions instead
+  (`semsup_caption_promptbakeoff.py`, `semsup_v6_control_rerun.py`).
+- **Continue iterating prompt versions (V5 onward) on the 18-clip screen** → rejected
+  2026-08-01, after V5-V9 (6 more rounds) produced no result distinguishable from any other at
+  n=18 (McNemar p≥0.125 throughout, every CI overlapping). This was knowable from V4 onward;
+  the 18-clip screen was never powered to rank prompts, only to catch gross failures. Pivoted
+  to scoring the real ~4,500-window train pool through the frozen A0 scorer instead — real
+  statistical power, and it measures the actual scorer rather than a caption-quality proxy.
+- **Snap `MID`'s legacy offset-0 captions (`TN_MIDPOINT` in the old 267-row set) onto the new
+  `MID-10` bucket** → rejected: they're genuinely different windows (offset 0 vs −10), not the
+  same bucket renamed. Left permanently unresolved by `build_caption_monitor.py`'s
+  `_resolve_caption_bucket()` rather than silently misattributed.
+
+### train4500-inference pipeline (2026-08-01)
+- **Keep the negative `MID` bucket at offset 0.0 (exact clip midpoint)** → rejected: real
+  scoring found 42.8% error, 100% false positives, at 0.99+ confidence, isolated to that one
+  bucket. Moved to offset −10.0 (renamed `MID-10`). See EXPERIMENTS.md for the full before/
+  after numbers and ARCHITECTURE.md for the diagnosis (clip-level label vs. a genuinely
+  risky-looking literal midpoint).
+- **Trust a directory's file COUNT as proof a transfer succeeded** → rejected 2026-08-01:
+  `tar` writes the correct file name/count even when a disk quota kills the actual content
+  write, leaving 0-byte files that pass a count-only check. Must additionally check file size.
+- **Treat `df -h /workspace`'s free-space number as proof a write will succeed** → rejected:
+  it reports the network filesystem's cluster-wide free space, not the account/volume-specific
+  quota that actually governs writes. A live test write is the only reliable check.
+
 ## Unresolved design questions
 
 - **Which scale-up path?** **Gate resolved 2026-07-25/26**: the B1-InfoNCE re-run (see
@@ -143,3 +192,25 @@
   MMLM/outputs/checkpoints/`: `e2_lora_100clips` (4.4G), `e3a_lora_89clips` (832M),
   `e3b_lora_267clips` (704M) exist **only** on that volume — verified NOT on HF Hub (only
   `e3a-epoch7-lora` and `e3b-ep3-lora` are). Not deleted pending explicit confirmation.
+- **Which teacher/prompt should caption the production set?** **Reframed 2026-08-01**: no
+  longer "pick from the 18-clip bake-off candidates" (that screen turned out underpowered to
+  rank anything — see the "Continue iterating" rejection above). Now: the train4500-inference
+  taxonomy (EXPERIMENTS.md) decides uniform-vs-failure-targeted allocation directly from real
+  A0 scoring, sidestepping the teacher-choice question for the *scoring* signal entirely — the
+  captioning teacher/prompt choice for the *language* signal is still separately open, but
+  lower priority until the allocation question is settled.
+- **Is the teacher-model conservative bias fixable by prompt engineering, or does it need a
+  different decision structure?** **Partially answered 2026-08-01**: 6 more prompt structures
+  (V5-V9, spanning risk-score, kinematic decomposition, ego-frame separation, narrative
+  structure, and deliberate minimalism) produced no result distinguishable from any other at
+  n=18. What *did* move the outcome was the **model**, not the prompt structure — v6_balanced
+  unmodified went from 0/18 YES (Qwen3-VL-235B) to 72.2% acc/0 FP (Gemini 3.6 Flash) with zero
+  wording changes. Still open: whether that's really a decision-structure effect expressed
+  differently per model family, or something else about Gemini 3.6 Flash specifically — not
+  isolated.
+- **Why does chunk 0 of train4500 score notably better (13.3% error) than A0's known test-set
+  error (23.6%)?** New, open. Not the MID artifact (separately fixed and accounted for). Test
+  is FP-dominated (4.3:1), chunk 0 is nearly balanced (1.1:1) — a real distributional
+  difference between the two pools. Pipeline mechanics checked and ruled out as the cause
+  (byte-identical extraction verified). Chunks 1-2, once scored, will show whether this holds
+  at 3× the sample or was a chunk-0-specific artifact of which 500 videos landed there.

@@ -307,6 +307,212 @@ underpowered for a much bigger intervention (A1-vs-B's CI above).
 **Not yet done**: real captioning against the prompt, and everything downstream of it. The
 harness is proven correct; no new scientific result exists yet.
 
+## 500-clip extraction unblocked (2026-07-28)
+Raw Nexar MP4s were found locally in a sibling project folder not previously checked, unlocking
+sampling from the full 750/750-balanced `train.csv` pool instead of the 89-video local frame
+ceiling. `semsup_extract_promptbakeoff_frames.py` extracted 500 new distinct-video clips
+(250 pos at TTE_0.5/1.0/1.5 from `train.csv`'s `time_of_event`, 250 neg at MID/MID-4/MID-8,
+matching the incumbent set's convention) — 500/500 succeeded, 0 failures, ~15.5 min wall.
+Sampled manifest `dataset/manifests/semsup_promptbakeoff.jsonl`: 498 rows (250/3=83.33 → 249+249
+after integer-division bucket filling), 498 distinct videos, zero overlap with the incumbent
+267, the 677-clip test set, or `val_e3a.jsonl`. No pod trip was needed for this step after all.
+
+## Teacher-model bake-off (2026-07-28/29)
+Before spending the above 498-clip budget for real, tested whether the current teacher
+(`google/gemini-3.1-pro-preview` via OpenRouter) is still the right choice, using the 18-clip
+`val_e3a.jsonl` GT set as a cheap screen. Three rounds, each building on the last.
+
+### Round 0 — the historical v6 baseline is not reproducible (model drift)
+Re-ran `PROMPT_G_OPT_v6_balanced`, **completely unmodified**, at the exact original settings
+(native 1280x720, `detail=high`, `temp=0.1`, same model slug) that produced the recorded
+83.3% verdict accuracy / mean reasoning score 6.78. Result **today**: **50.0% / 4.61** — a
+33-point accuracy swing on the identical prompt and clips. Confirmed not a code/settings
+confound (image encoding, model slug, and temperature all verified byte-for-byte identical to
+the original run; one real difference found - the original capped `max_tokens=8192` to reserve
+room for reasoning tokens, this repo's newer scripts had dropped it - included in the rerun for
+fidelity). Most likely cause: silent drift on the `preview`-tagged OpenRouter alias. **Every
+comparison below uses this same-day rerun as the baseline, not the historical number.**
+Full detail + the two clips that broke every subsequent run: `outputs/prompt_bakeoff/
+semsup_val18/summary.md`.
+
+### Round 1 — Qwen3.7 Flash & GPT-5.6 Luna Pro, v6 prompt unmodified
+Same 18 clips, same v6 prompt, two new OpenRouter models (`qwen/qwen3.7-flash` $0.03/$0.13 per
+1M; `openai/gpt-5.6-luna-pro` $0.50/$3.00 per 1M, vs Gemini's $2/$12).
+
+| Teacher | Verdict acc | Mean score | Recall | Precision | Predicted YES on |
+|---|---|---|---|---|---|
+| Gemini (same-day baseline) | 50.0% | 4.61 | 0.67 | 0.50 | 6/18 |
+| Qwen3.7 Flash | 61.1% | 4.72 | **0.22** | 1.00 | **2/18** |
+| GPT-5.6 Luna Pro | 61.1% | 4.83 | **0.22** | 1.00 | **2/18** |
+
+**The higher accuracy is arithmetic, not insight**: both new teachers predict "collision" on
+only 2 of 18 clips, getting all 9 negatives right (precision 1.00) but missing 7 of 9 real
+positives (recall 0.22, same as Gemini's *worst* case). Do not read this as "switch teachers" -
+it's evidence of a strong conservative prior, not better scene understanding.
+
+**Genuine positive finding**: both independently solved `02117` (GT=NO: gray sedan at constant
+distance, van *stopped* before a crosswalk) - the one clip every Gemini run (original v6,
+same-day rerun, V2, V3) hallucinated identically wrong ("black SUV merges into ego lane").
+
+**Operational note**: Qwen3.7 Flash returned 4 empty/unparseable responses at
+`max_tokens=8192`; raising to 20000 fixed some but broke 2 *different* clips on the same
+attempt (provider-side flakiness, not a deterministic budget issue) - needed a `--resume` retry
+pass to reach 18/18. GPT-5.6 Luna Pro had zero failures at 20000 in one pass.
+
+Full detail: `outputs/prompt_bakeoff/semsup_val18/teacher_bakeoff_summary.md`,
+`reasoning_analysis_teacher_bakeoff.xlsx`.
+
+### Round 2 — a from-scratch prompt (V4) + Qwen3-VL-235B-A22B-Thinking
+Hypothesis: maybe the under-calling is fixable with better prompting. Wrote
+`prompts/PROMPT_SEMSUP_V4_QWEN.py` from scratch in Qwen's own recommended structure
+(Role/Task/Context/Instructions-with-forced-step-by-step-thinking/worked-examples/Do-NOT/
+Priority), explicitly instructing *"Do NOT default to NO... under-calling a real collision is
+as serious an error as a false alarm"* plus two worked examples (one YES, one NO) to calibrate
+the threshold. Ran against a different, reasoning-native model,
+`qwen/qwen3-vl-235b-a22b-thinking` ($0.40/$4.00 per 1M, 131k context). 18/18 succeeded on the
+first attempt at `max_tokens=20000`, zero failures.
+
+| Teacher / prompt | Verdict acc | Mean score | Recall | Precision | Predicted YES on |
+|---|---|---|---|---|---|
+| Qwen3-VL-235B / V4 | 61.1% | **5.11** | **0.22** | 1.00 | **2/18** |
+
+**The explicit counter-instruction had zero measurable effect on recall** - identical confusion
+matrix (TP=2, FP=0, TN=9, FN=7) to both Round 1 candidates, on a different model *and* a
+different prompt. This is now a 3x-replicated finding: whatever drives the conservative bias
+survives explicit corrective instruction. Two explanations, not yet distinguished: (a) a
+property of these specific models' calibration on visual risk assessment, or (b) a property of
+v6-style decision-gate framing itself ("predict YES ONLY if... clearly hold") regardless of
+surrounding instruction.
+
+**The clearest single-clip evidence for explanation (b)**: on `00687` (GT=YES: gray SUV drifts
+into ego lane), the caption correctly says *"Gray SUV merging from right lane into ego lane
+while black sedan maintains position ahead"* - an accurate read of the actual hazard - but
+`risk_clause` calls it "normal merging traffic" and `verdict=NO`. **The model perceived the
+hazard correctly and the decision layer discounted it anyway.** This reframes the open question
+from "can the model see the danger" to "why does the decision layer override correct
+perception," which points toward testing a bare risk score instead of a binary verdict+gates
+(not yet tried).
+
+**`02117` solved a third time**, independently, with an accurate caption ("Sedan ahead in ego
+lane maintaining consistent following distance") - three different non-Gemini models now agree
+on the correct read of the one clip that broke every Gemini attempt.
+
+**Also the best caption-fidelity score of the whole investigation** (mean 5.11 vs the prior
+best 4.83) - worth keeping in mind purely for the SigLIP-target captioning use case, independent
+of the unresolved verdict/recall problem.
+
+Full detail: `outputs/prompt_bakeoff/semsup_val18/qwen3vl_v4_summary.md`,
+`reasoning_analysis_qwen3vl_val18.xlsx`.
+
+### Cross-round summary table
+
+| Teacher / prompt | Verdict acc | Mean score | Recall | Precision |
+|---|---|---|---|---|
+| Gemini 3.1 Pro Preview / v6 (same-day) | 50.0% | 4.61 | 0.67 | 0.50 |
+| Gemini 3.1 Pro Preview / V2 | 50.0% | 4.61 | - | - |
+| Gemini 3.1 Pro Preview / V3 (CoT) | 50.0% | 4.78 | - | - |
+| Qwen3.7 Flash / v6 | 61.1% | 4.72 | 0.22 | 1.00 |
+| GPT-5.6 Luna Pro / v6 | 61.1% | 4.83 | 0.22 | 1.00 |
+| Qwen3-VL-235B-Thinking / V4 | 61.1% | **5.11** | 0.22 | 1.00 |
+
+**Not yet done**: (a) bare 0-100 risk score instead of binary verdict+gates, thresholded
+post-hoc - directly tests the `00687` finding; (b) loosened/removed decision gates, same
+prompt otherwise - cheaper test of the same hypothesis. Either should run on the 18-clip
+screen before any teacher/prompt is chosen for the 498-clip production captioning run.
+
+### Rounds 3-9 (2026-07-30/31, 2026-08-01) — V5 through V9, plus cross-model checks
+
+Continued the same 18-clip screen through 6 more prompt versions, chasing the recall problem
+via progressively different mechanisms: V5 (0-100 risk score + mandatory pre-mortem, verdict
+derived mechanically from the score), V6 (kinematic decomposition — ego-motion/lateral-drift
+observation fields + 4 summed 0-25 sub-scores), V7 (explicit ego-frame vs world-frame motion
+separation, since V6 showed the model conflating its own turning with other agents moving), V8
+(narrative delta/cause/ego-response caption structure), V9 (deliberately minimal — ~800 tokens,
+no observation scaffolding, betting that a reasoning-native model's own internal CoT makes
+external scaffolding redundant).
+
+**Final result: statistically inconclusive, all of it.** Verdict accuracy across V4-V9 on
+`qwen/qwen3-vl-235b-a22b-thinking`: 61.1%, 61.1%, 55.6%, 66.7%, 50.0%, 72.2%. Every pairwise
+comparison's 95% CI overlaps; McNemar exact test between any two rounds never drops below
+p=0.125. **n=18 cannot rank these prompts** — this was true from V4 onward, not just
+discovered at the end.
+
+**Cross-model checks (2026-08-01)**, the two results worth keeping:
+- **`PROMPT_G_OPT_v6_balanced` (unmodified, the *original* teacher prompt) on
+  `google/gemini-3.6-flash`**: 72.2% acc, **0 false positives**, best caption-fidelity mean of
+  every round/model combination tested this entire investigation. The sharpest single
+  comparison recorded: McNemar vs V9 on the same model gave 4 clips flipping in v6_balanced's
+  favor, 0 the other way (p=0.125 — still short of significance at n=18, but the least
+  ambiguous result of the whole thread).
+- **The same unmodified v6_balanced prompt on `qwen/qwen3-vl-235b-a22b-thinking`**: **0/18 YES
+  predictions** — complete collapse. Its `verdict_reasoning` field echoed the prompt's own
+  "prefer NO"/"base-rate principles favor safe outcome" language back almost verbatim on every
+  clip. Confirms this is a **model-family × prompt interaction**, not a property of "heavy
+  CoT + conservative gates" in general — the same structure produced Qwen3.7 Flash's and
+  GPT-5.6 Luna Pro's under-calling (Round 1) but not Gemini's.
+
+**Decision (2026-08-01): stop here.** Full detail per round: `outputs/prompt_bakeoff/
+semsup_val18/{v5_balanced,v6_kinematic,v7_egoframe,v8_narrative,v9_minimal,v9_gemini36flash,
+v6_balanced_gemini36flash}_summary.md`. Superseded by the train4500-inference pipeline below —
+see PROJECT_STATE.md.
+
+## train4500-inference pipeline (2026-08-01)
+
+**Goal**: score the real ~4,500-window train pool through the frozen A0 scorer (inference
+only, nothing trains) to find where BADAS-Open actually fails, informing whether caption
+budget should be uniform or failure-targeted — a direct answer instead of an 18-clip proxy.
+
+**Setup**: `build_train4500_manifest.py` → 4,446 rows = 741 pos × 3 TTE buckets (0.5/1.0/1.5s)
++ 741 neg × 3 offset buckets, excluding val_e3a's 18 clips (drawn from the same train.csv pool,
+used for Stage-C checkpoint selection — confirmed via contamination guard, which correctly
+fired on the first attempt before the exclusion was added). Chunked into 3 groups of ~500
+videos (class-interleaved, not plain-sorted — see ARCHITECTURE.md gotcha) for pipelined
+extraction/scoring.
+
+### Chunk 0 (500 videos / 1,500 windows) — before the MID fix
+First real scoring run on train data. `n=1500 AP=0.9034 AUC=0.9094 accuracy=81.7%
+TP/FP/TN/FN=655/179/571/95 error=18.3%`. Compared against A0's known test error (23.6%,
+TP/FP/TN/FN=308/130/209/30) — gap 5.4%, just over the pre-registered 5pp stop-and-diagnose
+threshold. Investigation (not assumption) found the gap entirely attributable to the `MID`
+bucket: **107/250 MID-bucket windows were false positives (42.8% error), 0 false negatives**,
+at 0.99+ confidence — see the MID-10 fix in ARCHITECTURE.md for the diagnosis and repair.
+
+### Chunk 0 — after the MID-10 fix
+Only the 250 affected windows needed re-extraction/re-scoring (the other 1,250 rows in chunk 0
+were untouched and reused as-is). **`n=1500 AP=0.9555 AUC=0.9504 accuracy=86.7%
+TP/FP/TN/FN=655/104/646/95 error=13.3%`.**
+
+| Bucket | n | wrong | error rate |
+|---|---|---|---|
+| MID-10 (was MID) | 250 | 32 | 12.8% (was 42.8%) |
+| MID-4 | 250 | 36 | 14.4% |
+| MID-8 | 250 | 36 | 14.4% |
+| TTE_0.5 | 250 | 17 | 6.8% |
+| TTE_1.0 | 250 | 31 | 12.4% |
+| TTE_1.5 | 250 | 47 | 18.8% |
+
+Bucket-error spread dropped from 36.0% (systematic — one bucket clearly broken) to 12.0%
+(diffuse — `mine_train_failures.py`'s own classifier now recommends **uniform** caption
+allocation, not failure-targeted, based on this chunk alone).
+
+**Still open, not a bug as far as verified**: chunk 0's corrected error (13.3%) is well below
+A0's test-set error (23.6%) — the checkpoint gap actually *grew* (5.4%→10.4%) once the MID
+artifact was removed, because MID's errors had been coincidentally padding train's rate closer
+to test's. Test is FP-dominated (130:30, ~4.3:1); chunk 0 is nearly balanced (104:95, ~1.1:1).
+Real distributional difference between the pools, not yet explained — pipeline mechanics were
+checked (sequential-decode extraction verified byte-identical to the old per-frame-seek
+method on 6 real videos) and nothing pointed to a mechanical bug. **Chunks 1-2 will show
+whether this is a chunk-0-specific fluke or a stable property of the full train pool.**
+
+### Chunks 1-2 (982 videos / 2,946 windows) — extraction done, transfer corrupted
+Extracted and verified complete locally (0/2,946 incomplete, checked by frame count AND file
+size). Transfer to the pod hit an active RunPod storage quota mid-stream; `tar` silently wrote
+correct file names/counts with 0-byte content for everything after the quota was hit —
+**1,674/2,946 directories on the pod are currently corrupted**, confirmed by a size-aware
+re-check (the first, count-only check falsely reported all clear). Not yet scored. Blocked on
+the user raising the pod's storage quota (no tool access to do this) — see PROJECT_STATE.md's
+Next step.
+
 ## Literature check (2026-07-23, web)
 - **BADAS-2.0** (arXiv 2604.05767, Apr 2026) tested general VLMs against their specialised
   architecture and both lost clearly: Cosmos-BADAS F1 0.817 and Gemini-BADAS F1 0.662 (tuned)

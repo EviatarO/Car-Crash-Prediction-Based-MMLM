@@ -99,7 +99,10 @@ T_FLOOR = 2.0
 MAX_CONSECUTIVE_FAILURES = 5
 
 POS_BUCKETS = [(0.5, "TTE_0.5", "tte05"), (1.0, "TTE_1.0", "tte10"), (1.5, "TTE_1.5", "tte15")]
-NEG_BUCKETS = [(0.0, "MID", "mid0"), (-4.0, "MID-4", "neg4"), (-8.0, "MID-8", "neg8")]
+# MID moved from offset 0.0 to -10.0 (see build_train4500_manifest.py's NEG_BUCKETS
+# comment) - the clip-midpoint window produced 42.8% high-confidence false positives
+# in real scoring, isolated to that one bucket, vs 14.4% for MID-4/MID-8.
+NEG_BUCKETS = [(-10.0, "MID-10", "mid10"), (-4.0, "MID-4", "neg4"), (-8.0, "MID-8", "neg8")]
 
 
 def load_train_labels() -> dict:
@@ -166,9 +169,9 @@ def load_manifest_plan(manifest_path: Path) -> list:
             if target == 1:
                 param = r["time_before_event_s"]
             else:
-                # negatives: recover the offset from the suffix (mid0/neg4/neg8),
+                # negatives: recover the offset from the suffix (mid10/neg4/neg8),
                 # since time_before_event_s is None for negatives by design.
-                param = {"mid0": 0.0, "neg4": -4.0, "neg8": -8.0}[suffix]
+                param = {"mid10": -10.0, "neg4": -4.0, "neg8": -8.0}[suffix]
             plan.append({"video_id": r["video_id"], "target": target,
                          "bucket_label": r["horizon_label"], "suffix": suffix, "param": param})
     return plan

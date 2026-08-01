@@ -64,7 +64,10 @@ TRAIN4500_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "train4500_hires.j
 DEFAULT_CAPTIONS = PROJECT_ROOT / "outputs" / "semantic_captions" / "Caption_Train_All_Clips.jsonl"
 OUT_XLSX = PROJECT_ROOT / "outputs" / "train4500_inference" / "monitor_train4500_coverage.xlsx"
 
-BUCKETS = ["TTE_0.5", "TTE_1.0", "TTE_1.5", "MID", "MID-4", "MID-8"]
+# MID moved from offset 0.0 to -10.0 (renamed MID-10) after real chunk-0 scoring found
+# the clip-midpoint window produced 42.8% high-confidence false positives, isolated to
+# that one bucket - see build_train4500_manifest.py's NEG_BUCKETS comment.
+BUCKETS = ["TTE_0.5", "TTE_1.0", "TTE_1.5", "MID-10", "MID-4", "MID-8"]
 
 HEADER = PatternFill("solid", fgColor="2E75B6")
 STRONG_GREEN = PatternFill("solid", fgColor="00B050")
@@ -111,15 +114,20 @@ def _resolve_caption_bucket(req) -> str | None:
     than snapped to the nearest bucket, which would misrepresent real
     coverage. This mirrors, but does not silently paper over, the same
     ambiguity build_teacher_monitor.py's narrower _MID_MAP already has for
-    the literal "MID"/"MID-4"/"MID-8" strings."""
+    the literal "MID"/"MID-4"/"MID-8" strings.
+
+    MID moved from offset 0.0 to -10.0 (renamed MID-10) after real chunk-0
+    scoring found the clip-midpoint window produced 42.8% high-confidence
+    false positives. TN_MIDPOINT (legacy captions at offset ~0) therefore no
+    longer corresponds to any current bucket and is deliberately left
+    UNRESOLVED rather than mapped to MID-10, which is a genuinely different
+    window."""
     s = str(req).strip()
     try:
         v = float(s)
         return {0.5: "TTE_0.5", 1.0: "TTE_1.0", 1.5: "TTE_1.5"}.get(v)
     except ValueError:
         pass
-    if s == "TN_MIDPOINT":
-        return "MID"
     if s.startswith("MID-4"):
         return "MID-4"
     if s.startswith("MID-8"):
@@ -127,7 +135,7 @@ def _resolve_caption_bucket(req) -> str | None:
     if s.endswith("_offset"):
         try:
             off = float(s.replace("_offset", ""))
-            return {0.0: "MID", -4.0: "MID-4", -8.0: "MID-8"}.get(off)
+            return {-10.0: "MID-10", -4.0: "MID-4", -8.0: "MID-8"}.get(off)
         except ValueError:
             pass
     return None
