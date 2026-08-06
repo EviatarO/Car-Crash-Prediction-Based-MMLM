@@ -79,6 +79,8 @@ from prompts.PROMPT_SEMSUP_V6_KINEMATIC import PROMPT_SEMSUP_V6_KINEMATIC  # noq
 from prompts.PROMPT_SEMSUP_V7_EGOFRAME import PROMPT_SEMSUP_V7_EGOFRAME  # noqa: E402
 from prompts.PROMPT_SEMSUP_V8_NARRATIVE import PROMPT_SEMSUP_V8_NARRATIVE  # noqa: E402
 from prompts.PROMPT_SEMSUP_V9_MINIMAL import PROMPT_SEMSUP_V9_MINIMAL  # noqa: E402
+from prompts.PROMPT_SEMSUP_V10_GT import build_prompt as _build_v10_prompt  # noqa: E402
+from prompts.PROMPT_SEMSUP_V10Q_GT import build_prompt as _build_v10q_prompt  # noqa: E402
 
 DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
 DEFAULT_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "semsup_promptbakeoff.jsonl"
@@ -91,7 +93,31 @@ PROMPTS = {
     "v6": PROMPT_SEMSUP_V6_KINEMATIC, "v7": PROMPT_SEMSUP_V7_EGOFRAME,
     "v8": PROMPT_SEMSUP_V8_NARRATIVE, "v9": PROMPT_SEMSUP_V9_MINIMAL,
 }
+# v10/v10q are TEMPLATES (per-clip GT injection), not static strings - see
+# build_prompt_for_row() below. Kept in a separate dict so `--prompt` argparse
+# choices still list them without PROMPTS[key] being called on a plain string.
+#
+# NOTE (2026-08-04): a V11 dual-prompt variant (separate TP/TN prompts with
+# neutral field names) was built and then reverted here - see
+# outputs/prompt_bakeoff/semsup_val18_gt/summary.md's correction notice. The
+# fabrication V11 was built to fix (01643) turned out to be caused by the GT
+# block itself, not by the hazard_* field names, and V10 in --gt-mode blind
+# already produced the correct agent:'None' on that clip. V11 measured worse
+# on negatives (recall 0.435->0.38, MATCH 6->4, fabrications 1->2) and was
+# deleted. Do not re-propose a field-name-only prompt split without first
+# checking whether --gt-mode blind alone already resolves the failure.
+TEMPLATE_BUILDERS = {"v10": _build_v10_prompt, "v10q": _build_v10q_prompt}
 REQUIRED_KEYS = ("caption_neutral", "risk_clause", "verdict", "confidence")
+# v10/v10q common keys, required in BOTH gt and blind modes - these are what let
+# the scorer compute a "rationalization rate" (agents the GT arm names that the
+# blind arm, on the identical clip, never mentioned).
+V10_REQUIRED_COMMON = ("caption_neutral", "risk_clause", "hazard_agent", "hazard_motion",
+                        "hazard_position", "closing_dynamic", "evidence_frames",
+                        "mechanism_visible")
+# blind-mode-only: needed to keep AP/AUC computable on the blind control arm.
+# Omitted in gt mode on purpose - the model already has the label, so asking it
+# to also emit a verdict would just have it parrot the label back.
+V10_REQUIRED_BLIND = ("risk_score", "verdict", "confidence")
 # V3-only fields: carried through to the output row when present, never required
 # (a V3 response missing them is a real finding - the model ignored part of the
 # schema - not silently treated as a validation failure of the whole row).
@@ -240,8 +266,58 @@ def _call_model(
     raise RuntimeError(f"OpenRouter call failed after {max_retries} attempts: {last_exc}") from last_exc
 
 
+def resolve_gt_label(row: dict) -> bool:
+    """True/False ground-truth label for --gt-mode gt. Accepts either manifest
+    schema seen in this repo: val_e3a.jsonl uses 'target' (0/1),
+    train4500_hires.jsonl uses 'event_occurs' (0/1). Fails LOUDLY if neither
+    key is present rather than defaulting to negative - a silent default
+    would corrupt every positive clip's GT block into a negative one."""
+    if "target" in row:
+        return bool(int(row["target"]))
+    if "event_occurs" in row:
+        return bool(int(row["event_occurs"]))
+    raise KeyError(
+        f"--gt-mode gt requires a ground-truth label but row for video_id="
+        f"{row.get('video_id')!r} has neither 'target' nor 'event_occurs'. "
+        f"Refusing to silently assume negative."
+    )
+
+
+def build_prompt_for_row(prompt_key: str, gt_mode: str, row: dict) -> str:
+    """Builds the per-clip prompt for a TEMPLATE_BUILDERS entry (v10/v10q).
+    gt_mode='blind' never looks at the row's label at all - resolve_gt_label
+    is only called in 'gt' mode, so a manifest without labels still works for
+    the blind control arm."""
+    builder = TEMPLATE_BUILDERS[prompt_key]
+    if gt_mode == "gt":
+        return builder("gt", is_positive=resolve_gt_label(row))
+    return builder("blind")
+
+
 def load_manifest(path: Path) -> list:
     return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+
+
+def row_resume_key(row: dict) -> str:
+    """The identity a manifest row (or an already-written output row) is
+    resumed/deduped on. Prefers frames_dir - the one field that is unique
+    PER WINDOW across every manifest schema in this repo (val_e3a.jsonl,
+    semsup_promptbakeoff.jsonl, train4500-derived manifests all carry it) -
+    and falls back to video_id only when frames_dir is absent (legacy output
+    rows written before this field was added; safe ONLY when video_id
+    happens to be unique in that particular manifest).
+
+    WHY THIS MATTERS (found 2026-08-04, train4500_failures_pos_269.jsonl /
+    neg_318.jsonl): unlike every manifest this runner had seen before (which
+    were built one-row-per-video_id by construction, e.g.
+    semsup_sample_clips.py's explicit "no sibling-TTE reuse"), a manifest
+    reconstructed from the train4500 failure set can and does have the SAME
+    video_id appear multiple times at different TTE/MID buckets (76/170
+    positive video_ids and 70/226 negative video_ids repeat). The old
+    video_id-only resume key would silently treat a video's second failing
+    window as "already captioned" the moment its first window was written -
+    dropping ~146/587 windows from a real run with no error or warning."""
+    return row.get("frames_dir") or row["video_id"]
 
 
 def load_done_ids(out_path: Path) -> set:
@@ -251,23 +327,53 @@ def load_done_ids(out_path: Path) -> set:
     for l in open(out_path, encoding="utf-8"):
         l = l.strip()
         if l:
-            done.add(json.loads(l)["video_id"])
+            done.add(row_resume_key(json.loads(l)))
     return done
 
 
 V6_SUBSCORE_KEYS = ("closing_risk", "lateral_risk", "intrusion_risk", "unreacted_risk")
 
 
-def validate_parsed(parsed: dict, prompt_key: str = "v2") -> tuple:
+def validate_parsed(parsed: dict, prompt_key: str = "v2", gt_mode: str = "blind") -> tuple:
     """Returns (ok, error_message_or_None). Enforces the schema PROMPT_SEMSUP_V2
     asks for - a response missing a required key is a hard failure, not a
     row silently written with a missing field the rest of the pipeline
     would choke on later. For v5/v6, also requires risk_score (verdict is
     supposed to be derived from it) and checks the derivation held. For v6,
     also checks risk_score == sum of the 4 sub-scores (a soft NOTE, not a
-    hard failure - same rationale as the v5 verdict/score check)."""
+    hard failure - same rationale as the v5 verdict/score check).
+
+    v10/v10q have a different contract: `verdict`/`confidence`/`risk_score`
+    are required ONLY in blind mode (gt mode never asks for them - see
+    PROMPT_SEMSUP_V10_GT.py's docstring), and hazard_*/mechanism_visible are
+    required in BOTH modes."""
     if parsed is None:
         return False, "could not extract a JSON object from the response"
+
+    if prompt_key in ("v10", "v10q"):
+        missing = [k for k in V10_REQUIRED_COMMON if k not in parsed]
+        if gt_mode == "blind":
+            missing += [k for k in V10_REQUIRED_BLIND if k not in parsed]
+        if missing:
+            return False, f"missing keys: {missing}"
+        if parsed["mechanism_visible"] not in (True, False, "true", "false", "True", "False"):
+            return False, f"mechanism_visible not boolean: {parsed['mechanism_visible']!r}"
+        notes = []
+        if gt_mode == "blind":
+            if parsed["verdict"] not in (0, 1, "0", "1"):
+                return False, f"verdict not 0/1: {parsed['verdict']!r}"
+            try:
+                score = float(parsed["risk_score"])
+            except (TypeError, ValueError):
+                return False, f"risk_score not numeric: {parsed['risk_score']!r}"
+            if not (0 <= score <= 100):
+                return False, f"risk_score out of [0,100]: {score!r}"
+            expected_verdict = 1 if score >= 50 else 0
+            if int(parsed["verdict"]) != expected_verdict:
+                notes.append(f"verdict/risk_score mismatch (score={score}, "
+                              f"verdict={parsed['verdict']}, expected={expected_verdict})")
+        return (True, "NOTE: " + "; ".join(notes)) if notes else (True, None)
+
     missing = [k for k in REQUIRED_KEYS if k not in parsed]
     if prompt_key in ("v5", "v9"):
         missing += [k for k in V5_REQUIRED_KEYS if k not in parsed]
@@ -327,7 +433,8 @@ def main():
     ap.add_argument("--frames-root", default=str(DEFAULT_FRAMES_ROOT))
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--prompt", default="v2", choices=list(PROMPTS.keys()),
+    ap.add_argument("--prompt", default="v2",
+                     choices=list(PROMPTS.keys()) + list(TEMPLATE_BUILDERS.keys()),
                      help="v2 = PROMPT_SEMSUP_V2 (direct caption), "
                           "v3 = PROMPT_SEMSUP_V3_COT (v6-style CoT pipeline, then distill), "
                           "v4 = PROMPT_SEMSUP_V4_QWEN (Qwen-native structure + worked examples), "
@@ -341,7 +448,24 @@ def main():
                           "v8 = PROMPT_SEMSUP_V8_NARRATIVE (delta/cause/ego-response caption "
                           "grammar, path-relative motion vocabulary), "
                           "v9 = PROMPT_SEMSUP_V9_MINIMAL (the less-is-more arm: V2 length "
-                          "plus only the evidence-backed insights, no scaffolding fields)")
+                          "plus only the evidence-backed insights, no scaffolding fields), "
+                          "v10 = PROMPT_SEMSUP_V10_GT (v6-CoT envelope, GT-informed mechanism "
+                          "captioning, per-clip template - see --gt-mode), "
+                          "v10q = PROMPT_SEMSUP_V10Q_GT (same schema, Qwen-native envelope)")
+    ap.add_argument("--gt-mode", default="blind", choices=["gt", "blind"],
+                     help="v10/v10q only. 'gt' injects the manifest row's ground-truth label "
+                          "(from 'target' or 'event_occurs') into the prompt and asks the "
+                          "model to explain the mechanism rather than predict it. 'blind' "
+                          "(default) is the control arm - identical schema minus the GT "
+                          "statement, still asks for risk_score/verdict/confidence. Ignored "
+                          "for v2-v9.")
+    ap.add_argument("--label-filter", default="all", choices=["all", "pos", "neg"],
+                     help="Filter the manifest to only positive ('pos', GT label=1) or only "
+                          "negative ('neg', GT label=0) rows before captioning, resolved via "
+                          "resolve_gt_label() ('target' or 'event_occurs'). Useful for running "
+                          "--gt-mode gt on only the positive half of a mixed manifest and "
+                          "--gt-mode blind on only the negative half (the V10-hybrid config). "
+                          "'all' (default) is unchanged behavior.")
     ap.add_argument("--frame-size", type=int, default=256,
                      help="0 = native resolution, no resize (matches v6's setting)")
     ap.add_argument("--detail", default="low", choices=["low", "high", "auto"])
@@ -363,8 +487,13 @@ def main():
     load_dotenv()
 
     manifest = load_manifest(Path(args.manifest))
+    if args.label_filter != "all":
+        want_positive = args.label_filter == "pos"
+        before = len(manifest)
+        manifest = [r for r in manifest if resolve_gt_label(r) == want_positive]
+        print(f"--label-filter {args.label_filter!r}: {before} rows -> {len(manifest)} rows.")
     done_ids = load_done_ids(Path(args.out))
-    pending = [r for r in manifest if r["video_id"] not in done_ids]
+    pending = [r for r in manifest if row_resume_key(r) not in done_ids]
     print(f"Manifest: {len(manifest)} rows. Already captioned: {len(done_ids)}. Pending: {len(pending)}.")
     if args.limit:
         pending = pending[:args.limit]
@@ -376,12 +505,44 @@ def main():
         # tokens/image at native 1280x720 (v6's setting) - both are estimates, not
         # a guarantee, check OpenRouter's current rate for the chosen model.
         per_image = 258 if args.detail == "low" else 1750
-        prompt_tokens = {"v2": 650, "v3": 950, "v4": 1100, "v5": 1300, "v6": 1900, "v7": 2400, "v8": 2300, "v9": 800}[args.prompt]  # v3/v4/v5/v6 pipelines are longer
+        prompt_tokens = {"v2": 650, "v3": 950, "v4": 1100, "v5": 1300, "v6": 1900, "v7": 2400,
+                          "v8": 2300, "v9": 800, "v10": 1200, "v10q": 1900}[args.prompt]
         est_tokens = len(pending) * (16 * per_image + prompt_tokens)
-        print(f"[dry-run] would call model={args.model!r} prompt={args.prompt!r} "
+        effective_gt_mode = args.gt_mode
+        gt_note = f" gt-mode={effective_gt_mode!r}" if args.prompt in TEMPLATE_BUILDERS else ""
+        print(f"[dry-run] would call model={args.model!r} prompt={args.prompt!r}{gt_note} "
               f"detail={args.detail!r} frame_size={args.frame_size} on {len(pending)} clips "
               f"(~{est_tokens/1e6:.2f}M input tokens, estimated - "
               f"check OpenRouter's current rate for {args.model!r} before running for real).")
+        if args.prompt in TEMPLATE_BUILDERS:
+            # Verification: eyeball that the GT block actually differs per clip
+            # (gt mode), and that blind mode contains zero "GROUND TRUTH" text
+            # (a silently-constant or leaking GT block would invalidate the run).
+            print()
+            print("=" * 70)
+            print(f"[dry-run] built prompt preview (effective gt-mode {effective_gt_mode!r}):")
+            shown = 0
+            seen_labels = set()
+            for row in pending:
+                if effective_gt_mode == "gt":
+                    label = resolve_gt_label(row)
+                    if label in seen_labels:
+                        continue
+                    seen_labels.add(label)
+                built = build_prompt_for_row(args.prompt, effective_gt_mode, row)
+                tag = ("POSITIVE" if effective_gt_mode == "gt" and label else
+                       "NEGATIVE" if effective_gt_mode == "gt" else "BLIND")
+                has_gt_text = "GROUND TRUTH" in built
+                print(f"--- video_id={row['video_id']} [{tag}] "
+                      f"contains 'GROUND TRUTH': {has_gt_text} ---")
+                print(built)
+                print()
+                shown += 1
+                if effective_gt_mode == "gt" and len(seen_labels) >= 2:
+                    break
+                if effective_gt_mode == "blind" and shown >= 1:
+                    break
+            print("=" * 70)
         return
 
     if not pending:
@@ -400,7 +561,8 @@ def main():
     frames_root = Path(args.frames_root)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_text = PROMPTS[args.prompt]
+    is_template = args.prompt in TEMPLATE_BUILDERS
+    prompt_text = None if is_template else PROMPTS[args.prompt]
 
     n_ok = n_failed = 0
     t0 = time.time()
@@ -416,8 +578,18 @@ def main():
                 n_failed += 1
                 continue
 
+            if is_template:
+                try:
+                    row_prompt_text = build_prompt_for_row(args.prompt, args.gt_mode, row)
+                except KeyError as e:
+                    print(f"  [{idx:4d}/{len(pending)}] [FAIL] {vid}: {e}")
+                    n_failed += 1
+                    continue
+            else:
+                row_prompt_text = prompt_text
+
             image_b64s = [_encode_image(p, frame_size=args.frame_size) for p in frame_paths]
-            messages = _build_messages(prompt_text, image_b64s, detail=args.detail)
+            messages = _build_messages(row_prompt_text, image_b64s, detail=args.detail)
 
             try:
                 raw_text, usage = _call_model(
@@ -432,7 +604,7 @@ def main():
                 continue
 
             parsed = _extract_json_object(raw_text)
-            ok, err = validate_parsed(parsed, prompt_key=args.prompt)
+            ok, err = validate_parsed(parsed, prompt_key=args.prompt, gt_mode=args.gt_mode)
             if not ok:
                 print(f"  [{idx:4d}/{len(pending)}] [BAD-JSON] {vid}: {err}. Raw (first 200 chars): "
                       f"{raw_text[:200]!r}")
@@ -441,8 +613,55 @@ def main():
             if err:  # ok=True but a note was returned (e.g. v5 verdict/score mismatch)
                 print(f"  [{idx:4d}/{len(pending)}] [NOTE] {vid}: {err}")
 
+            if is_template and args.prompt in ("v10", "v10q"):
+                effective_gt_mode = args.gt_mode
+                out_row = {
+                    "video_id": vid,
+                    # frames_dir is the per-WINDOW unique key (see
+                    # row_resume_key() docstring) - written here so resuming
+                    # this file works correctly on manifests where video_id
+                    # repeats across buckets, and so downstream tooling can
+                    # join back to the manifest unambiguously. horizon_label/
+                    # event_occurs/t_seconds are carried through when present
+                    # (train4500-derived manifests) for the same reason -
+                    # val_e3a-schema manifests don't have them, hence .get().
+                    "frames_dir": row.get("frames_dir"),
+                    "horizon_label": row.get("horizon_label"),
+                    "event_occurs": row.get("event_occurs"),
+                    "t_seconds": row.get("t_seconds"),
+                    "requested_time_to_event": row.get("requested_time_to_event"),
+                    "gt_mode": effective_gt_mode,
+                    "caption_neutral": parsed["caption_neutral"],
+                    "risk_clause": parsed["risk_clause"],
+                    "hazard_agent": parsed["hazard_agent"],
+                    "hazard_motion": parsed["hazard_motion"],
+                    "hazard_position": parsed["hazard_position"],
+                    "closing_dynamic": parsed["closing_dynamic"],
+                    "evidence_frames": parsed["evidence_frames"],
+                    "mechanism_visible": parsed["mechanism_visible"],
+                }
+                if effective_gt_mode == "gt":
+                    out_row["gt_label"] = int(resolve_gt_label(row))
+                else:
+                    out_row["risk_score"] = float(parsed["risk_score"])
+                    out_row["verdict"] = int(parsed["verdict"])
+                    out_row["confidence"] = float(parsed["confidence"])
+                for k in OPTIONAL_COT_KEYS:  # scene_context/dynamic_objects/temporal_analysis
+                    if k in parsed:
+                        out_row[k] = parsed[k]
+                out_f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+                out_f.flush()
+                n_ok += 1
+                if idx % 25 == 0 or idx == len(pending):
+                    print(f"  [{idx:4d}/{len(pending)}] ok={n_ok} failed={n_failed} "
+                          f"({time.time()-t0:.0f}s)")
+                if args.inter_clip_delay:
+                    time.sleep(args.inter_clip_delay)
+                continue
+
             out_row = {
                 "video_id": vid,
+                "frames_dir": row.get("frames_dir"),  # see row_resume_key()
                 "requested_time_to_event": row["requested_time_to_event"],
                 "caption_neutral": parsed["caption_neutral"],
                 "risk_clause": parsed["risk_clause"],

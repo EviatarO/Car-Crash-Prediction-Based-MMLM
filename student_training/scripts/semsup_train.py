@@ -92,6 +92,109 @@ def evaluate_crash_ap(badas, examples, device):
     return average_precision_score(yt, ys)
 
 
+def build_caption_bank(examples, siglip_model, siglip_tok, device, batch=64):
+    """Precompute the frozen SigLIP embedding for every example's caption, once.
+
+    WHY A BANK (this is what makes InfoNCE possible here at all): InfoNCE needs
+    NEGATIVES - other captions to contrast against - and the obvious objection is
+    that TrainableBadasWrapper is batch-size-1, so there is no batch to draw them
+    from. But the negatives live entirely on the TARGET side, and SigLIP is frozen:
+    t_j never carries a gradient. So they can be precomputed once and reused for
+    every anchor, giving hundreds of negatives at ~4MB (1761 x 768 x 4 bytes) and
+    zero extra autograd graphs. The alternative - holding 8 full ViT-L forward
+    graphs alive across the grad-accum window - risks OOM for no benefit.
+
+    Returns (bank (N, Dt) L2-normalized on `device`, vids list parallel to it).
+    """
+    texts = [ex["caption"] for ex in examples]
+    vids = [ex["video_id"] for ex in examples]
+    chunks = []
+    with torch.no_grad():
+        for i in range(0, len(texts), batch):
+            emb = siglip_text_embed(texts[i:i + batch], siglip_model, siglip_tok, device)
+            chunks.append(emb.detach())
+    bank = torch.cat(chunks, dim=0)
+    bank = F.normalize(bank, dim=-1)
+    return bank, vids
+
+
+def infonce_from_bank(pred, anchor_idx, bank, vids, log_tau):
+    """InfoNCE for ONE anchor against the whole frozen caption bank.
+
+    Ported from semsup_b1_probe.py's in-batch infonce_loss(), with the in-batch
+    target matrix swapped for the precomputed bank (see build_caption_bank).
+    Sibling-TTE masking is preserved and matters: the same video at a different
+    TTE has a near-duplicate caption, so scoring it as a negative would punish a
+    correct near-match instead of a wrong one.
+
+    Unlike cosine regression, the shared target-mean direction cancels in the
+    softmax, so a predictor that ignores the video and emits a constant scores at
+    chance (1/N) rather than at ||E[t]|| - which is exactly the degenerate optimum
+    that made the cosine objective flat (B1: 0.53% of available range, retrieval
+    at chance). See outputs/semantic_captions/b1_metrics.json.
+    """
+    tau = log_tau.exp().clamp(min=1e-2, max=1.0)
+    logits = (pred @ bank.T).squeeze(0) / tau          # (N,)
+    anchor_vid = vids[anchor_idx]
+    same_vid = torch.tensor([v == anchor_vid for v in vids], device=pred.device)
+    same_vid[anchor_idx] = False                        # keep the positive itself
+    logits = logits.masked_fill(same_vid, float("-inf"))
+    label = torch.tensor([anchor_idx], device=pred.device)
+    return F.cross_entropy(logits.unsqueeze(0), label)
+
+
+def evaluate_val_loss(badas, examples, device, predictor, siglip_model, siglip_tok,
+                       semantic_weight, semantic_loss="cosine", val_bank=None,
+                       val_vids=None, log_tau=None):
+    """Mirrors the training step's loss computation (crash CE + semantic_weight *
+    semantic loss), no gradient, averaged per-window over `examples`.
+    Added so train_loss vs val_loss can be compared per epoch (see epoch_metrics.jsonl)
+    to spot overfitting directly, rather than relying on val_ap alone - val_ap only
+    tells you ranking quality, not whether the model has started memorizing train
+    windows while val loss climbs. Same aggregation level (per-row, not per-clip) as
+    the training loop's own loss accounting, so train_loss and val_loss are
+    comparable on a like-for-like basis.
+
+    For semantic_loss='infonce' the val bank is the VAL set's own captions, so val
+    InfoNCE is contrasted against val-internal negatives - the analogue of what the
+    train loss does, and it keeps the two numbers on the same scale (both are
+    -log(1/N)-bounded, though note N differs between train and val, so compare the
+    TREND across epochs rather than the absolute train-vs-val difference for
+    infonce)."""
+    badas.nn_model.eval()
+    if predictor is not None:
+        predictor.eval()
+    total_crash, total_sem, n = 0.0, 0.0, 0
+    with torch.no_grad():
+        for i, ex in enumerate(examples):
+            try:
+                logits, patches = badas.forward(ex["frame_paths"])
+            except (OSError, RuntimeError):
+                continue
+            label = torch.tensor([ex["label"]], device=device)
+            crash_loss = F.cross_entropy(logits, label)
+            sem_loss = torch.tensor(0.0, device=device)
+            if predictor is not None:
+                patches32 = patches.unsqueeze(0).to(dtype=torch.float32)
+                pred = predictor(patches32).mean(dim=1)
+                pred = F.normalize(pred, dim=-1)
+                if semantic_loss == "infonce":
+                    # use the stamped bank index, not the loop counter - val_ex
+                    # happens not to be shuffled, but relying on that is exactly
+                    # the assumption that would break silently if it ever changes.
+                    sem_loss = infonce_from_bank(pred, ex.get("_bank_idx", i),
+                                                  val_bank, val_vids, log_tau)
+                else:
+                    tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
+                    sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
+            total_crash += crash_loss.item()
+            total_sem += sem_loss.item()
+            n += 1
+    if n == 0:
+        return float("nan"), float("nan")
+    return total_crash / n, total_sem / n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -100,6 +203,21 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--semantic-weight", type=float, default=0.0)
+    ap.add_argument("--semantic-loss", default="cosine", choices=["cosine", "infonce"],
+                     help="'cosine' (default, preserves the original Stage-B behavior) is "
+                          "1-cos(pred, SigLIP(caption)). It has a DEGENERATE optimum: a "
+                          "predictor that ignores the video and emits the mean caption "
+                          "embedding scores 1-||E[t]||, and on this caption set that mean has "
+                          "norm 0.865 - B1's real trained run beat that baseline by only 0.53% "
+                          "of the available range, with retrieval at exactly chance. "
+                          "'infonce' contrasts each anchor against a bank of frozen SigLIP "
+                          "caption embeddings (see build_caption_bank/infonce_from_bank); the "
+                          "shared mean direction cancels in the softmax so the collapse "
+                          "solution scores at chance instead of winning. B1 measured 4x chance "
+                          "retrieval under infonce vs exactly chance under cosine.")
+    ap.add_argument("--infonce-tau-init", type=float, default=0.07,
+                     help="initial temperature for --semantic-loss infonce (learnable, "
+                          "matches semsup_b1_probe.py's default)")
     ap.add_argument("--siglip-model", default="google/siglip-base-patch16-224")
     ap.add_argument("--predictor-init", default=None, help="warm-start from B1 checkpoint")
     ap.add_argument("--epochs", type=int, default=8)
@@ -107,6 +225,19 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--captions-path", default=None,
+                     help="override the caption JSONL (default: Caption_Train_All_Clips.jsonl, "
+                          "the 267-row pool). The training pool IS whichever file this points "
+                          "at - e.g. for a matched A1_587-vs-B_587 comparison, both runs must "
+                          "pass the SAME --captions-path so the only difference is "
+                          "--semantic-weight.")
+    ap.add_argument("--keep-top-k", type=int, default=3,
+                     help="how many epoch checkpoints to keep, ranked by val_ap (default 3, "
+                          "matching the original A1/B behavior). Set >= --epochs to keep every "
+                          "epoch - useful when you want to pick a checkpoint by hand later using "
+                          "the train/val loss gap in epoch_metrics.jsonl rather than trusting "
+                          "val_ap alone (val_ap is noisy at this data scale and only measures "
+                          "ranking quality, not overfitting).")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--test-manifest", default=None, help="e.g. test_manifest_hires.jsonl (677 Private)")
     ap.add_argument("--test-frames-root", default=None, help="e.g. dataset/test")
@@ -135,7 +266,8 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stage = "B (crash+semantic)" if args.semantic_weight > 0 else "A1 (crash-only)"
-    print(f"[cfg] stage={stage}  semantic_weight={args.semantic_weight}  "
+    sem_note = f"  semantic_loss={args.semantic_loss}" if args.semantic_weight > 0 else ""
+    print(f"[cfg] stage={stage}  semantic_weight={args.semantic_weight}{sem_note}  "
           f"lora_target_modules={args.lora_target_modules}  seed={args.seed}")
 
     target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
@@ -173,9 +305,17 @@ def main():
             print(f"[load] warm-started predictor from {args.predictor_init}")
         trainable += list(predictor.parameters())
 
+    # Learnable InfoNCE temperature (same contract as semsup_b1_probe.py). Must be
+    # in the optimizer's param list or it silently stays at its init value.
+    log_tau = None
+    if args.semantic_weight > 0 and args.semantic_loss == "infonce":
+        log_tau = torch.nn.Parameter(
+            torch.log(torch.tensor(args.infonce_tau_init, device=device)))
+        trainable = trainable + [log_tau]
+
     opt = torch.optim.AdamW(trainable, lr=args.lr)
 
-    examples = load_training_examples(limit=args.limit)
+    examples = load_training_examples(limit=args.limit, captions_path=args.captions_path)
     if len(examples) < args.min_examples:
         raise RuntimeError(
             f"Only {len(examples)} training examples loaded (< --min-examples "
@@ -185,6 +325,29 @@ def main():
         )
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
+
+    # Frozen caption banks for InfoNCE negatives - built ONCE (SigLIP never trains,
+    # so these are constants). Train anchors contrast against the train bank, val
+    # against the val bank; mixing them would leak val captions into the train
+    # objective's negative set.
+    train_bank = val_bank = None
+    train_bank_vids = val_bank_vids = None
+    if args.semantic_weight > 0 and args.semantic_loss == "infonce":
+        train_bank, train_bank_vids = build_caption_bank(train_ex, siglip_model, siglip_tok, device)
+        val_bank, val_bank_vids = build_caption_bank(val_ex, siglip_model, siglip_tok, device)
+        # CRITICAL: the training loop does random.shuffle(train_ex) in place every
+        # epoch, so a row's position in the shuffled list no longer matches its row
+        # in the bank. Stamp each example with its permanent bank index now, and use
+        # THAT as the InfoNCE anchor index - otherwise every anchor would be
+        # contrasted against the wrong "positive" caption and the loss would be
+        # silently training on mislabeled pairs.
+        for i, ex in enumerate(train_ex):
+            ex["_bank_idx"] = i
+        for i, ex in enumerate(val_ex):
+            ex["_bank_idx"] = i
+        print(f"[data] InfoNCE caption banks: train={tuple(train_bank.shape)} "
+              f"val={tuple(val_bank.shape)}  (chance retrieval: train=1/{len(train_ex)}, "
+              f"val=1/{len(val_ex)})")
 
     saved = []          # [(val_ap, epoch)] for every epoch, ranked at the end
     t0 = time.time()
@@ -218,8 +381,14 @@ def main():
                 # num_queries was 1 - see the predictor construction comment).
                 pred = predictor(patches32).mean(dim=1)
                 pred = F.normalize(pred, dim=-1)
-                tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
-                sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
+                if args.semantic_loss == "infonce":
+                    # ex["_bank_idx"], NOT the loop index - train_ex is reshuffled
+                    # every epoch (see the bank-construction comment above).
+                    sem_loss = infonce_from_bank(pred, ex["_bank_idx"], train_bank,
+                                                  train_bank_vids, log_tau)
+                else:
+                    tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
+                    sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
 
             loss = (crash_loss + args.semantic_weight * sem_loss) / args.grad_accum
             loss.backward()
@@ -238,15 +407,31 @@ def main():
             print(f"  [warn] {n_failed}/{len(train_ex)} examples failed to load this epoch")
 
         val_ap = evaluate_crash_ap(badas, val_ex, device)
+        val_crash_loss, val_sem_loss = evaluate_val_loss(
+            badas, val_ex, device, predictor, siglip_model, siglip_tok, args.semantic_weight,
+            semantic_loss=args.semantic_loss, val_bank=val_bank, val_vids=val_bank_vids,
+            log_tau=log_tau)
         elapsed = time.time() - t0
         avg_crash = total_crash / n if n else float("nan")
         avg_sem = total_sem / n if n else float("nan")
+        # combined train/val loss, same weighting as the actual optimized objective -
+        # this (not crash_loss alone) is what "train vs val gap" should compare, since
+        # for B the model is optimizing crash+semantic jointly.
+        train_total_loss = avg_crash + args.semantic_weight * avg_sem
+        val_total_loss = val_crash_loss + args.semantic_weight * val_sem_loss
+        train_val_gap = val_total_loss - train_total_loss  # >0 and growing = overfitting
         print(f"  epoch {epoch}/{args.epochs}  crash_loss={avg_crash:.4f}  "
-              f"sem_loss={avg_sem:.4f}  val_ap={val_ap:.4f}  ({elapsed:.1f}s)")
+              f"sem_loss={avg_sem:.4f}  val_crash_loss={val_crash_loss:.4f}  "
+              f"val_sem_loss={val_sem_loss:.4f}  val_ap={val_ap:.4f}  "
+              f"train_val_gap={train_val_gap:.4f}  ({elapsed:.1f}s)")
 
         with open(out_dir / "epoch_metrics.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "epoch": epoch, "crash_loss": avg_crash, "sem_loss": avg_sem,
+                "val_crash_loss": None if val_crash_loss != val_crash_loss else val_crash_loss,
+                "val_sem_loss": None if val_sem_loss != val_sem_loss else val_sem_loss,
+                "train_total_loss": train_total_loss, "val_total_loss": val_total_loss,
+                "train_val_gap": None if train_val_gap != train_val_gap else train_val_gap,
                 "val_ap": None if val_ap != val_ap else val_ap,
                 "n_failed": n_failed, "elapsed_s": round(elapsed, 1),
             }) + "\n")
@@ -260,25 +445,33 @@ def main():
 
     # Rank epochs: highest val_ap first; NaN -> -inf so a degenerate run (single-
     # class val split) falls back to the LAST epochs by number. Ties -> later
-    # epoch wins. Keep the top-3 checkpoints, prune the rest (mirrors B1).
+    # epoch wins. Keep the top --keep-top-k checkpoints (default 3, mirrors B1);
+    # pass --keep-top-k >= --epochs to keep every epoch, e.g. to pick a checkpoint
+    # by hand afterward using epoch_metrics.jsonl's train_val_gap column instead of
+    # trusting val_ap alone.
     ranked = sorted(saved, key=lambda r: (r[0] if r[0] == r[0] else float("-inf"), r[1]),
                     reverse=True)
-    top3 = ranked[:3]
-    keep = {e for _, e in top3}
+    topk = ranked[:args.keep_top_k]
+    keep = {e for _, e in topk}
     for _, e in saved:
         if e not in keep:
             shutil.rmtree(out_dir / f"epoch_{e:02d}", ignore_errors=True)
-    best_ap, best_epoch = top3[0]
-    print(f"\n[done] top-3 by val_ap: " +
-          ", ".join(f"ep{e} (val_ap={va:.4f})" for va, e in top3))
+    best_ap, best_epoch = topk[0]
+    print(f"\n[done] top-{args.keep_top_k} by val_ap: " +
+          ", ".join(f"ep{e} (val_ap={va:.4f})" for va, e in topk))
     with open(out_dir / "train_metrics.json", "w", encoding="utf-8") as f:
         json.dump({"stage": stage,
                     "best_val_ap": (None if best_ap != best_ap else round(best_ap, 4)),
                     "best_epoch": best_epoch,
-                    "top3": [{"epoch": e, "val_ap": (None if va != va else round(va, 4))}
-                             for va, e in top3],
+                    "keep_top_k": args.keep_top_k,
+                    "top_checkpoints": [{"epoch": e, "val_ap": (None if va != va else round(va, 4))}
+                                         for va, e in topk],
                     "n_train": len(train_ex), "n_val": len(val_ex),
                     "semantic_weight": args.semantic_weight,
+                    "semantic_loss": args.semantic_loss if args.semantic_weight > 0 else None,
+                    "infonce_tau_final": (float(log_tau.exp().item())
+                                           if log_tau is not None else None),
+                    "captions_path": args.captions_path or "outputs/semantic_captions/Caption_Train_All_Clips.jsonl",
                     # Full run config, so "was B run identical to A1 except for
                     # semantic_weight" is a fact checkable from disk, not an
                     # assertion in a markdown file.
@@ -287,9 +480,11 @@ def main():
     if not (args.test_manifest and args.test_frames_root):
         return
 
-    # ---- Test-score EACH of the top-3 checkpoints on the real test set. ----
-    # At n~267, which epoch "wins" on val is noisy, so scoring all 3 shows the
-    # spread rather than betting the headline on one checkpoint.
+    # ---- Test-score EACH kept checkpoint (--keep-top-k of them) on the real test set. ----
+    # Which epoch "wins" on val is noisy at this data scale, so scoring all of them
+    # shows the spread rather than betting the headline on one checkpoint - and with
+    # --keep-top-k set high, this is also how a per-epoch overfitting curve gets built
+    # (read alongside epoch_metrics.jsonl's train_val_gap).
     from safetensors.torch import load_file
     from peft.utils import set_peft_model_state_dict
 
@@ -330,7 +525,7 @@ def main():
         return yt, ys, grp
 
     summary = []
-    for rank, (va, epoch) in enumerate(top3, 1):
+    for rank, (va, epoch) in enumerate(topk, 1):
         print(f"\n[test] scoring top-{rank} checkpoint (epoch {epoch}, "
               f"val_ap={va:.4f}) on {len(records)} clips ...")
         res_path = out_dir / f"test_results_ep{epoch:02d}.jsonl"

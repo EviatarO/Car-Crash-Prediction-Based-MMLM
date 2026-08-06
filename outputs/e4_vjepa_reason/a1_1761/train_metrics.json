@@ -1,0 +1,70 @@
+{
+  "stage": "A1 (crash-only)",
+  "best_val_ap": 0.9143,
+  "best_epoch": 4,
+  "keep_top_k": 8,
+  "top_checkpoints": [
+    {
+      "epoch": 4,
+      "val_ap": 0.9143
+    },
+    {
+      "epoch": 2,
+      "val_ap": 0.9132
+    },
+    {
+      "epoch": 3,
+      "val_ap": 0.9124
+    },
+    {
+      "epoch": 5,
+      "val_ap": 0.9103
+    },
+    {
+      "epoch": 1,
+      "val_ap": 0.9088
+    },
+    {
+      "epoch": 7,
+      "val_ap": 0.8997
+    },
+    {
+      "epoch": 6,
+      "val_ap": 0.8978
+    },
+    {
+      "epoch": 8,
+      "val_ap": 0.8953
+    }
+  ],
+  "n_train": 1413,
+  "n_val": 348,
+  "semantic_weight": 0.0,
+  "semantic_loss": null,
+  "infonce_tau_final": null,
+  "captions_path": "../../outputs/semantic_captions/Caption_Train4500_Mixed_1761.jsonl",
+  "args": {
+    "config": "../configs/e4_stageA.yaml",
+    "lora_target_modules": "query,key,value",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "semantic_weight": 0.0,
+    "semantic_loss": "cosine",
+    "infonce_tau_init": 0.07,
+    "siglip_model": "google/siglip-base-patch16-224",
+    "predictor_init": null,
+    "epochs": 8,
+    "lr": 0.0002,
+    "grad_accum": 8,
+    "val_frac": 0.2,
+    "limit": 0,
+    "captions_path": "../../outputs/semantic_captions/Caption_Train4500_Mixed_1761.jsonl",
+    "keep_top_k": 8,
+    "out_dir": "/workspace/semsup/a1_1761",
+    "test_manifest": "../../dataset/manifests/test_manifest_hires.jsonl",
+    "test_frames_root": "../../dataset/test",
+    "test_limit": 0,
+    "seed": 0,
+    "min_examples": 1
+  }
+}

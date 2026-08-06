@@ -504,14 +504,28 @@ checked (sequential-decode extraction verified byte-identical to the old per-fra
 method on 6 real videos) and nothing pointed to a mechanical bug. **Chunks 1-2 will show
 whether this is a chunk-0-specific fluke or a stable property of the full train pool.**
 
-### Chunks 1-2 (982 videos / 2,946 windows) — extraction done, transfer corrupted
-Extracted and verified complete locally (0/2,946 incomplete, checked by frame count AND file
-size). Transfer to the pod hit an active RunPod storage quota mid-stream; `tar` silently wrote
-correct file names/counts with 0-byte content for everything after the quota was hit —
-**1,674/2,946 directories on the pod are currently corrupted**, confirmed by a size-aware
-re-check (the first, count-only check falsely reported all clear). Not yet scored. Blocked on
-the user raising the pod's storage quota (no tool access to do this) — see PROJECT_STATE.md's
-Next step.
+### Chunks 1-2 (982 videos / 2,946 windows) — DONE
+First transfer attempt corrupted 1,674/2,946 dirs (0-byte content from a RunPod storage quota
+hit mid-`tar`, caught by a size-aware re-check after a count-only check falsely passed). User
+raised the quota (+15GB); re-transfer verified clean (all 2,946 dirs correct size, cross-checked
+via `du -sh` delta) and both chunks scored successfully.
+
+Per-chunk AP/AUC held stable across all three independently-sampled 500-video chunks
+(0.9555/0.9513/0.9535 AP, 0.9504/0.9454/0.9462 AUC) — the pattern is a real property of the
+train pool, not chunk-0 noise.
+
+### Combined result, all 3 chunks (n=4,446) — FINAL
+`AP=0.9535 AUC=0.9474 accuracy=86.8% TP/FP/TN/FN=1954/318/1905/269 error=13.2%`
+(587 failures: 318 FP + 269 FN). Bucket-error spread 13.9% (worst TTE_1.5 19.6%, best TTE_0.5
+5.7%) → **DIFFUSE**, confirming chunk 0's own classification at 3× the sample. Decision:
+**uniform caption allocation**, not failure-targeted. Coverage check
+(`monitor_train4500_coverage.xlsx`): 213/4,446 windows already captioned (4.8%).
+
+**Still open, confirmed real (not chunk-0 noise)**: train's 13.2% error vs A0's known 677-clip
+test error of 23.6% — held at the same magnitude across all 3 chunks. Test is FP-dominated
+(130:30, ~4.3:1); train is nearly balanced (318:269, ~1.2:1). Pipeline mechanics checked and
+ruled out (byte-identical sequential-decode extraction). Not investigated further this session —
+see DECISIONS.md.
 
 ## Literature check (2026-07-23, web)
 - **BADAS-2.0** (arXiv 2604.05767, Apr 2026) tested general VLMs against their specialised

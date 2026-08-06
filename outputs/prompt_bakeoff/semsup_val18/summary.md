@@ -1,5 +1,13 @@
 # PROMPT_SEMSUP_V2 / V3_COT vs v6 — 18-clip hallucination screen
 
+> **Superseded by the GT-informed round (2026-08-02):** this thread's whole premise (predict
+> the verdict, score prediction accuracy) turned out to be the wrong axis for a captioning
+> target whose GT label already comes from `train.csv`. See
+> `../semsup_val18_gt/summary.md` — giving the teacher the GT label and asking it to explain
+> the mechanism eliminated positive-clip contradictions. That round's winner —
+> **Gemini 3.6 Flash + `PROMPT_SEMSUP_V10_GT`, hybrid mode (GT on positives, blind on
+> negatives)** — is what ships to the 587 train4500 failure windows, not anything below.
+
 > **Correction notice:** an earlier version of this document concluded V2/V3 underperform v6.
 > That conclusion was **confounded** and is retracted below — see "The control experiment."
 > Re-running v6's own original prompt today, at identical settings, no longer reproduces its

@@ -153,6 +153,14 @@
 
 ## Unresolved design questions
 
+- **Why does the frozen A0 scorer do notably better on train (13.2% error, n=4,446) than on
+  the known 677-clip test set (23.6% error)?** Confirmed real and stable at full scale
+  2026-08-01 — held consistently across all 3 independently-sampled chunks (~13.3% each), not
+  a chunk-0 fluke. Test is FP-dominated (130:30, 4.3:1); train is nearly balanced (318:269,
+  1.2:1) — a genuine distributional difference between the pools. Pipeline mechanics checked
+  and ruled out (byte-identical sequential-decode extraction verified). Not investigated
+  further — open for whoever picks this up next.
+
 - **Which scale-up path?** **Gate resolved 2026-07-25/26**: the B1-InfoNCE re-run (see
   EXPERIMENTS.md) found real, statistically-supported video↔caption signal at n=267
   (clip-level retrieval@1 4× chance, p=0.015) — the original null was the cosine objective's

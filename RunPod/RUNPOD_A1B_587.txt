@@ -1,0 +1,188 @@
+========================================================================
+RUNPOD — A1_587 vs B_587: paired semantic-supervision comparison on the
+587 real train4500 failure windows (269 FN + 318 FP)
+========================================================================
+Goal: does the semantic-aux loss (B) beat crash-only LoRA (A1) on the SAME
+587-window caption pool? This supersedes the earlier n=267 A1/B comparison,
+which is NOT a valid control for this run (see below) — that comparison
+trained on a different, smaller caption pool via the trainer's hardcoded
+default caption file.
+
+Plan/context: outputs/prompt_bakeoff/semsup_val18_gt/summary.md (why hybrid
+GT-mode captioning), outputs/semantic_captions/failures587/summary.md (the
+587-window captioning run itself, DONE 2026-08-04).
+
+STATUS (2026-08-05): pod connected (runpod-semsup587), all steps below up
+through "STEP 2 — smoke test" are DONE and verified. STEP 3 (the real 8-epoch
+runs) has NOT been started — this is the stop-and-confirm point.
+
+------------------------------------------------------------------------
+0) WHY THE OLD A1 RESULT CANNOT BE REUSED
+------------------------------------------------------------------------
+semsup_train.py's training pool IS whichever file `load_training_examples()`
+reads — previously hardcoded to outputs/semantic_captions/Caption_Train_All_
+Clips.jsonl (267 rows, 89 clips). The existing A1 result (test_AP=0.8638,
+/workspace/semsup/a1/test_summary.json) was trained on that 267-row pool.
+B_587 will train on the NEW 587-row pool — different size AND different
+examples. Comparing B_587 against the old A1 would confound "does semantic
+loss help" with "did the training data change." Fixed today: semsup_train.py
+now takes --captions-path (previously no CLI way to override the default —
+load_training_examples() supported it, the trainer's argparse didn't). Both
+A1_587 and B_587 below pass the SAME --captions-path, so semantic_weight is
+the only difference between them.
+
+------------------------------------------------------------------------
+1) POD STATE (already confirmed 2026-08-05, no action needed)
+------------------------------------------------------------------------
+Pod: runpod-semsup587 (RTX 5090, 32GB). Fresh container, but /workspace is
+the SAME persistent network volume from the earlier train4500-inference run
+— repo, all frame data, AND the earlier real A1/B1/B (n=267) outputs
+survived under /workspace/semsup/, including a checkpoint that was believed
+lost:
+  /workspace/semsup/a1/            — old A1 (n=267), test_AP=0.8638. Reference
+                                      only, NOT the control for B_587 (see 0).
+  /workspace/semsup/b1/            — B1 cosine-loss run. retrieval_top1_acc
+                                      = 0.0196 = exactly chance. Collapsed;
+                                      do NOT warm-start from this one.
+  /workspace/semsup/b1_infonce/    — B1 InfoNCE-loss run. retrieval_top1_acc
+                                      = 0.078 (row) / 0.235 (clip) = real
+                                      signal, ~4x chance. USE THIS for
+                                      B_587's --predictor-init (see step 3).
+  /workspace/semsup/b/             — old B (n=267), test_AP=0.8574.
+
+Deps installed + verified importable: badas, huggingface_hub, peft,
+transformers, sklearn, yaml, openpyxl, albumentations, sentencepiece,
+protobuf (protobuf was the one genuinely missing package — SigLIP's
+tokenizer needs it, caught by the smoke test in step 2, not assumed).
+HF auth: token copied /workspace/.cache/huggingface/token ->
+/root/.cache/huggingface/token (same gotcha as every previous pod session —
+hf auth login writes to the wrong location for HF_HOME=/root/...). Verified
+via `huggingface_hub.whoami()` — gated-repo read access confirmed.
+
+Files uploaded (scp, not git — local changes are uncommitted; do NOT `git
+pull` on the pod, it would not have these):
+  student_training/scripts/semsup_train.py            (modified: --captions-path)
+  student_training/scripts/build_semsup_captions_587.py (new, not needed on
+                                                          pod — the output
+                                                          file below is)
+  outputs/semantic_captions/Caption_Train4500_Failures_587.jsonl (new, 587 rows)
+
+Data integrity, verified on the pod directly (not assumed from local):
+  - All 587 required frames_dir entries exist under
+    /workspace/MMLM_AI/dataset/train, each with exactly 16 frame_*.jpg files
+    (0 missing, 0 incomplete — checked all 587, not a sample).
+  - load_training_examples(captions_path=...the 587 file) loads exactly
+    587/587, 0 skipped, 269 label=1 / 318 label=0 — matches the source data
+    exactly, both locally and re-verified independently on the pod.
+  - dataset/manifests/test_manifest_hires.jsonl and dataset/test/ (677 dirs)
+    present for final test scoring.
+
+------------------------------------------------------------------------
+2) SMOKE TEST (DONE — both configs verified end-to-end, --limit 4 --epochs 1)
+------------------------------------------------------------------------
+A1_587 smoke test: LoRA applied (trainable=2,801,664/334,355,842 = 0.84%,
+matches the number already confirmed on this pod for the old A1 run), crash
+loss computed (0.5614), epoch completed in 1.9s. No predictor constructed
+(semantic_weight=0.0), as expected.
+
+B_587 smoke test: LoRA applied (same 0.84%), SigLIP loaded, predictor
+warm-started cleanly from /workspace/semsup/b1_infonce/predictor_b1.pt (no
+shape/state_dict errors — confirms the InfoNCE checkpoint's architecture,
+num_queries=8/hidden_dim=256, matches semsup_train.py's current predictor
+construction), both crash_loss (0.2919) and sem_loss (0.8618) computed as
+real nonzero numbers, epoch completed in 2.4s.
+
+val_ap=nan in both smoke tests is expected/harmless — at --limit 4 the val
+split is 1 clip, single-class, AP is undefined (see semsup_train.py's NaN
+handling, unchanged from the original A1/B code).
+
+Smoke-test output dirs (/root/smoketest_a1587, /root/smoketest_b587) were
+deleted after verification — nothing to bring back from this step.
+
+------------------------------------------------------------------------
+3) THE REAL RUNS — NOT YET STARTED, confirm before running
+------------------------------------------------------------------------
+Same --lora-target-modules, --epochs, --grad-accum as the original A1/B
+(query,key,value; 8 epochs; grad-accum 8) for direct comparability of
+training recipe — only --captions-path and (for B) --predictor-init differ
+from that run.
+
+# A1_587 — crash-only control
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python3 semsup_train.py \
+    --config ../configs/e4_stageA.yaml \
+    --lora-target-modules query,key,value \
+    --captions-path ../../outputs/semantic_captions/Caption_Train4500_Failures_587.jsonl \
+    --semantic-weight 0.0 --epochs 8 --grad-accum 8 --seed 0 \
+    --out-dir /workspace/semsup/a1_587 \
+    --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
+    --test-frames-root ../../dataset/test
+
+# B_587 — crash + semantic-aux (InfoNCE-warm-started predictor, cosine-trained)
+HF_HOME=/root/.cache/huggingface PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python3 semsup_train.py \
+    --config ../configs/e4_stageA.yaml \
+    --lora-target-modules query,key,value \
+    --captions-path ../../outputs/semantic_captions/Caption_Train4500_Failures_587.jsonl \
+    --semantic-weight 0.3 --predictor-init /workspace/semsup/b1_infonce/predictor_b1.pt \
+    --epochs 8 --grad-accum 8 --seed 0 \
+    --out-dir /workspace/semsup/b_587 \
+    --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
+    --test-frames-root ../../dataset/test
+
+NOTE (write to /workspace, not /root): unlike the smoke tests, use
+/workspace/semsup/... as --out-dir for the real runs, so results survive a
+pod Stop/Terminate the same way the earlier a1/b1/b/b1_infonce results did
+— /root is container-local and does not persist.
+
+--semantic-weight 0.3 matches the original B run's value, for direct
+comparability (semantic_weight is otherwise unswept/untested in this
+project — if you want to sweep it, that is a separate follow-up, not this
+run).
+
+Runtime estimate: unknown precisely for 587 windows (the original 267-row
+A1 run's wall time isn't recorded in what's local) — the smoke test's
+~2s/epoch was at --limit 4 (train=3), which does not extrapolate linearly
+to real per-example forward/backward cost at n~470 train / ~117 val
+(80/20 clip-level split of 396 distinct videos). Expect this to be
+meaningfully longer than the smoke test; watch the first epoch's printed
+elapsed time and extrapolate before assuming the full 8 epochs will finish
+quickly.
+
+Both commands stream progress per epoch (crash_loss, sem_loss, val_ap) and
+save top-3 checkpoints by val_ap, matching the original A1/B behavior
+exactly (semsup_train.py's core loop is unchanged — only --captions-path is
+new).
+
+------------------------------------------------------------------------
+4) BRING RESULTS BACK
+------------------------------------------------------------------------
+scp -r runpod-semsup587:/workspace/semsup/a1_587/{train_metrics.json,test_summary.json,metrics_ep*.json,epoch_metrics.jsonl} \
+    outputs/e4_vjepa_reason/a1_587/
+scp -r runpod-semsup587:/workspace/semsup/b_587/{train_metrics.json,test_summary.json,metrics_ep*.json,epoch_metrics.jsonl} \
+    outputs/e4_vjepa_reason/b_587/
+# (adjust local target dirs to match project convention when actually running)
+
+Locally: evaluate_metrics.py or a direct read of the two test_summary.json
+files, paired bootstrap CI on test_AP (reuse analyze_tte_ap.py's
+bootstrap_ap_diff — see DECISIONS.md's "Reuse" section from the original
+Stage-0 plan), report B_587_test_AP - A1_587_test_AP with a CI, and whether
+it excludes 0.
+
+------------------------------------------------------------------------
+SANITY CHECKS (read before declaring "it works")
+------------------------------------------------------------------------
+- Both runs' train_metrics.json "captions_path" field must read
+  "../../outputs/semantic_captions/Caption_Train4500_Failures_587.jsonl" —
+  this is now written to disk specifically so "were A1_587 and B_587
+  trained on the identical pool" is a checkable fact, not an assumption.
+- Both runs' "n_train"+"n_val" should sum to the same number (the 587-window
+  pool minus any clip-level split rounding) — if they differ, something is
+  wrong with the captions-path wiring.
+- A1_587: "LoRA applied: trainable=X" prints X > 0 (script raises if X==0).
+- B_587: "[load] warm-started predictor from ...b1_infonce/predictor_b1.pt"
+  must print — if it's silently training the predictor from scratch instead,
+  --predictor-init was not passed or the path is wrong.
+- crash_loss should decrease across epochs for both runs (even a small
+  decrease — flat-from-epoch-1 would suggest something isn't backpropagating).
+- DO NOT read a single-run test_AP gap as significant without the paired
+  bootstrap CI — n~587 is much better powered than the old n=267 comparison,
+  but still needs the CI, not a raw point difference.

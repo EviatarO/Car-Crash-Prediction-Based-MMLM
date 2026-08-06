@@ -47,11 +47,15 @@ yet** (see Next step).
   2026-08-01) regardless of whether writes actually succeed. Confirmed by a live 500MB test
   write failing at 0 bytes while `df` still showed hundreds of TB free. **Always verify with a
   real test write, never trust `df` alone, before pushing a large transfer.**
-- **Pod is currently STOPPED (2026-08-01, user had to leave) with the storage quota still
-  exceeded — this is the literal blocker for the next step.** SSH access is set up: local
-  `~/.ssh/config` has a `Host runpod-train4500` alias (IP/port change on pod restart — re-point
-  it after the pod comes back up); the local public key is in the pod's
-  `~/.ssh/authorized_keys` (survives a Stop, would need re-adding after a Terminate+new pod).
+- **Quota was raised by the user (+15GB) and confirmed fixed (2026-08-01)** via a live 2GB
+  test write. **Pod is currently STOPPED again (normal end-of-session stop, not a blocker this
+  time)** — only Jupyter was running, all pipeline work was already complete and pulled
+  locally before stopping. SSH access: local `~/.ssh/config` has a `Host runpod-train4500`
+  alias (**IP/port changes on every pod restart — even a Stop→Start got a new address once
+  this session** — re-point `HostName`/`Port` after the pod comes back up, then re-test); the
+  local public key needs re-adding to `~/.ssh/authorized_keys` if the pod comes back as a
+  genuinely new container (happened once this session despite being a Stop, not a Terminate —
+  don't assume `/root` state survives, verify with `python3 -c "import badas"` first).
 - Deps must be reinstalled on every NEW/recreated container: `pip install --break-system-packages
   badas openpyxl pyyaml scikit-learn pandas pillow matplotlib seaborn huggingface_hub
   albumentations` (Python 3.12 here is PEP-668 "externally managed" — plain `pip install` refuses;
@@ -244,27 +248,21 @@ Full runbook: `RUNPOD_SEMANTIC_SUPERVISION.txt`. Running status doc:
 `outputs/semantic_captions/summary.md` (auto-maintained per stage — keep updating it).
 
 ## Git state
-Branch `main`, **HEAD = `46618e1`, in sync with `origin/main` (pushed 2026-08-01).**
+Branch `main`, **HEAD = `4e41877`** ("Fix MID negative-bucket windowing bug found by real
+chunk-0 scoring"), **in sync with `origin/main`** (user committed + pushed 2026-08-01). This
+includes the MID→MID-10 fix (manifest builder, extractor, caption monitor) and the regenerated
+`train4500_hires.jsonl`/`chunk_00.jsonl`/`teacher_dataset_train4500.jsonl`.
 
-**Uncommitted as of this handoff** (`git status -sb`):
+**Still uncommitted** (`git status -sb`, current):
 - `RunPod/` (untracked dir) + 11 `D` deletions of `RUNPOD_*.txt` at repo root — **the user's own
   reorg**, verified byte-identical content (a plain move, not a real change). Not touched, not
   committed by any automated step — the user's call whether/when to commit it.
-- `student_training/scripts/build_train4500_manifest.py`,
-  `student_training/scripts/semsup_extract_promptbakeoff_frames.py`,
-  `teacher_distillation/scripts/build_caption_monitor.py` — **the MID→MID-10 fix**, not yet
-  committed. See EXPERIMENTS.md "train4500 chunk 0" for why.
-- `dataset/manifests/train4500_hires.jsonl`, `dataset/manifests/train4500_chunks/chunk_00.jsonl`,
-  `dataset/teacher_labels/teacher_dataset_train4500.jsonl` — regenerated with the MID-10 bucket,
-  not yet committed. (`dataset/manifests/train4500_chunks/chunk_01.jsonl`/`chunk_02.jsonl` are
-  new and also uncommitted, git status doesn't list them separately above because they weren't
-  shown in the last check — verify with `git status` before assuming.)
 - `outputs/semantic_captions/Caption_Train_All_Clips.xlsx` — still shows modified, predates
   recent sessions entirely, never touched by any of this work. Left for the user to resolve.
-- `outputs/semantic_captions/promptbakeoff/extraction_log.json` — grows every extraction run
-  (shared log across the prompt-bakeoff and train4500 threads); safe to commit whenever
-  convenient, not urgent.
-- This handoff's own edits to the 4 `docs_agents/*.md` files.
+- This handoff's own edits to `docs_agents/DECISIONS.md`, `EXPERIMENTS.md`, `PROJECT_STATE.md`.
+- Note: `chunk_01.jsonl`/`chunk_02.jsonl` and the final scores/taxonomy/monitor outputs under
+  `outputs/train4500_inference/` were generated after the last commit — verify with
+  `git status` before assuming what's tracked.
 
 **Only commit when the user asks** — per standing instructions, do not commit unprompted even
 though the diff is large.
@@ -293,49 +291,35 @@ made 2026-08-01: stop iterating prompts on 18 clips (underpowered by constructio
 measuring where the *real* teacher (the frozen A0 scorer, on ~4,500 real train windows) fails,
 since that ties directly to the actual thesis metric instead of a caption-quality proxy.**
 
-**Current sub-thread: train4500-inference pipeline. In progress, blocked on a RunPod quota.**
-Goal: score every train window (750 pos/750 neg × 3 buckets each = 4,446, excluding val_e3a's
-18 clips) through the frozen A0 scorer — nothing trains — to find systematic failure patterns
-and decide whether caption budget should be failure-targeted or uniform.
+**train4500-inference pipeline: DONE (2026-08-01).** Goal: score every train window (2,223
+pos/2,223 neg = 4,446, excluding val_e3a's 18 clips) through the frozen A0 scorer — nothing
+trains — to find systematic failure patterns and decide caption-budget allocation.
 
-Status:
-1. **Chunk 0 (500 videos/1,500 windows): DONE, verified, and used to find + fix a real bug.**
-   The `MID` negative bucket (offset = exact clip midpoint) produced 42.8% error, **all false
-   positives**, at 0.99+ confidence — isolated to that one bucket (MID-4/MID-8 were fine at
-   14.4%). Diagnosis: `train.csv`'s label is clip-level ("no collision anywhere in this ~40s
-   clip"), but the literal midpoint of a naturalistic clip can genuinely look risky without
-   ever becoming a collision — a real hard-negative the clip-level label can't capture. Fixed:
-   moved the bucket to offset −10s (renamed `MID-10`, `build_train4500_manifest.py`'s
-   `NEG_BUCKETS`), falls back to the existing `T_FLOOR=2.0` mechanism for short clips (44/250
-   in chunk 0). **After the fix, chunk 0 (n=1,500): AP=0.9555, AUC=0.9504, accuracy=86.7%,
-   TP/FP/TN/FN=655/104/646/95, error=13.3%. Per-bucket spread dropped from 36.0% (systematic)
-   to 12.0% (diffuse) — `mine_train_failures.py`'s own classifier now says uniform caption
-   allocation is fine, not failure-targeted.**
-2. **Open, unresolved question**: chunk 0's error rate (13.3%) is well below A0's known
-   677-clip test error rate (23.6%) — a genuine, not-yet-explained "train scores easier than
-   test" pattern, broad across buckets (not the MID artifact, which is separately fixed). Test
-   is FP-dominated (130:30, 4.3:1); chunk 0 is nearly balanced (104:95, ~1.1:1) — a real
-   distributional difference between the two pools, not an obvious bug signature (pipeline
-   mechanics were verified: sequential-decode extraction is byte-identical to the old method,
-   frame counts/sizes all checked). **Chunks 1-2 (below) will show whether this holds at 3×
-   the sample or was specific to chunk 0's 500 videos.**
-3. **Chunks 1-2 (982 videos/2,946 windows): extracted locally and verified complete (0
-   incomplete out of 2,946). Transfer to the pod is CORRUPTED — 1,674/2,946 directories are
-   0-byte files** (a RunPod storage quota was hit mid-transfer; `tar` still writes the file
-   entry with the right name/count even when the content write fails — see gotchas). **Root
-   blocker: the quota is still active** (confirmed via a live 500MB test write failing at 0
-   bytes) and `df -h` is not a reliable signal for it (shows cluster-wide free space, not the
-   account/volume limit). **Pod is currently STOPPED** (user had to leave; Stop not Terminate,
-   so `/root`'s installed deps + SSH key + HF token survive).
+**Result, all 4,446 windows scored and verified**: `AP=0.9535 AUC=0.9474 accuracy=86.8%
+TP/FP/TN/FN=1954/318/1905/269 error=13.2% (587 total failures: 318 FP + 269 FN)`.
 
-**Immediate next step**: (1) raise/check the RunPod storage quota via the console — needs the
-user, no tool access to their account; (2) once raised, delete the 1,674 corrupted directories
-on the pod and re-transfer chunks 1-2 (frames already sit correctly on the local machine,
-nothing needs re-extracting); (3) verify by **file size**, not just count/presence, this time;
-(4) score both chunks, merge with chunk 0's corrected scores, re-run
-`mine_train_failures.py`/`build_caption_monitor.py` on the full ~4,446 windows; (5) that
-taxonomy (failure-targeted vs uniform, per the script's own diffuse/systematic classifier)
-decides the caption-allocation question that's been open since the original Stage-0 plan.
+1. **Chunk 0 found + fixed a real bug** (see the MID-10 entry in ARCHITECTURE.md/EXPERIMENTS.md
+   for full diagnosis) — offset-0 `MID` bucket had 42.8% error, 100% FP; moved to `MID-10`
+   (offset −10s), now 14.0% error, in line with every other bucket.
+2. **Per-chunk numbers held stable across all 3 independent 500-video chunks**
+   (AP 0.9555/0.9513/0.9535, AUC 0.9504/0.9454/0.9462) — confirms the result is a real
+   property of the train pool, not chunk-0 noise.
+3. **Failure taxonomy is DIFFUSE** (13.9% spread across the 6 buckets, worst=TTE_1.5 at 19.6%,
+   best=TTE_0.5 at 5.7%) → `mine_train_failures.py`'s own classifier recommends **uniform**
+   caption allocation over failure-targeting. This is the final answer, confirmed at full
+   scale, not just chunk 0.
+4. **Coverage**: 213/4,446 windows already captioned (4.8%) per
+   `outputs/train4500_inference/monitor_train4500_coverage.xlsx` (pulled locally + sent to
+   user) — this is the real starting point for scaling toward the ~4,500 target.
+5. **Still open, not explained**: train's 13.2% error vs A0's known 677-clip test error of
+   23.6% — a real, stable gap (confirmed at n=4,446, not a fluke). Test is FP-dominated
+   (130:30, 4.3:1); train is nearly balanced (318:269, ~1.2:1). Pipeline mechanics were checked
+   and ruled out (byte-identical extraction verified). Not yet investigated further — see
+   DECISIONS.md's unresolved questions.
+
+**Next step, not yet started**: with uniform allocation now the settled answer, decide the
+next caption-scaling batch size/teacher-prompt combo and start captioning toward the ~4,500
+target (213 done). The train-vs-test gap above is a secondary open thread, lower priority.
 
 **Separately still open, not yet started:** porting `--loss infonce` into `semsup_train.py`
 (Stage B) — currently only exists in `semsup_b1_probe.py`. Blocked on a batching prerequisite
