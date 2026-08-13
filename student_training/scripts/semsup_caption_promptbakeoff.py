@@ -43,6 +43,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -81,6 +82,7 @@ from prompts.PROMPT_SEMSUP_V8_NARRATIVE import PROMPT_SEMSUP_V8_NARRATIVE  # noq
 from prompts.PROMPT_SEMSUP_V9_MINIMAL import PROMPT_SEMSUP_V9_MINIMAL  # noqa: E402
 from prompts.PROMPT_SEMSUP_V10_GT import build_prompt as _build_v10_prompt  # noqa: E402
 from prompts.PROMPT_SEMSUP_V10Q_GT import build_prompt as _build_v10q_prompt  # noqa: E402
+from prompts.PROMPT_SEMSUP_V12_NEUTRAL import build_prompt as _build_v12_prompt  # noqa: E402
 
 DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
 DEFAULT_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "semsup_promptbakeoff.jsonl"
@@ -106,7 +108,24 @@ PROMPTS = {
 # on negatives (recall 0.435->0.38, MATCH 6->4, fabrications 1->2) and was
 # deleted. Do not re-propose a field-name-only prompt split without first
 # checking whether --gt-mode blind alone already resolves the failure.
-TEMPLATE_BUILDERS = {"v10": _build_v10_prompt, "v10q": _build_v10q_prompt}
+def _v12_builder(gt_mode=None, is_positive=None):
+    """Adapter matching build_prompt_for_row()'s calling convention
+    (builder(gt_mode, is_positive=...) or builder('blind')). V12's own
+    build_prompt() takes no arguments BY DESIGN - there is no per-class
+    branch, so gt_mode/is_positive are accepted here and ignored, not
+    threaded through. --gt-mode has no effect on v12; the flag is still
+    accepted on the CLI (default 'blind') so existing runbooks that always
+    pass it don't need a special case."""
+    return _build_v12_prompt()
+
+
+TEMPLATE_BUILDERS = {"v10": _build_v10_prompt, "v10q": _build_v10q_prompt, "v12": _v12_builder}
+# V12_REQUIRED: no verdict/risk_score/confidence/risk_clause in ANY mode - V12
+# never asks the model to judge the scene, only describe it (see the prompt's
+# module docstring for why removing the decision layer is the point).
+V12_REQUIRED = ("caption_neutral", "primary_agent", "agent_motion", "agent_position",
+                 "gap_trend", "evidence_frames", "agent_visible")
+V12_GAP_TREND_VALUES = ("decreasing", "increasing", "constant", "none_visible")
 REQUIRED_KEYS = ("caption_neutral", "risk_clause", "verdict", "confidence")
 # v10/v10q common keys, required in BOTH gt and blind modes - these are what let
 # the scorer compute a "rationalization rate" (agents the GT arm names that the
@@ -374,6 +393,25 @@ def validate_parsed(parsed: dict, prompt_key: str = "v2", gt_mode: str = "blind"
                               f"verdict={parsed['verdict']}, expected={expected_verdict})")
         return (True, "NOTE: " + "; ".join(notes)) if notes else (True, None)
 
+    if prompt_key == "v12":
+        missing = [k for k in V12_REQUIRED if k not in parsed]
+        if missing:
+            return False, f"missing keys: {missing}"
+        if parsed["agent_visible"] not in (True, False, "true", "false", "True", "False"):
+            return False, f"agent_visible not boolean: {parsed['agent_visible']!r}"
+        if parsed["gap_trend"] not in V12_GAP_TREND_VALUES:
+            return False, (f"gap_trend not one of {V12_GAP_TREND_VALUES}: "
+                            f"{parsed['gap_trend']!r}")
+        # Soft check, not a hard failure (same rationale as v5's verdict/score
+        # note): the prompt requires the gap_trend word IN the caption text so
+        # the SigLIP target actually carries the standardized token, not just
+        # the structured field. A response missing it is a real finding worth
+        # surfacing, not silently dropped.
+        gt_word = parsed["gap_trend"]
+        if gt_word != "none_visible" and gt_word not in str(parsed["caption_neutral"]).lower():
+            return True, f"NOTE: gap_trend {gt_word!r} not found verbatim in caption_neutral"
+        return True, None
+
     missing = [k for k in REQUIRED_KEYS if k not in parsed]
     if prompt_key in ("v5", "v9"):
         missing += [k for k in V5_REQUIRED_KEYS if k not in parsed]
@@ -451,7 +489,11 @@ def main():
                           "plus only the evidence-backed insights, no scaffolding fields), "
                           "v10 = PROMPT_SEMSUP_V10_GT (v6-CoT envelope, GT-informed mechanism "
                           "captioning, per-clip template - see --gt-mode), "
-                          "v10q = PROMPT_SEMSUP_V10Q_GT (same schema, Qwen-native envelope)")
+                          "v10q = PROMPT_SEMSUP_V10Q_GT (same schema, Qwen-native envelope), "
+                          "v12 = PROMPT_SEMSUP_V12_NEUTRAL (register-neutral: no GT block, no "
+                          "verdict, closed-vocabulary gap_trend instead of free-text "
+                          "closing_dynamic - fixes the register leak V10 has between classes; "
+                          "--gt-mode is accepted but has no effect)")
     ap.add_argument("--gt-mode", default="blind", choices=["gt", "blind"],
                      help="v10/v10q only. 'gt' injects the manifest row's ground-truth label "
                           "(from 'target' or 'event_occurs') into the prompt and asks the "
@@ -478,7 +520,20 @@ def main():
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--retry-delay", type=float, default=3.0)
     ap.add_argument("--inter-clip-delay", type=float, default=0.0,
-                     help="seconds to sleep between clips, for rate-limit avoidance")
+                     help="seconds to sleep between clips, for rate-limit avoidance. NO-OP "
+                          "under --concurrency > 1 (all requests are submitted up front to "
+                          "the thread pool; this only paced the old strictly-serial loop).")
+    ap.add_argument("--concurrency", type=int, default=4,
+                     help="OpenRouter requests in flight at once. This call is dominated by "
+                          "network round-trip + generation time, not local CPU (measured "
+                          "~11.8s/clip end-to-end, effectively all wait) - same latency-bound "
+                          "shape as the GPU trainer's frame-read bottleneck (see "
+                          "semsup_common.py's prefetch_clips()), so concurrency is the actual "
+                          "speed knob here too. Cost is UNCHANGED by concurrency - OpenRouter "
+                          "bills by tokens processed, not wall-clock time or request count. "
+                          "Start conservative: this account's rate-limit tier is unknown, and "
+                          "too-high concurrency just means more 429s hitting the existing "
+                          "retry/backoff in _call_model rather than a hard failure.")
     ap.add_argument("--limit", type=int, default=0, help="debug: caption only the first N pending rows")
     ap.add_argument("--dry-run", action="store_true",
                      help="print the plan (n pending, estimated tokens) without calling the API")
@@ -506,7 +561,8 @@ def main():
         # a guarantee, check OpenRouter's current rate for the chosen model.
         per_image = 258 if args.detail == "low" else 1750
         prompt_tokens = {"v2": 650, "v3": 950, "v4": 1100, "v5": 1300, "v6": 1900, "v7": 2400,
-                          "v8": 2300, "v9": 800, "v10": 1200, "v10q": 1900}[args.prompt]
+                          "v8": 2300, "v9": 800, "v10": 1200, "v10q": 1900,
+                          "v12": 1050}[args.prompt]  # ~V10 minus the GT/decision block
         est_tokens = len(pending) * (16 * per_image + prompt_tokens)
         effective_gt_mode = args.gt_mode
         gt_note = f" gt-mode={effective_gt_mode!r}" if args.prompt in TEMPLATE_BUILDERS else ""
@@ -566,40 +622,101 @@ def main():
 
     n_ok = n_failed = 0
     t0 = time.time()
-    with open(out_path, "a", encoding="utf-8") as out_f:
-        for idx, row in enumerate(pending, start=1):
-            vid = row["video_id"]
-            frame_dir = frames_root / row["frames_dir"]
-            frame_paths = [frame_dir / f"frame_{i:05d}.jpg" for i in range(1, 17)]
-            missing = [p for p in frame_paths if not p.exists()]
-            if missing:
-                print(f"  [{idx:4d}/{len(pending)}] [SKIP] {vid}: {len(missing)} frame(s) missing "
-                      f"(e.g. {missing[0]})")
-                n_failed += 1
-                continue
 
-            if is_template:
-                try:
-                    row_prompt_text = build_prompt_for_row(args.prompt, args.gt_mode, row)
-                except KeyError as e:
-                    print(f"  [{idx:4d}/{len(pending)}] [FAIL] {vid}: {e}")
-                    n_failed += 1
-                    continue
-            else:
-                row_prompt_text = prompt_text
+    def _fetch_one(row):
+        """Runs on a worker thread: missing-frame check + prompt build + image
+        encode + the OpenRouter API call ONLY. Returns (row, raw_text_or_None,
+        error_message_or_None, usage_dict_or_None). Parsing/validation/
+        out-row-building/writing all stay in the main thread below, unchanged
+        from the old serial code - so file writes are never concurrent and
+        every per-prompt branch (v10/v10q/v12/v2-v9) is exercised exactly as
+        before.
 
-            image_b64s = [_encode_image(p, frame_size=args.frame_size) for p in frame_paths]
-            messages = _build_messages(row_prompt_text, image_b64s, detail=args.detail)
+        `usage` is the real per-call token count OpenRouter returns - real
+        billing data, not an estimate. It was silently discarded before this
+        fix; now it's logged to <out>.usage.jsonl so cost is verifiable after
+        the fact instead of guessed from a stale doc figure (see the
+        2026-08-11 cost-discrepancy discussion: a documented "~$81" estimate
+        for this exact 1,761-window job was explicitly marked
+        "not re-verified against actual billing" and should never have been
+        repeated as if it were confirmed).
 
+        WHY CONCURRENCY HELPS: this call is dominated by network round-trip +
+        the model's generation time, not local CPU (measured ~11.8s/clip
+        end-to-end, effectively all wait) - the same latency-bound shape as
+        the GPU trainer's frame-read bottleneck (semsup_common.py's
+        prefetch_clips()), just against OpenRouter instead of a network disk
+        volume. Concurrent requests overlap that wait instead of paying it
+        once per clip, serially."""
+        vid = row["video_id"]
+        frame_dir = frames_root / row["frames_dir"]
+        frame_paths = [frame_dir / f"frame_{i:05d}.jpg" for i in range(1, 17)]
+        missing = [p for p in frame_paths if not p.exists()]
+        if missing:
+            return row, None, f"{len(missing)} frame(s) missing (e.g. {missing[0]})", None
+
+        if is_template:
             try:
-                raw_text, usage = _call_model(
-                    client, args.model, messages,
-                    timeout=args.timeout, max_retries=args.max_retries,
-                    retry_delay=args.retry_delay, temperature=args.temperature,
-                    max_tokens=args.max_tokens,
-                )
-            except RuntimeError as e:
-                print(f"  [{idx:4d}/{len(pending)}] [FAIL] {vid}: {e}")
+                row_prompt_text = build_prompt_for_row(args.prompt, args.gt_mode, row)
+            except KeyError as e:
+                return row, None, str(e), None
+        else:
+            row_prompt_text = prompt_text
+
+        image_b64s = [_encode_image(p, frame_size=args.frame_size) for p in frame_paths]
+        messages = _build_messages(row_prompt_text, image_b64s, detail=args.detail)
+
+        try:
+            raw_text, usage = _call_model(
+                client, args.model, messages,
+                timeout=args.timeout, max_retries=args.max_retries,
+                retry_delay=args.retry_delay, temperature=args.temperature,
+                max_tokens=args.max_tokens,
+            )
+        except RuntimeError as e:
+            return row, None, str(e), None
+        return row, raw_text, None, usage
+
+    # Real per-call token usage (and $ cost, when OpenRouter includes it in the
+    # response) logged here - verifiable ground truth, not a pre-run estimate.
+    # See the 2026-08-11 discussion: a documented cost figure for this exact
+    # job was never checked against actual billing and shouldn't have been
+    # trusted as one. Sidecar file, not mixed into the caption schema.
+    usage_path = out_path.with_suffix(out_path.suffix + ".usage.jsonl")
+    total_prompt_tok = total_completion_tok = 0
+    total_cost = 0.0
+    have_cost_field = False
+
+    def _cost_str():
+        """Real running totals from OpenRouter's own usage field - shared by
+        every progress print below so the cost story stays consistent instead
+        of being recomputed (and potentially drifting) at each call site."""
+        tok_part = f"tok={total_prompt_tok + total_completion_tok:,}"
+        if have_cost_field:
+            return f"{tok_part} cost=${total_cost:.3f}"
+        return tok_part  # OpenRouter didn't include a cost field on this account/model
+
+    with open(out_path, "a", encoding="utf-8") as out_f, \
+            open(usage_path, "a", encoding="utf-8") as usage_f, \
+            ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
+        # All jobs submitted up front - unlike the GPU prefetch pipeline, no
+        # bounded queue is needed here (no GPU memory to exhaust by having
+        # many results in flight at once); the executor's internal work queue
+        # naturally throttles execution to max_workers concurrent requests.
+        futures = [pool.submit(_fetch_one, row) for row in pending]
+        for idx, fut in enumerate(as_completed(futures), start=1):
+            row, raw_text, fetch_err, usage = fut.result()
+            vid = row["video_id"]
+            if usage:
+                usage_f.write(json.dumps({"video_id": vid, **usage}) + "\n")
+                usage_f.flush()
+                total_prompt_tok += usage.get("prompt_tokens", 0) or 0
+                total_completion_tok += usage.get("completion_tokens", 0) or 0
+                if usage.get("cost") is not None:
+                    have_cost_field = True
+                    total_cost += float(usage["cost"])
+            if fetch_err is not None:
+                print(f"  [{idx:4d}/{len(pending)}] [FAIL] {vid}: {fetch_err}")
                 n_failed += 1
                 continue
 
@@ -654,7 +771,43 @@ def main():
                 n_ok += 1
                 if idx % 25 == 0 or idx == len(pending):
                     print(f"  [{idx:4d}/{len(pending)}] ok={n_ok} failed={n_failed} "
-                          f"({time.time()-t0:.0f}s)")
+                          f"{_cost_str()} ({time.time()-t0:.0f}s)")
+                if args.inter_clip_delay:
+                    time.sleep(args.inter_clip_delay)
+                continue
+
+            if is_template and args.prompt == "v12":
+                # Separate branch from v10/v10q above: field names differ
+                # (primary_agent/agent_motion/agent_position/gap_trend/
+                # agent_visible, not hazard_*/closing_dynamic/
+                # mechanism_visible) and there is no verdict/risk_score/
+                # confidence/risk_clause/gt_label at all - falling through to
+                # the v10 branch or the v2-v9 writer below would KeyError or
+                # silently drop these fields.
+                out_row = {
+                    "video_id": vid,
+                    "frames_dir": row.get("frames_dir"),  # see row_resume_key()
+                    "horizon_label": row.get("horizon_label"),
+                    "event_occurs": row.get("event_occurs"),
+                    "t_seconds": row.get("t_seconds"),
+                    "requested_time_to_event": row.get("requested_time_to_event"),
+                    "caption_neutral": parsed["caption_neutral"],
+                    "primary_agent": parsed["primary_agent"],
+                    "agent_motion": parsed["agent_motion"],
+                    "agent_position": parsed["agent_position"],
+                    "gap_trend": parsed["gap_trend"],
+                    "evidence_frames": parsed["evidence_frames"],
+                    "agent_visible": parsed["agent_visible"],
+                }
+                for k in OPTIONAL_COT_KEYS:  # scene_context/dynamic_objects/temporal_analysis
+                    if k in parsed:
+                        out_row[k] = parsed[k]
+                out_f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+                out_f.flush()
+                n_ok += 1
+                if idx % 25 == 0 or idx == len(pending):
+                    print(f"  [{idx:4d}/{len(pending)}] ok={n_ok} failed={n_failed} "
+                          f"{_cost_str()} ({time.time()-t0:.0f}s)")
                 if args.inter_clip_delay:
                     time.sleep(args.inter_clip_delay)
                 continue
@@ -721,7 +874,7 @@ def main():
             n_ok += 1
             if idx % 25 == 0 or idx == len(pending):
                 print(f"  [{idx:4d}/{len(pending)}] ok={n_ok} failed={n_failed} "
-                      f"({time.time()-t0:.0f}s)")
+                      f"{_cost_str()} ({time.time()-t0:.0f}s)")
 
             if args.inter_clip_delay:
                 time.sleep(args.inter_clip_delay)
@@ -730,6 +883,14 @@ def main():
     print("=" * 70)
     print(f"DONE. ok={n_ok} failed={n_failed} wall={time.time()-t0:.0f}s")
     print(f"Output: {out_path}")
+    print(f"Usage this run: {_cost_str()}  ->  {usage_path}")
+    if have_cost_field and n_ok:
+        print(f"  (real avg cost/clip this run: ${total_cost/n_ok:.4f} - "
+              f"this is billing data from OpenRouter, not an estimate)")
+    elif n_ok:
+        print(f"  (OpenRouter did not include a 'cost' field for this model/account - "
+              f"only token counts are verifiable from the API response; check the "
+              f"OpenRouter dashboard directly for exact $ spent)")
     if n_failed:
         print(f"NOTE: {n_failed} rows failed/skipped - re-run this exact command to retry them "
               f"(resumable: already-captioned video_ids are skipped).")

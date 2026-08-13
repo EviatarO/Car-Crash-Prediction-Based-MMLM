@@ -210,15 +210,49 @@ class TrainableBadasWrapper:
         self.lora_enabled = lora_target_modules is not None
         if self.lora_enabled:
             from peft import LoraConfig, get_peft_model
+
+            # peft accepts EITHER a list of name-substrings OR a single regex string.
+            # Plain substrings are dangerous on this model: "query,key,value" matches
+            # 108 Linears, not the 72 intended - 72 under backbone.encoder.layer.{0-23}
+            # (wanted) plus 36 under backbone.predictor.layer.{0-11}, the V-JEPA2
+            # latent-forecast head used during SSL pretraining and NOT part of the
+            # classification path. That is 442,368 of 2,801,664 LoRA params (15.8%)
+            # either receiving no gradient at all or adapting a module irrelevant to
+            # the crash task. Passing a regex scopes it to the encoder stack.
+            targets = lora_target_modules
+            if isinstance(targets, str):
+                print(f"  [wrapper] LoRA target regex: {targets}")
             cfg = LoraConfig(
                 r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias="none",
-                target_modules=lora_target_modules,
+                target_modules=targets,
             )
             self.nn_model = get_peft_model(self.nn_model, cfg)
             trainable = sum(p.numel() for p in self.nn_model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.nn_model.parameters())
+
+            # Report WHERE the adapters landed, not just how many there are. The bare
+            # count cannot distinguish "72 encoder modules" from "72 encoder + 36
+            # predictor", which is exactly the ambiguity that hid the 15.8% above.
+            from collections import Counter
+            hit = Counter()
+            for name, _ in self.nn_model.named_modules():
+                if name.endswith("lora_A.default"):
+                    base = name.split(".lora_A")[0]
+                    if ".encoder.layer." in base:
+                        hit["backbone.encoder"] += 1
+                    elif ".predictor.layer." in base:
+                        hit["backbone.predictor"] += 1
+                    else:
+                        hit["other"] += 1
             print(f"  [wrapper] LoRA applied: trainable={trainable:,} / total={total:,} "
                   f"({100*trainable/total:.2f}%)")
+            print(f"  [wrapper] adapters by stack: {dict(hit)}")
+            if hit.get("backbone.predictor"):
+                print(f"  [wrapper] NOTE: {hit['backbone.predictor']} adapters are on the "
+                      f"V-JEPA2 predictor (latent-forecast) stack, not the encoder. "
+                      f"Pass a regex like "
+                      f"r'backbone\\.encoder\\.layer\\.\\d+\\.attention\\.(query|key|value)' "
+                      f"to scope them out.")
             if trainable == 0:
                 raise RuntimeError(
                     f"LoRA target_modules={lora_target_modules} matched ZERO parameters. "
@@ -231,12 +265,78 @@ class TrainableBadasWrapper:
 
     def forward(self, frame_paths: list):
         clip = self._preprocess_clip(self.vjepa, frame_paths).to(self.device)
+        return self.forward_clip(clip)
+
+    def forward_clip(self, clip):
+        """Run the model on an ALREADY-preprocessed clip tensor (moved to
+        self.device by the caller). Split out of forward() so a prefetch
+        pipeline (see prefetch_clips()) can do the preprocessing - file read +
+        JPEG decode + resize/normalize - in background threads while the GPU
+        works on the previous window's forward_clip() call, instead of doing
+        preprocessing and GPU compute serially for every window.
+
+        WHY THIS MATTERS (measured 2026-08-11 on a real pod via direct
+        profiling, not inferred from utilization graphs): per window, raw file
+        read = ~670ms, +decode/resize = ~503ms, +GPU forward = ~0ms
+        (unmeasurable above noise). Preprocessing is ~100% of per-window wall
+        time on a slow network volume; GPU compute is negligible by
+        comparison. Overlapping decode with GPU compute alone (the originally
+        planned fix) would therefore buy almost nothing - the actual fix is
+        PARALLELIZING the I/O itself across multiple threads, which is what
+        prefetch_clips() does."""
         self._captured.clear()
         logits = self.nn_model(clip)                    # (1, 2) - grads flow if LoRA on
         patches = self._captured.get("patches")
         if patches is None:
             raise RuntimeError("probe pre-hook did not fire - tap point is wrong.")
         return logits, patches[0]                        # (1,2), (P, D)
+
+    def prefetch_clips(self, examples, num_workers=8, prefetch=16, key="frame_paths"):
+        """Yields (i, ex, clip_or_None, error_or_None) in ORDER over `examples`,
+        with `num_workers` background threads doing preprocessing (file read +
+        decode + resize) concurrently, `prefetch` windows ahead of what the
+        caller has consumed.
+
+        WHY THREADS GIVE REAL CONCURRENCY DESPITE THE GIL: file I/O (open/
+        read) and PIL's JPEG decompression both release the GIL during their
+        C-level work, so ThreadPoolExecutor gives genuine wall-clock
+        concurrency here even though CPython can't parallelize pure-Python
+        bytecode. This is not multiprocessing and needs no pickling/IPC
+        overhead.
+
+        ERROR HANDLING matches the caller's existing per-window try/except
+        (OSError, RuntimeError): continue contract exactly - a failed window
+        yields (i, ex, None, exc) instead of raising, so one bad frame can't
+        kill the whole prefetch pipeline or silently desync the futures dict."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _one(ex):
+            try:
+                return self._preprocess_clip(self.vjepa, ex[key]), None
+            except (OSError, RuntimeError) as e:
+                return None, e
+
+        n = len(examples)
+        if num_workers <= 0:
+            # Debugging escape hatch: fully serial, no thread pool at all -
+            # exactly the old inline behavior, for isolating whether a bug is
+            # in the pipeline itself vs. the underlying preprocessing/model.
+            for i, ex in enumerate(examples):
+                clip, err = _one(ex)
+                yield i, ex, clip, err
+            return
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {}
+            next_submit = 0
+            for i in range(min(prefetch, n)):
+                futures[i] = pool.submit(_one, examples[i])
+                next_submit = i + 1
+            for i in range(n):
+                clip, err = futures.pop(i).result()
+                if next_submit < n:
+                    futures[next_submit] = pool.submit(_one, examples[next_submit])
+                    next_submit += 1
+                yield i, examples[i], clip, err
 
 
 def dry_run_modules(cfg_path: str, out_path: str):

@@ -558,3 +558,120 @@ the public checkpoint was domain-locked to emotional-speech captions and unusabl
 Decoder de-risked (0.457 ≈ 2× the accepted-student bar). **But no video-side Predictor was
 ever built for this route** — it would need to map video features into EmbeddingGemma space,
 mirroring the Predictor now used against SigLIP. Paused.
+
+---
+
+## B_1761 parallel — InfoNCE semantic-aux vs crash-only, matched init (on the V10 corpus)
+- Config: from-scratch LoRA (not continued from A1's checkpoint, unlike the earlier sequential
+  attempt), same seed=0 as A1_1761, same recipe (`query,key,value`, constant LR, dropout 0.05),
+  `--semantic-weight 0.05 --semantic-loss infonce`, V10 corpus (`Caption_Train4500_Mixed_1761
+  .jsonl`, GT-informed/blind branch prompt).
+- Result: test_AP=0.8901, AUC=0.8955, vs A1_1761's test_AP=0.900, AUC=0.904.
+- Paired bootstrap (677 test clips, per-clip scores): ΔAP = A1 − B = **+0.0105**, 95% CI
+  [0.0040, 0.0173] (excludes zero) — **B is significantly worse than A1**, not noise.
+- Caveat found later (see `/project-review` below): this result is confounded by corpus label
+  leakage and should not be read as "semantic supervision doesn't help" without qualification.
+
+## `/project-review` audit (2026-08-08)
+- Full ML+code review of the semantic-supervision thread, triggered by the B_1761-parallel
+  negative result.
+- **Key finding**: TF-IDF (1-2gram, min_df≥3) + LogisticRegression, 5-fold GroupKFold by
+  `video_id`, predicting the crash label from V10 caption text alone → **AUC=0.9643**. The V10
+  corpus's caption text alone is a near-perfect proxy for the label — driven by the GT-informed
+  vs. blind prompt branch producing systematically different vocabulary by class, not by
+  semantic content per se.
+- Secondary finding: `semsup_b1_probe.py`'s `evaluate()` selects checkpoints on cosine loss even
+  when `--loss infonce` is passed — the B1_1761 probe's selected checkpoint
+  (`predictor_b1_ep028.pt`) is not actually the best one by the metric that matters
+  (`val_retrieval_top1_acc_clip`: 0.1086 selected vs 0.1267 available at epoch 43). Not yet
+  fixed; low priority since B-v2 doesn't warm-start from this checkpoint.
+- Report: `reports/project_reviews/2026-08-08_project_review.md` (gitignored, not in repo
+  history).
+
+## A1-v2 — full pool + cosine LR + encoder-only LoRA + dropout 0.10
+- Config: full 4,446-window pool (natural 13.2% hard-example distribution, built via
+  `build_pool_from_manifest.py` with placeholder captions — crash-only, `--semantic-weight 0`),
+  `--lr-schedule cosine --warmup-frac 0.05`, `re:`-regex encoder-only LoRA target modules (72
+  adapters, vs A1_1761's 108 encoder+predictor), `--lora-dropout 0.10`, seed=0, 12 epochs
+  planned, resumed mid-run after the I/O fix (epochs 1-2 pre-fix at ~97-102 min/epoch, epochs
+  3+ post-fix at 15-20 min/epoch).
+- Result (test_AP by checkpoint):
+
+  | Epoch | val_ap | test_AP |
+  |---|---|---|
+  | selected (by val) | — | 0.868 |
+  | 6 (best test, not selected) | — | 0.888 |
+  | A1_1761 reference | — | **0.900** |
+
+  Even the single best test-set checkpoint across all 12 epochs (0.888) did not beat A1_1761's
+  0.900. Val-based checkpoint selection also picked a worse-on-test checkpoint than epoch 6 —
+  flagged as a val/test selection-rule mismatch, not fixed (small-val-set noise, expected at
+  this scale).
+- Verdict: **negative result, recipe/pool bundle not adopted.** Root cause not isolated — could
+  be the natural (non-enriched) pool distribution, could be the recipe bundle (cosine LR /
+  dropout / encoder-only), could be both. Deprioritized in favor of the core B-vs-A1 test — see
+  DECISIONS.md.
+- Outputs: `outputs/e4_vjepa_reason/a1_v2_full/{train_metrics.json, test_summary.json,
+  epoch_metrics.jsonl}` (pulled locally).
+
+## I/O bottleneck diagnosis + fix (infrastructure, not a model experiment)
+- Direct on-pod profiling over 20 real windows: raw file read = 670ms/window, +decode/resize =
+  503ms/window (total ~1.17s/window), +GPU forward = ~0ms (unmeasurable against the I/O cost).
+- Fix: `TrainableBadasWrapper.prefetch_clips()` concurrent pipeline (see ARCHITECTURE.md).
+- Verified via isolated pod benchmark: workers=0 (serial) vs 8 vs 16 → **5.3× speedup at 8
+  workers**. Verified via live resumed A1-v2 run: epochs 1-2 (pre-fix) ~97 min avg → epoch 3
+  (post-fix) 15.5s... i.e. 929.4s = 15.5 min → **6.3× speedup**, GPU utilization 24-33% → 83-94%.
+
+## Captioning concurrency fix + real cost logging (infrastructure)
+- Serial baseline: 11.8s/clip. At `--concurrency 16`: ~1s/clip. **~12× speedup.**
+- Cost: verified cost-neutral (OpenRouter bills per-token processed, not per-request or
+  wall-clock; confirmed via the `usage` field in real API responses, now logged to
+  `<out>.usage.jsonl` instead of discarded).
+- Real logged cost for the post-fix portion of the V12 1,761-window recaption: 900 calls,
+  $32.758 tokens + $0.058 other = **$32.82 tracked** (the pre-fix portion of the run, ~861
+  calls, was not covered by the usage-logging fix since it predates it — total real spend for
+  the full V12 run is not fully reconstructable from logs, only the post-fix tail).
+
+## V12 neutral prompt — leakage-gate validation cascade
+Three stages, increasing scale/rigor, run in sequence with an explicit stop/go decision at each:
+
+| Stage | n | Design | Result | Verdict |
+|---|---|---|---|---|
+| Leakage judge, val18 | 18 | Text-only judge (fresh context, captions only) predicts crash/no-crash | 12/18 = 66.7% correct | p≈0.12 (one-sided exact binomial vs chance) — **not significant** |
+| Leakage judge, val18+82 | 100 | Same judge, +82 balanced fresh-sampled clips (`sample_val_check_clips.py`, seed=0, excludes val18's video_ids) | 72/100 = 72.0% correct | p<0.0001 — **real, significant residual leakage** |
+| Full-corpus TF-IDF gate | 1,761 | TfidfVectorizer(1,2-gram)+LogisticRegression, GroupKFold(5) by video_id, `caption_neutral` vs `event_occurs` | **AUC=0.7640** (target <0.75) | **Narrow miss** (0.014 over target); reduction vs V10's 0.9643 = 43% cut in excess-over-chance signal (i.e. (0.9643−0.5) → (0.7640−0.5)) |
+
+- Residual-leak source (TF-IDF coefficient inspection on the n=100 sample): driven by genuine
+  kinematic vocabulary (`braking` +0.957 strongest coefficient, `decreasing gap`, `path
+  closing`) — physically real correlates of the crash label, not register violations. **0/100
+  and 0/18 banned-word violations found** — V12's word bans worked completely; the residual
+  signal is a different phenomenon (physics correlation) that prompt engineering alone likely
+  can't remove without degrading caption accuracy.
+- User's decision (via AskUserQuestion): **accept the near-miss, proceed to full recaption +
+  B-v2, report the residual leak honestly.**
+- Outputs: `outputs/prompt_bakeoff/semsup_val18_neutral/{raw_v12_gemini.jsonl,
+  raw_v12_extra82.jsonl, review_val18_neutral.xlsx, summary.md, leakage_judge_n100.md}`.
+
+## V12 full recaption (1,761 windows)
+- Ran `semsup_caption_promptbakeoff.py --prompt v12 --concurrency 16` over the full pool
+  (`dataset/manifests/recap_v12_1761.jsonl`).
+- Verified: 1,761 distinct `frames_dir` (no duplicates/dropped rows), all captions ≤40 words,
+  all `gap_trend` values from the closed vocabulary, label balance 905/856 — matches the
+  original V10 pool's balance exactly (same underlying clip set, different caption text).
+- Output: `outputs/semantic_captions/Caption_V12_Neutral_1761.jsonl` (raw schema) +
+  `..._fortrain.jsonl` (with `caption`/`gt_verdict` aliases added for `load_training_examples`
+  compatibility) + `.usage.jsonl` (cost sidecar, post-fix portion only).
+
+## B-v2 — InfoNCE semantic-aux vs crash-only, matched init, on the corrected V12 corpus
+- Config: from-scratch LoRA, seed=0, A1_1761's exact recipe (`query,key,value`, constant LR,
+  dropout 0.05, grad-accum 8, 8 epochs), `--semantic-weight 0.05 --semantic-loss infonce
+  --infonce-tau-init 0.07`, captions = `Caption_V12_Neutral_1761_fortrain.jsonl`.
+- Status: **launched, in progress.** Confirmed correct at construction: trainable params
+  2,801,664/334,355,842 (0.84%), adapters by stack `{'backbone.encoder': 72,
+  'backbone.predictor': 36}` — matches A1_1761 exactly. Data loaded correctly: 1,761/1,761
+  examples (0 skipped), train=1413/val=348 (matches A1_1761's split), InfoNCE caption banks
+  built (train=(1413,768), val=(348,768)).
+- Result: **pending** — this is the decisive experiment for the thesis's core question. Compare
+  final test_AP against A1_1761's 0.900 via paired bootstrap (677-clip per-clip scores) once
+  finished.
+- Output dir: `/workspace/semsup/b_v2_1761/`, log `/workspace/semsup/b_v2_1761_train.log`.

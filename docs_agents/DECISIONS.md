@@ -151,7 +151,85 @@
   it reports the network filesystem's cluster-wide free space, not the account/volume-specific
   quota that actually governs writes. A live test write is the only reliable check.
 
+### Mixed-pool training fix (2026-08-02 – 06)
+- **Two separate prompts (V11: positive-only GT with `hazard_*` fields, negative-only blind
+  with neutral field names) to fix negative-clip fabrication** → rejected 2026-08-04: the
+  fabrication was caused by the GT-block instruction pressuring the model to nominate a hazard
+  on a "no collision" clip, not by the shared `hazard_*` field naming. V10's existing blind
+  mode had already produced the correct `agent: None` answer on the exact clip that motivated
+  V11. Built, tested, measured worse (negative recall 0.38 vs 0.435), and deleted same day.
+  **General lesson, saved to memory**: before building a new configuration to fix an observed
+  failure, check whether an existing, cheaper configuration already avoids it, and identify the
+  specific causal mechanism before designing the fix.
+- **Train A1/B on only the 587 A0-failure windows** → rejected after real measurement:
+  test_AP=0.333, AUC=0.163 (anti-correlated). Diagnosed as inversion (frozen head + adversarial-
+  only training data), not plain overfitting — AUC below 0.5, not converging toward it, is the
+  tell. Fixed by mixing in 1,174 A0-correct windows (2:1 correct:hard). See PROJECT_STATE.md /
+  ARCHITECTURE.md for the full mechanism.
+- **Warm-start B_1761's Predictor from the OLD `b1_infonce` checkpoint (trained on the 267-row
+  pool)** → rejected 2026-08-06: that checkpoint's own training clips overlap 13/221 with the
+  new 1,761-pool's val split (different pool, different split, coincidental clip reuse) — would
+  contaminate val-based checkpoint selection. Also caption-style mismatch (that checkpoint
+  learned on old rephrased-teacher-reasoning captions, not the new V10 vision-grounded style).
+  Trained a fresh `b1_1761_infonce` on the exact pool/split B_1761 uses instead — zero overlap
+  by construction, and it shows *stronger* signal at the new scale anyway (32×/24× chance vs.
+  the old checkpoint's ~4×).
+- **Reuse `--semantic-weight 0.3` (the value tuned for cosine) when switching to InfoNCE** →
+  rejected: cosine's loss magnitude is ~0.13, InfoNCE's is ~log(N)≈5-7 — reusing 0.3 would make
+  the semantic term ~20-40× more dominant than the crash loss, testing "does an overwhelming
+  semantic loss wreck crash performance" instead of "does semantic supervision help." Recomputed
+  λ=0.05 to land the semantic term at roughly a third of the crash-loss magnitude instead.
+
+### I/O speed fix, A1-v2, and the V12 leakage fix (2026-08-08 – 11)
+- **Adopt A1-v2's recipe bundle (full 4,446-window pool, cosine LR, encoder-only LoRA, dropout
+  0.10) as the new standard** → rejected: underperformed A1_1761 on the real metric that
+  matters (test_AP 0.868-0.888 best case vs A1_1761's 0.900). Root cause (pool distribution vs.
+  recipe bundle) not isolated — deprioritized rather than chased further, since the core B-vs-A1
+  question was the higher-value target. A1_1761's original recipe remains the reference control
+  for all future comparisons.
+- **Infer the training bottleneck's cause from GPU-utilization graphs alone** → rejected: a
+  utilization graph shows the symptom (24-33% GPU busy), not the cause. Required direct
+  phase-by-phase profiling (raw read / decode+resize / GPU forward, timed separately over 20
+  real windows) before writing any fix — confirmed I/O+CPU-bound, not GPU-bound, with numbers
+  (670ms/503ms/~0ms), not a guess.
+- **Trust the $81-total captioning-cost figure in the planning doc as verified** → rejected
+  2026-08-10, after the user pushed back with a real remembered paid amount (~$35 for the first
+  round) that didn't reconcile. The doc figure was explicitly marked "not re-verified against
+  actual billing" and had never actually been checked against OpenRouter's real per-call `usage`
+  data (which was being silently discarded at the time). Root-caused: no hidden billed-failures
+  explained the gap (only 1/897 failures was a real billed BAD-JSON; the rest were free 402
+  pre-generation rejections) — the real, owned mistake was ~64 overlapping clips re-captioned
+  across 4 separate concurrency-benchmark test runs (per-output-file resume-skip doesn't dedupe
+  across different output files), wasting ~$2-3. Fixed the class of problem, not just this
+  instance, by adding real per-call usage/cost logging (`<out>.usage.jsonl`) so all future cost
+  claims are measured, not estimated.
+- **Keep the V10 prompt's GT-informed/blind branch and try to patch the leak with tighter word
+  bans** → rejected: the `/project-review` audit found the leak's dominant driver was the branch
+  itself (two different prompt registers by class), not lexical slip-ups within one register —
+  V10 already had an outcome-word ban and still leaked at AUC=0.9643. V12 removes the branch
+  entirely (`build_prompt()` takes no `gt_mode`/`is_positive` args) rather than adding more bans
+  to a structurally leaking design.
+- **Treat V12's AUC=0.7640 (vs <0.75 target) as an outright fail and iterate further before
+  training anything** → considered, but user chose (via AskUserQuestion) to accept the narrow
+  miss and proceed to B-v2, given: (a) the residual signal was traced to genuine kinematic
+  vocabulary (`braking`, `decreasing gap`), not lexical leakage (0/100 banned-word violations),
+  so further prompt engineering has uncertain further payoff without hurting caption accuracy;
+  (b) a 43% reduction in excess-over-chance signal is a real, reportable improvement regardless
+  of whether B-v2's result is decisive.
+
 ## Unresolved design questions
+
+- **Does InfoNCE semantic supervision (B) beat crash-only LoRA (A1) on the 1,761-window mixed
+  pool?** **Partially resolved 2026-08-08, reopened same day.** Sequential design: no benefit
+  (test_AP 0.897 vs 0.900). Parallel design (fresh matched-init, λ/loss the only difference) DID
+  run: test_AP=0.8901 vs A1_1761's 0.900, paired bootstrap ΔAP=0.0105, 95% CI [0.0040, 0.0173]
+  — B is significantly *worse*. But the `/project-review` audit found the V10 caption corpus
+  leaks the label (text-only AUC=0.9643), so this result can't be trusted as a clean answer —
+  a redundant, label-correlated auxiliary loss could plausibly hurt for reasons unrelated to
+  whether real semantic grounding would help. **Reopened, now pending B-v2**: same parallel
+  design, same corpus except captioned with the register-neutral V12 prompt (residual leak
+  AUC=0.7640, down from 0.9643). B-v2 is running now — see PROJECT_STATE.md/EXPERIMENTS.md.
+  This is the answer that will actually resolve the question.
 
 - **Why does the frozen A0 scorer do notably better on train (13.2% error, n=4,446) than on
   the known 677-clip test set (23.6% error)?** Confirmed real and stable at full scale
@@ -178,20 +256,15 @@
   rephrase-only baseline," decided on ~300 clips before any 4.5k-scale spend.
 - **How to fix checkpoint selection** → **Resolved 2026-07-25 (T-3)**: per-clip aggregation,
   not a fixed-epoch rule. See the "Trust val_ap" entry above.
-- **Does the semantic-aux loss beat crash-only LoRA on AP at a data scale where it could?**
-  Still the central question, and now sharper: at n=267 with the (broken) cosine objective the
-  answer was "not measurable" — B1 showed no video↔caption alignment above chance, and B added
-  ~3.5× the checkpoint variance of A1 without a mean shift. T-2's bootstrap CI confirms that
-  n=267 A1-vs-B gap is noise under the cosine objective (see EXPERIMENTS.md). **Still genuinely
-  open**: B1-InfoNCE now shows real video↔caption alignment exists at n=267 (see EXPERIMENTS.md)
-  — but Stage B (the actual crash-prediction LoRA run) still uses the cosine loss;
-  `semsup_train.py` was never given the `--loss infonce` option (noted as A-5 in the 2026-07-25
-  review, blocked on a batching prerequisite). So the open question is now: does porting
-  InfoNCE into Stage B, and/or the frame-grounded caption experiment above, actually move crash
-  AP — neither has been tested yet.
+- (Historical framing of "does semantic-aux beat crash-only," n=267/cosine era — **superseded**,
+  see the new entry above this list: InfoNCE is now ported into Stage B and tested at n=1,761;
+  the open question is now specifically "parallel vs sequential," not "is InfoNCE even wired up.")
 - **LoRA target_modules (`query,key,value`) match both the 24 encoder layers AND the 12
-  V-JEPA2 predictor-layer attention blocks** (same substring, both under `backbone`). Not
-  decided whether to restrict to encoder-only via a more specific path pattern.
+  V-JEPA2 predictor-layer attention blocks** (same substring, both under `backbone`).
+  **Resolved 2026-08-09/10**: a `re:<regex>` prefix on `--lora-target-modules` now supports
+  encoder-only targeting (72 vs 108 adapters) as an alternative to the legacy comma-list. Not
+  used as the new default — A1_1761's original 108-module recipe remains the reference control
+  (see A1-v2 entry below); the regex option exists for whoever wants to isolate the effect.
 - **Thesis framing if the result stays null**: report a well-controlled negative result as a
   contribution (defensible — no prior art tests this exact train-only-language /
   vision-only-inference regime in crash anticipation), or treat the literature gap as a signal
@@ -200,13 +273,9 @@
   MMLM/outputs/checkpoints/`: `e2_lora_100clips` (4.4G), `e3a_lora_89clips` (832M),
   `e3b_lora_267clips` (704M) exist **only** on that volume — verified NOT on HF Hub (only
   `e3a-epoch7-lora` and `e3b-ep3-lora` are). Not deleted pending explicit confirmation.
-- **Which teacher/prompt should caption the production set?** **Reframed 2026-08-01**: no
-  longer "pick from the 18-clip bake-off candidates" (that screen turned out underpowered to
-  rank anything — see the "Continue iterating" rejection above). Now: the train4500-inference
-  taxonomy (EXPERIMENTS.md) decides uniform-vs-failure-targeted allocation directly from real
-  A0 scoring, sidestepping the teacher-choice question for the *scoring* signal entirely — the
-  captioning teacher/prompt choice for the *language* signal is still separately open, but
-  lower priority until the allocation question is settled.
+- **Which teacher/prompt should caption the production set?** **Resolved 2026-08-02**: Gemini
+  3.6 Flash + `PROMPT_SEMSUP_V10_GT`, hybrid mode (GT on positives, blind on negatives) — see
+  EXPERIMENTS.md's bake-off. Used for all 1,761 captioned windows so far.
 - **Is the teacher-model conservative bias fixable by prompt engineering, or does it need a
   different decision structure?** **Partially answered 2026-08-01**: 6 more prompt structures
   (V5-V9, spanning risk-score, kinematic decomposition, ego-frame separation, narrative
@@ -222,3 +291,20 @@
   difference between the two pools. Pipeline mechanics checked and ruled out as the cause
   (byte-identical extraction verified). Chunks 1-2, once scored, will show whether this holds
   at 3× the sample or was a chunk-0-specific artifact of which 500 videos landed there.
+- **Does B-v2 (InfoNCE on the V12 corrected corpus) beat A1_1761?** Open, pending the run in
+  progress — this is now the decisive experiment for the thesis's central question. See
+  PROJECT_STATE.md for how to check status and EXPERIMENTS.md for the exact comparison method
+  (paired bootstrap, 677 test clips) once it finishes.
+- **Is A1-v2's underperformance driven by the natural (non-enriched) pool distribution, the
+  recipe bundle (cosine LR / dropout 0.10 / encoder-only LoRA), or both?** Not isolated —
+  deprioritized in favor of B-v2. Whoever revisits pool-scaling should ablate these separately
+  rather than re-running the same bundled config.
+- **Is V12's residual leak (AUC=0.7640) removable by further prompt work, or is it an inherent
+  floor once captions are kinematically accurate?** Open. The diagnosis (genuine `braking`/
+  `decreasing gap` vocabulary, not register violations) suggests a floor, but this wasn't tested
+  by trying a V13 that also normalizes kinematic phrasing — not attempted, not clearly worth the
+  cost given B-v2 is already running on V12.
+- **Should `semsup_b1_probe.py`'s checkpoint-selection bug (selects on cosine loss even under
+  `--loss infonce`) be fixed?** Found by `/project-review`, not fixed. Low priority — B-v2
+  doesn't warm-start from any B1 probe checkpoint — but anyone reusing that script for a fresh
+  InfoNCE probe should fix `evaluate()` to select on `val_retrieval_top1_acc_clip` first.

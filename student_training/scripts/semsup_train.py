@@ -59,39 +59,6 @@ from e4_stageA_badas_open_eval import load_manifest, frame_paths_for  # noqa: E4
 from metrics_core import metrics_from_arrays  # noqa: E402
 
 
-def evaluate_crash_ap(badas, examples, device):
-    """AP computed per CLIP, not per row. `examples` are TTE windows of the
-    same clip and share one label (verified: every clip in the caption set is
-    single-label across its TTE variants), so scoring per row and computing AP
-    over 51 correlated rows silently inflates AP - the real independent
-    sample size is ~17 clips, not 51 rows (see EXPERIMENTS.md's val-split
-    diagnostic: val_ap saturated at 0.96-0.98 and ranked checkpoints in the
-    OPPOSITE order from test_AP). Aggregate (mean) a clip's row scores into
-    one point before computing AP. Applies identically to A1 and B, since
-    both call this same function - no arm-specific tuning."""
-    badas.nn_model.eval()
-    from collections import defaultdict
-    by_clip = defaultdict(list)
-    with torch.no_grad():
-        for ex in examples:
-            logits, _ = badas.forward(ex["frame_paths"])
-            score = float(torch.softmax(logits, dim=1)[0, 1].item())
-            by_clip[ex["video_id"]].append((score, ex["label"]))
-    ys, yt = [], []
-    for pairs in by_clip.values():
-        scores = [s for s, _ in pairs]
-        labels = {l for _, l in pairs}
-        # Verified empirically every clip is single-label across its TTE
-        # windows; majority-vote as a defensive fallback rather than crash if
-        # that ever stops holding (e.g. a future mixed-label caption source).
-        label = next(iter(labels)) if len(labels) == 1 else round(sum(l for _, l in pairs) / len(pairs))
-        ys.append(sum(scores) / len(scores))
-        yt.append(label)
-    if len(set(yt)) < 2:
-        return float("nan")
-    return average_precision_score(yt, ys)
-
-
 def build_caption_bank(examples, siglip_model, siglip_tok, device, batch=64):
     """Precompute the frozen SigLIP embedding for every example's caption, once.
 
@@ -143,34 +110,57 @@ def infonce_from_bank(pred, anchor_idx, bank, vids, log_tau):
     return F.cross_entropy(logits.unsqueeze(0), label)
 
 
-def evaluate_val_loss(badas, examples, device, predictor, siglip_model, siglip_tok,
-                       semantic_weight, semantic_loss="cosine", val_bank=None,
-                       val_vids=None, log_tau=None):
-    """Mirrors the training step's loss computation (crash CE + semantic_weight *
-    semantic loss), no gradient, averaged per-window over `examples`.
-    Added so train_loss vs val_loss can be compared per epoch (see epoch_metrics.jsonl)
-    to spot overfitting directly, rather than relying on val_ap alone - val_ap only
-    tells you ranking quality, not whether the model has started memorizing train
-    windows while val loss climbs. Same aggregation level (per-row, not per-clip) as
-    the training loop's own loss accounting, so train_loss and val_loss are
-    comparable on a like-for-like basis.
+def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
+                 siglip_tok=None, semantic_loss="cosine", val_bank=None,
+                 val_vids=None, log_tau=None):
+    """ONE pass over the val set -> (val_ap, val_crash_loss, val_sem_loss, n_failed).
 
-    For semantic_loss='infonce' the val bank is the VAL set's own captions, so val
-    InfoNCE is contrasted against val-internal negatives - the analogue of what the
-    train loss does, and it keeps the two numbers on the same scale (both are
-    -log(1/N)-bounded, though note N differs between train and val, so compare the
-    TREND across epochs rather than the absolute train-vs-val difference for
-    infonce)."""
+    Replaces the old evaluate_crash_ap + evaluate_val_loss pair. Each of those ran a
+    FULL ViT-L forward over every val window, and the second returned a strict
+    superset of the first's work - ~7% of every epoch spent recomputing something
+    already computed 30 seconds earlier.
+
+    Merging also closes a real failure mode: evaluate_crash_ap had NO per-clip error
+    handling while the training loop and evaluate_val_loss both did. A single
+    truncated JPEG on the val volume therefore killed the process *after* a full
+    epoch of training and *before* the checkpoint was written - losing the epoch
+    outright. Both concerns now share one guarded loop and one failure counter.
+
+    AP is per CLIP, not per row: `examples` are TTE windows of the same clip sharing
+    one label, so computing AP over correlated rows silently inflates it (see
+    EXPERIMENTS.md's val-split diagnostic - row-level val_ap saturated at 0.96-0.98
+    and ranked checkpoints in the OPPOSITE order from test_AP). Losses stay per-row,
+    matching the training loop's own accounting so train/val are like-for-like.
+
+    For semantic_loss='infonce' the val bank is the VAL set's own captions, keeping
+    val InfoNCE the analogue of the train term. Note N differs between train and val,
+    so compare the TREND across epochs, not the absolute train-vs-val difference.
+    """
     badas.nn_model.eval()
     if predictor is not None:
         predictor.eval()
-    total_crash, total_sem, n = 0.0, 0.0, 0
+    from collections import defaultdict
+    by_clip = defaultdict(list)
+    total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
     with torch.no_grad():
-        for i, ex in enumerate(examples):
-            try:
-                logits, patches = badas.forward(ex["frame_paths"])
-            except (OSError, RuntimeError):
+        # Same prefetch pipeline as the training loop - see
+        # TrainableBadasWrapper.prefetch_clips()'s docstring. `i` is the
+        # position in `examples` (identical to enumerate(examples)'s i, since
+        # val_ex is never shuffled), so the InfoNCE _bank_idx fallback below
+        # is unaffected by switching from enumerate() to this generator.
+        for i, ex, clip, err in badas.prefetch_clips(examples, num_workers=8, prefetch=16):
+            if err is not None:
+                n_failed += 1
+                print(f"  [warn] val: skipping {ex.get('video_id')} "
+                      f"(tte={ex.get('tte')}): {err}")
                 continue
+            logits, patches = badas.forward_clip(clip.to(device))
+
+            # --- ranking signal (per clip) ---
+            score = float(torch.softmax(logits, dim=1)[0, 1].item())
+            by_clip[ex["video_id"]].append((score, ex["label"]))
+
+            # --- loss signal (per row) ---
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
             sem_loss = torch.tensor(0.0, device=device)
@@ -179,9 +169,9 @@ def evaluate_val_loss(badas, examples, device, predictor, siglip_model, siglip_t
                 pred = predictor(patches32).mean(dim=1)
                 pred = F.normalize(pred, dim=-1)
                 if semantic_loss == "infonce":
-                    # use the stamped bank index, not the loop counter - val_ex
-                    # happens not to be shuffled, but relying on that is exactly
-                    # the assumption that would break silently if it ever changes.
+                    # stamped bank index, not the loop counter - val_ex happens not
+                    # to be shuffled, but relying on that is exactly the assumption
+                    # that would break silently if it ever changes.
                     sem_loss = infonce_from_bank(pred, ex.get("_bank_idx", i),
                                                   val_bank, val_vids, log_tau)
                 else:
@@ -190,18 +180,41 @@ def evaluate_val_loss(badas, examples, device, predictor, siglip_model, siglip_t
             total_crash += crash_loss.item()
             total_sem += sem_loss.item()
             n += 1
+
+    if n_failed:
+        print(f"  [warn] val: {n_failed}/{len(examples)} windows failed to load")
     if n == 0:
-        return float("nan"), float("nan")
-    return total_crash / n, total_sem / n
+        return float("nan"), float("nan"), float("nan"), n_failed
+
+    ys, yt = [], []
+    for pairs in by_clip.values():
+        labels = {l for _, l in pairs}
+        # Verified empirically that every clip is single-label across its TTE
+        # windows; majority-vote is a defensive fallback rather than a crash if that
+        # ever stops holding (e.g. a future mixed-label caption source).
+        label = next(iter(labels)) if len(labels) == 1 else \
+            round(sum(l for _, l in pairs) / len(pairs))
+        ys.append(sum(s for s, _ in pairs) / len(pairs))
+        yt.append(label)
+    val_ap = average_precision_score(yt, ys) if len(set(yt)) >= 2 else float("nan")
+
+    return val_ap, total_crash / n, total_sem / n, n_failed
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--lora-target-modules", required=True,
-                     help="comma-separated substrings, e.g. 'qkv,proj,fc1,fc2'")
+                     help="Comma-separated module-name SUBSTRINGS (e.g. 'query,key,value'), "
+                          "or a single REGEX if the value starts with 're:'. Prefer the regex "
+                          "form: bare 'query,key,value' matches 108 Linears on BADAS-Open - the "
+                          "72 encoder ones you want PLUS 36 on the V-JEPA2 predictor "
+                          "(latent-forecast) stack, which is not on the classification path. "
+                          r"Encoder-only: --lora-target-modules "
+                          r"'re:backbone\.encoder\.layer\.\d+\.attention\.(query|key|value)'")
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
+    ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--semantic-weight", type=float, default=0.0)
     ap.add_argument("--semantic-loss", default="cosine", choices=["cosine", "infonce"],
                      help="'cosine' (default, preserves the original Stage-B behavior) is "
@@ -220,8 +233,56 @@ def main():
                           "matches semsup_b1_probe.py's default)")
     ap.add_argument("--siglip-model", default="google/siglip-base-patch16-224")
     ap.add_argument("--predictor-init", default=None, help="warm-start from B1 checkpoint")
+    ap.add_argument("--grad-cosine-every", type=int, default=8,
+                     help="measure the angle between the crash and semantic gradients on the "
+                          "SHARED LoRA params every N windows (0=off). Reported per epoch as "
+                          "grad_cos_mean / grad_cos_frac_neg. cos<0 means the two objectives "
+                          "pull the trunk in opposing directions (destructive interference); "
+                          "cos>0 means they agree. Costs 2 extra partial backward passes on "
+                          "the sampled steps (~15% epoch time at N=8) and does NOT touch the "
+                          "optimizer - autograd.grad() returns gradients without accumulating "
+                          "into .grad, so training is bit-identical with this on or off.")
+    ap.add_argument("--lora-init", default=None,
+                     help="path to an existing lora_adapter DIRECTORY (e.g. "
+                          "/workspace/semsup/a1_1761/epoch_04/lora_adapter) to START training "
+                          "from, instead of a fresh random LoRA init. Two uses: (1) SEQUENTIAL "
+                          "training - continue a converged crash-only model with the semantic "
+                          "loss added; (2) RESUMING an interrupted run - point at the last "
+                          "completed epoch's adapter. Note the trunk's frozen base weights are "
+                          "unchanged either way; only the LoRA delta is loaded.")
+    ap.add_argument("--optimizer-init", default=None,
+                     help="path to an optimizer.pt saved by a previous run's epoch dir. Restores "
+                          "Adam moment estimates so a resumed run continues the SAME optimization "
+                          "trajectory rather than restarting momentum from zero. Optional - "
+                          "resuming without it works but is a slightly different trajectory.")
+    ap.add_argument("--start-epoch", type=int, default=1,
+                     help="epoch number to start counting from when resuming, so epoch dirs and "
+                          "epoch_metrics.jsonl continue the original numbering instead of "
+                          "overwriting epoch_01. --epochs is still the LAST epoch number to run, "
+                          "not a count: --start-epoch 6 --epochs 10 runs epochs 6..10.")
+    ap.add_argument("--early-stop-patience", type=int, default=0,
+                     help="stop if val_ap hasn't improved for this many consecutive epochs "
+                          "(0 = disabled, the default/original behavior). Checkpoints for every "
+                          "epoch run are still written, so an early stop loses nothing.")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--lr-schedule", default="constant", choices=["constant", "cosine"],
+                     help="'constant' (default, original behavior) or 'cosine': linear "
+                          "warmup for --warmup-frac of total optimizer steps, then cosine "
+                          "decay to 0 over the rest. A1_1761 trained at a constant 2e-4 and "
+                          "overfits early - val_crash_loss bottoms at epoch 2 then climbs to "
+                          "0.81 by epoch 6 while train loss keeps falling - a schedule targets "
+                          "exactly that failure mode.")
+    ap.add_argument("--warmup-frac", type=float, default=0.05)
+    ap.add_argument("--prefetch-workers", type=int, default=8,
+                     help="threads concurrently reading+decoding frames ahead of the GPU. "
+                          "Measured 2026-08-11: preprocessing (file read+decode/resize) is "
+                          "~100% of per-window wall time on a slow network volume, GPU "
+                          "compute is unmeasurable by comparison - so this is the actual "
+                          "speed knob, not batch size or LR. 0 disables prefetch (old "
+                          "serial behavior, for debugging).")
+    ap.add_argument("--prefetch-depth", type=int, default=16,
+                     help="how many windows ahead the prefetch pipeline stays filled.")
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--limit", type=int, default=0)
@@ -270,10 +331,16 @@ def main():
     print(f"[cfg] stage={stage}  semantic_weight={args.semantic_weight}{sem_note}  "
           f"lora_target_modules={args.lora_target_modules}  seed={args.seed}")
 
-    target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
+    # 're:' prefix -> pass the regex through to peft untouched (peft accepts a single
+    # regex string as target_modules). Otherwise keep the legacy comma-substring form
+    # so existing runbooks and the recorded A1_1761/B_1761 commands still reproduce.
+    if args.lora_target_modules.startswith("re:"):
+        target_modules = args.lora_target_modules[3:]
+    else:
+        target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
     badas = TrainableBadasWrapper(
         stagea_cfg, lora_target_modules=target_modules,
-        lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+        lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
     )
     # peft's save_pretrained() auto-generates a model card BEFORE writing any
     # adapter weights, and assumes base_model.config supports `in` (a HF
@@ -281,7 +348,28 @@ def main():
     # instead, so that step crashes save_pretrained() every time, before any
     # checkpoint is written. We don't need the model card - skip it.
     badas.nn_model.create_or_update_model_card = lambda *a, **k: None
+
+    # Load an existing LoRA delta BEFORE building the optimizer, so the optimizer
+    # is constructed over the same parameter objects that were just overwritten.
+    if args.lora_init:
+        from safetensors.torch import load_file as _load_sft
+        from peft.utils import set_peft_model_state_dict as _set_peft_sd
+        adapter_path = Path(args.lora_init)
+        sft = adapter_path / "adapter_model.safetensors" if adapter_path.is_dir() else adapter_path
+        if not sft.exists():
+            raise FileNotFoundError(
+                f"--lora-init {args.lora_init} does not contain adapter_model.safetensors "
+                f"(looked at {sft}). Point it at an epoch's lora_adapter/ directory."
+            )
+        _set_peft_sd(badas.nn_model, _load_sft(str(sft)))
+        print(f"[load] initialized LoRA from {sft}")
+
     trainable = [p for p in badas.nn_model.parameters() if p.requires_grad]
+    # Captured BEFORE the Predictor is appended below: the LoRA trunk params only.
+    # The crash-vs-semantic gradient angle is only meaningful on the parameters the
+    # two objectives actually SHARE - the Predictor is semantic-only (its crash
+    # gradient is identically zero, which would drag any cosine toward 0).
+    lora_params = list(trainable)
 
     predictor = None
     siglip_model = siglip_tok = None
@@ -314,6 +402,9 @@ def main():
         trainable = trainable + [log_tau]
 
     opt = torch.optim.AdamW(trainable, lr=args.lr)
+    if args.optimizer_init:
+        opt.load_state_dict(torch.load(args.optimizer_init, map_location=device))
+        print(f"[load] restored optimizer state from {args.optimizer_init}")
 
     examples = load_training_examples(limit=args.limit, captions_path=args.captions_path)
     if len(examples) < args.min_examples:
@@ -323,8 +414,49 @@ def main():
             f"partially synced - check the symlink/volume before training on a "
             f"silently-shrunk dataset."
         )
+    # A placeholder pool (build_pool_from_manifest.py) carries one identical caption
+    # on every row. That is harmless for A1 (no Predictor is built at all) but would
+    # give Stage B the exact degenerate target the semantic branch was redesigned to
+    # avoid: every clip aligned to the same embedding. Fail loudly rather than train
+    # a meaningless B arm for hours.
+    if args.semantic_weight > 0:
+        n_uniq = len({ex["caption"] for ex in examples})
+        if any(ex["caption"].startswith("PLACEHOLDER-NOT-A-CAPTION") for ex in examples):
+            raise RuntimeError(
+                f"--captions-path points at a PLACEHOLDER pool "
+                f"({args.captions_path}) but --semantic-weight={args.semantic_weight} > 0. "
+                f"That pool is crash-only (built by build_pool_from_manifest.py); its "
+                f"captions are a tripwire, not text. Use a real caption file for Stage B."
+            )
+        if n_uniq < 0.5 * len(examples):
+            print(f"[warn] only {n_uniq} unique captions across {len(examples)} rows "
+                  f"({100*n_uniq/len(examples):.0f}%) - duplicate captions weaken InfoNCE "
+                  f"negatives (near-duplicates get punished as if they were wrong).")
+
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
+
+    # Built here, not at optimizer construction, because total_steps needs
+    # len(train_ex) - only known after the pool is loaded and split. If resuming
+    # (--start-epoch > 1), remaining_epochs covers only what's left to run, so the
+    # schedule still decays to 0 exactly at --epochs regardless of where it starts.
+    scheduler = None
+    if args.lr_schedule == "cosine":
+        remaining_epochs = args.epochs - args.start_epoch + 1
+        steps_per_epoch = max(1, -(-len(train_ex) // args.grad_accum))  # ceil div
+        total_steps = max(1, remaining_epochs * steps_per_epoch)
+        warmup_steps = max(1, int(args.warmup_frac * total_steps))
+        print(f"[sched] cosine: total_steps={total_steps}  warmup_steps={warmup_steps} "
+              f"({steps_per_epoch} steps/epoch x {remaining_epochs} epochs remaining)")
+
+        def _lr_lambda(step):
+            import math
+            if step < warmup_steps:
+                return step / warmup_steps
+            prog = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            return 0.5 * (1.0 + math.cos(math.pi * min(prog, 1.0)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_lr_lambda)
 
     # Frozen caption banks for InfoNCE negatives - built ONCE (SigLIP never trains,
     # so these are constants). Train anchors contrast against the train bank, val
@@ -351,22 +483,44 @@ def main():
 
     saved = []          # [(val_ap, epoch)] for every epoch, ranked at the end
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    best_val_ap_seen, epochs_since_improve = float("-inf"), 0
+    for epoch in range(args.start_epoch, args.epochs + 1):
         badas.nn_model.train()
         if predictor is not None:
             predictor.train()
         random.shuffle(train_ex)
         opt.zero_grad()
+        epoch_t0 = time.time()
         total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
-        for step, ex in enumerate(train_ex):
-            try:
-                logits, patches = badas.forward(ex["frame_paths"])
-            except (OSError, RuntimeError) as e:
+        # Crash-vs-semantic gradient-angle accumulators (diagnostic; see --grad-cosine-every).
+        cos_sum, cos_n, cos_neg = 0.0, 0, 0
+        gnorm_crash, gnorm_sem = 0.0, 0.0
+        gc_probe_failed = False
+        # `pending` counts SUCCESSFUL backward() calls since the last opt.step().
+        # Driving the accumulation boundary off the enumerate() index instead would
+        # desync the moment any example is skipped: some steps would average fewer
+        # than grad_accum examples while still dividing by grad_accum, and the
+        # post-loop flush could evaluate False while real gradients are still
+        # pending - silently discarded by the next epoch's zero_grad().
+        pending = 0
+        # Prefetch pipeline, not a plain for-loop over badas.forward(): direct
+        # profiling (2026-08-11) found preprocessing (file read + decode/resize)
+        # is ~100% of per-window wall time on a slow network volume and GPU
+        # compute is unmeasurable by comparison - so multiple windows' I/O must
+        # happen CONCURRENTLY, not just be overlapped with GPU compute. See
+        # TrainableBadasWrapper.prefetch_clips()'s docstring for the full
+        # measurement. Error handling is unchanged: a failed window still just
+        # increments n_failed and continues, same contract as the old inline
+        # try/except.
+        for _, ex, clip, err in badas.prefetch_clips(
+                train_ex, num_workers=args.prefetch_workers, prefetch=args.prefetch_depth):
+            if err is not None:
                 # A truncated/missing frame mid-run must not kill an 8-epoch GPU
                 # job outright - skip the example, keep going, but surface it loudly.
                 n_failed += 1
-                print(f"  [warn] skipping {ex['video_id']} (tte={ex['tte']}): {e}")
+                print(f"  [warn] skipping {ex['video_id']} (tte={ex['tte']}): {err}")
                 continue
+            logits, patches = badas.forward_clip(clip.to(device))
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
 
@@ -390,28 +544,66 @@ def main():
                     tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
                     sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
 
+            # --- crash-vs-semantic gradient angle (diagnostic only, never optimized) ---
+            # Measured on lora_params (the SHARED trunk) before the combined backward.
+            # retain_graph=True is required because loss.backward() below reuses the graph.
+            if (predictor is not None and args.grad_cosine_every
+                    and not gc_probe_failed
+                    and n % args.grad_cosine_every == 0):
+                try:
+                    g_c = torch.autograd.grad(crash_loss, lora_params,
+                                              retain_graph=True, allow_unused=True)
+                    g_s = torch.autograd.grad(sem_loss, lora_params,
+                                              retain_graph=True, allow_unused=True)
+                    fc = torch.cat([g.flatten() for g in g_c if g is not None])
+                    fs = torch.cat([g.flatten() for g in g_s if g is not None])
+                    if fc.numel() and fs.numel() and fc.numel() == fs.numel():
+                        c = F.cosine_similarity(fc.unsqueeze(0), fs.unsqueeze(0)).item()
+                        if c == c:                      # NaN guard (zero-norm gradient)
+                            cos_sum += c
+                            cos_n += 1
+                            cos_neg += int(c < 0)
+                            gnorm_crash += fc.norm().item()
+                            gnorm_sem += fs.norm().item()
+                except RuntimeError as exc:
+                    # A freed graph or unused-input edge must not kill an 8-epoch run
+                    # over a diagnostic. Report once, then stop trying this epoch.
+                    if cos_n == 0:
+                        print(f"  [warn] grad-cosine probe disabled this epoch: {exc}")
+                    gc_probe_failed = True
+
             loss = (crash_loss + args.semantic_weight * sem_loss) / args.grad_accum
             loss.backward()
             total_crash += crash_loss.item()
             total_sem += sem_loss.item()
             n += 1
-            if (step + 1) % args.grad_accum == 0:
+            pending += 1
+            if pending == args.grad_accum:
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                 opt.step()
+                if scheduler is not None:
+                    scheduler.step()
                 opt.zero_grad()
-        if n % args.grad_accum != 0:
+                pending = 0
+        if pending:                     # tail window - same counter, so never dropped
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
+            if scheduler is not None:
+                scheduler.step()
             opt.zero_grad()
+            pending = 0
         if n_failed:
             print(f"  [warn] {n_failed}/{len(train_ex)} examples failed to load this epoch")
 
-        val_ap = evaluate_crash_ap(badas, val_ex, device)
-        val_crash_loss, val_sem_loss = evaluate_val_loss(
-            badas, val_ex, device, predictor, siglip_model, siglip_tok, args.semantic_weight,
-            semantic_loss=args.semantic_loss, val_bank=val_bank, val_vids=val_bank_vids,
-            log_tau=log_tau)
-        elapsed = time.time() - t0
+        # ONE val pass for both the ranking metric and the two loss terms (was two
+        # full ViT-L sweeps over the same windows).
+        val_ap, val_crash_loss, val_sem_loss, n_val_failed = evaluate_val(
+            badas, val_ex, device, predictor, siglip_model, siglip_tok,
+            semantic_loss=args.semantic_loss, val_bank=val_bank,
+            val_vids=val_bank_vids, log_tau=log_tau)
+        now = time.time()
+        epoch_s = now - epoch_t0
+        elapsed = now - t0
         avg_crash = total_crash / n if n else float("nan")
         avg_sem = total_sem / n if n else float("nan")
         # combined train/val loss, same weighting as the actual optimized objective -
@@ -420,20 +612,61 @@ def main():
         train_total_loss = avg_crash + args.semantic_weight * avg_sem
         val_total_loss = val_crash_loss + args.semantic_weight * val_sem_loss
         train_val_gap = val_total_loss - train_total_loss  # >0 and growing = overfitting
+        cur_lr = opt.param_groups[0]["lr"]
+        # Gradient-angle summary for this epoch. cos<0 on a step means the crash and
+        # semantic objectives asked the shared trunk to move in opposing directions.
+        grad_cos_mean = cos_sum / cos_n if cos_n else float("nan")
+        grad_cos_frac_neg = cos_neg / cos_n if cos_n else float("nan")
+        grad_norm_crash = gnorm_crash / cos_n if cos_n else float("nan")
+        grad_norm_sem = gnorm_sem / cos_n if cos_n else float("nan")
         print(f"  epoch {epoch}/{args.epochs}  crash_loss={avg_crash:.4f}  "
               f"sem_loss={avg_sem:.4f}  val_crash_loss={val_crash_loss:.4f}  "
               f"val_sem_loss={val_sem_loss:.4f}  val_ap={val_ap:.4f}  "
-              f"train_val_gap={train_val_gap:.4f}  ({elapsed:.1f}s)")
+              f"train_val_gap={train_val_gap:.4f}  lr={cur_lr:.2e}  ({elapsed:.1f}s)")
+        if cos_n:
+            # Relative pull = how big the semantic update is vs the crash update AFTER
+            # lambda is applied - the number that says whether the aux term is even
+            # loud enough to matter, independent of whether it agrees in direction.
+            rel = (args.semantic_weight * grad_norm_sem / grad_norm_crash
+                   if grad_norm_crash else float("nan"))
+            print(f"      [grad] cos(crash,sem)={grad_cos_mean:+.4f}  "
+                  f"conflicting={100*grad_cos_frac_neg:.1f}% of {cos_n} sampled steps  "
+                  f"|g_crash|={grad_norm_crash:.4f}  |g_sem|={grad_norm_sem:.4f}  "
+                  f"lambda*|g_sem|/|g_crash|={rel:.3f}")
+
+        # `_j` centralises the NaN->null guard. json.dumps defaults to allow_nan=True
+        # and emits a bare `NaN` token, which is INVALID json: python's own loads()
+        # accepts it so it survives local inspection, but jq/JS/Go and most
+        # dashboards reject the whole line. n==0 (an unmounted frames volume) is
+        # exactly when every one of these goes NaN - i.e. the moment you most need
+        # to read the log. Previously only 4 of the 8 float fields were guarded.
+        def _j(x):
+            return None if isinstance(x, float) and x != x else x
 
         with open(out_dir / "epoch_metrics.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "epoch": epoch, "crash_loss": avg_crash, "sem_loss": avg_sem,
-                "val_crash_loss": None if val_crash_loss != val_crash_loss else val_crash_loss,
-                "val_sem_loss": None if val_sem_loss != val_sem_loss else val_sem_loss,
-                "train_total_loss": train_total_loss, "val_total_loss": val_total_loss,
-                "train_val_gap": None if train_val_gap != train_val_gap else train_val_gap,
-                "val_ap": None if val_ap != val_ap else val_ap,
-                "n_failed": n_failed, "elapsed_s": round(elapsed, 1),
+                "epoch": epoch,
+                "crash_loss": _j(avg_crash), "sem_loss": _j(avg_sem),
+                "val_crash_loss": _j(val_crash_loss), "val_sem_loss": _j(val_sem_loss),
+                "train_total_loss": _j(train_total_loss),
+                "val_total_loss": _j(val_total_loss),
+                "train_val_gap": _j(train_val_gap),
+                "val_ap": _j(val_ap),
+                # Crash-vs-semantic gradient angle on the shared LoRA params.
+                # grad_cos_mean < 0 or grad_cos_frac_neg > ~0.5 = destructive
+                # interference: the aux objective is fighting crash prediction.
+                "grad_cos_mean": _j(grad_cos_mean),
+                "grad_cos_frac_neg": _j(grad_cos_frac_neg),
+                "grad_norm_crash": _j(grad_norm_crash),
+                "grad_norm_sem": _j(grad_norm_sem),
+                "grad_cos_n_sampled": cos_n,
+                "n_failed": n_failed, "n_val_failed": n_val_failed,
+                # epoch_s = THIS epoch; elapsed_s = cumulative since run start.
+                # Only the cumulative one existed before, logged under a name that
+                # reads as per-epoch - so pod-budget estimates off this file were
+                # wrong by a growing factor.
+                "epoch_s": round(epoch_s, 1), "elapsed_s": round(elapsed, 1),
+                "lr": cur_lr,
             }) + "\n")
 
         ep_dir = out_dir / f"epoch_{epoch:02d}"
@@ -441,7 +674,23 @@ def main():
         badas.nn_model.save_pretrained(str(ep_dir / "lora_adapter"))
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
+        # Optimizer state per epoch, so an interrupted run can resume on the SAME
+        # trajectory (--optimizer-init) rather than restarting Adam momentum.
+        torch.save(opt.state_dict(), ep_dir / "optimizer.pt")
         saved.append((val_ap, epoch))
+
+        # Early stopping on val_ap (opt-in). Every epoch's checkpoint is already
+        # written above, so stopping early discards nothing.
+        if args.early_stop_patience > 0:
+            if val_ap == val_ap and val_ap > best_val_ap_seen:   # NaN-safe
+                best_val_ap_seen, epochs_since_improve = val_ap, 0
+            else:
+                epochs_since_improve += 1
+                if epochs_since_improve >= args.early_stop_patience:
+                    print(f"  [early-stop] val_ap has not improved for "
+                          f"{epochs_since_improve} epochs (best={best_val_ap_seen:.4f}); "
+                          f"stopping at epoch {epoch}")
+                    break
 
     # Rank epochs: highest val_ap first; NaN -> -inf so a degenerate run (single-
     # class val split) falls back to the LAST epochs by number. Ties -> later
@@ -493,6 +742,11 @@ def main():
         records = records[: args.test_limit]
     pattern = stagea_cfg["data"]["frame_filename_pattern"]
     gt_field = stagea_cfg["data"]["gt_field"]
+    # Precomputed once, reused across every checkpoint scored below (records
+    # themselves don't change between checkpoints) - also lets prefetch_clips'
+    # default key="frame_paths" work unchanged.
+    records_wp = [{**r, "frame_paths": frame_paths_for(r, args.test_frames_root, pattern)}
+                   for r in records]
 
     def score_checkpoint(epoch, res_path):
         adapter_sd = load_file(str(out_dir / f"epoch_{epoch:02d}" / "lora_adapter"
@@ -504,19 +758,19 @@ def main():
         # Stream + flush per clip: a failure at clip 500/677 must not discard the
         # 500 already-scored clips (this scores the top-3 checkpoints back-to-back,
         # so a late failure previously meant re-running everything before it too).
-        with open(res_path, "w", encoding="utf-8") as f:
-            for r in records:
-                paths = frame_paths_for(r, args.test_frames_root, pattern)
-                try:
-                    with torch.no_grad():
-                        logits, _ = badas.forward(paths)
-                        s = float(torch.softmax(logits, dim=1)[0, 1].item())
-                except (OSError, RuntimeError) as e:
+        # Prefetch pipeline (see TrainableBadasWrapper.prefetch_clips()) - the
+        # same I/O-bound bottleneck applies here: ~5.7 min/checkpoint over 677
+        # clips was measured almost entirely on file read + decode, not GPU.
+        with open(res_path, "w", encoding="utf-8") as f, torch.no_grad():
+            for _, ex, clip, err in badas.prefetch_clips(records_wp, num_workers=8, prefetch=16):
+                if err is not None:
                     n_failed += 1
-                    print(f"  [warn] skipping test clip {r.get('video_id')}: {e}")
+                    print(f"  [warn] skipping test clip {ex.get('video_id')}: {err}")
                     continue
-                gt, g = int(r[gt_field]), r.get("group")
-                f.write(json.dumps({"video_id": r["video_id"], "ground_truth": gt,
+                logits, _ = badas.forward_clip(clip.to(device))
+                s = float(torch.softmax(logits, dim=1)[0, 1].item())
+                gt, g = int(ex[gt_field]), ex.get("group")
+                f.write(json.dumps({"video_id": ex["video_id"], "ground_truth": gt,
                                      "group": g, "score": round(s, 4)}) + "\n")
                 f.flush()
                 yt.append(gt); ys.append(s); grp.append(g)

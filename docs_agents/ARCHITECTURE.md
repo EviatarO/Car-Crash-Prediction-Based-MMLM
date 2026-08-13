@@ -1,40 +1,35 @@
 # Architecture
 
-## Semantic-supervision design
+## Current design (e4_vjepa_reason)
+Student = **BADAS-Open** (V-JEPA2 ViT-L backbone), LoRA-tuned on its trunk (`query,key,value`
+projections, 72 encoder adapters by default). A **crash head** on top produces the collision
+score used for AP/AUC. Optionally, a **train-only semantic-alignment branch** runs in parallel:
+a small Predictor consumes the same visual features and is pulled toward a frozen SigLIP text
+encoder's embedding of a teacher-written caption via either cosine or InfoNCE loss. The Predictor
+and SigLIP text encoder are **fully discarded at inference** — the deployed model is
+vision-only, same cost/latency as the crash-only variant. Block-by-block reference (shapes,
+frozen status, equations) is in `docs_agents/ARCHITECTURE_BLOCKS.md`, matching the diagram at
+`reports/figures/semsup_architecture_2026-07-21.png` (note: that diagram is stale in two spots —
+it shows semantic weight `0.3×`, the actual default is `0.05`; and it labels the loss "meaning
+match" which describes cosine, not the current InfoNCE default).
 
-**Training:**
-```
-video (16f) → BADAS ViT-L trunk (frozen in A0/B1, LoRA in A1/B)
-                    ↓
-             patch grid (2560, 1024)   [confirmed at runtime]
-                    ↓
-      ┌─────────────┴──────────────┐
-crash head (pooler+classifier,   Predictor (ResamplerProjector,
-reused, frozen; LoRA never       num_queries=8, hidden=256) → mean-pool
-touches it - see constraints)    over queries → 1024→256→Dt
-      ↓                                ↓
-  2 logits → P(collision)        predicted semantic embedding
-                                        ↓ (loss: cosine OR infonce, see below)
-                              caption → frozen SigLIP text encoder → target embedding (Dt=768)
+## Important constraints / invariants
+- Inference path must never touch the Predictor or SigLIP text encoder — enforced by construction
+  (they're just not called in `forward_clip`'s inference branch), not by a runtime flag.
+- A1_1761's exact recipe (`query,key,value` legacy target modules, constant LR, dropout 0.05,
+  seed=0, the 1,761-window enriched pool) is the **reference control** for every semantic-aux
+  comparison. Any arm meant to isolate the semantic-loss effect must match this recipe exactly
+  except for `--semantic-weight`/`--semantic-loss` — confirmed by checking the printed
+  trainable-param count and adapters-by-stack breakdown at construction time.
+- Any new caption corpus must pass the label-leakage gate (TF-IDF+LogisticRegression,
+  GroupKFold-5 by `video_id`, target AUC<0.75) before being trusted for semantic-supervision
+  training — a leaking corpus makes the auxiliary loss a redundant/noisy copy of the label
+  rather than a semantic signal, and confounds any A-vs-B comparison.
+- Training and captioning I/O must go through the concurrent pipelines below — do not revert to
+  serial `for` loops over frame paths or API calls; the whole trunk is I/O/latency-bound, not
+  compute-bound, at this problem scale.
 
-Total loss (stage B) = crash_loss (CE) + semantic_weight * semantic_loss
-```
-**Semantic loss, two variants** (B1 only supports both via `--loss`; Stage B's trainer
-(`semsup_train.py`) currently only implements cosine — InfoNCE there needs real batching
-first, which the wrapper doesn't do, see Constraints):
-- `cosine` (original, **proven degenerate** 2026-07-25): `1 - cos(pred, target)`. Minimizer
-  for a video-blind predictor is `target_mean/‖target_mean‖` — the real B1 run beat that
-  floor by only 0.53% of the available range.
-- `infonce` (added 2026-07-25, B1 only so far): in-batch contrastive, CLIP/SigLIP-style,
-  learnable temperature (init 0.07). Sibling-TTE rows of the same `video_id` masked out of
-  the negative set. The collapse solution above scores at chance under this loss instead of
-  getting a free ride — verified via a synthetic proof, see EXPERIMENTS.md.
-**Inference (final target):** `video → BADAS ViT-L (LoRA) → crash head → P(collision)`.
-Semantic branch (Predictor + SigLIP) is fully discarded — zero added inference cost. Language
-is **train-only privileged information**; the precise framing is *cross-modal distillation
-under the LUPI regime* (see EXPERIMENTS.md literature check).
-
-## Constraints / assumptions
+### Pre-existing constraints (still true, carried forward)
 - BADAS-Open's backbone is a plain **V-JEPA2 ViT-L**, loaded via `nexar-ai/BADAS-Open`'s
   official `badas_loader.py` (which pulls `nexar-ai/nexight`). It is a **gated HF repo** —
   `hf auth login` is required on every new pod.
@@ -140,49 +135,187 @@ under the LUPI regime* (see EXPERIMENTS.md literature check).
   reorg fallout - `semsup_caption_promptbakeoff.py` and `semsup_v6_control_rerun.py` both do
   this already.
 
+## Semantic-supervision design
+
+**Training:**
+```
+video (16f) → BADAS ViT-L trunk (frozen in A0/B1, LoRA in A1/B)
+                    ↓
+             patch grid (2560, 1024)   [confirmed at runtime]
+                    ↓
+      ┌─────────────┴──────────────┐
+crash head (pooler+classifier,   Predictor (ResamplerProjector,
+reused, frozen; LoRA never       num_queries=8, hidden=256) → mean-pool
+touches it - see constraints)    over queries → 1024→256→Dt
+      ↓                                ↓
+  2 logits → P(collision)        predicted semantic embedding
+                                        ↓ (loss: cosine OR infonce, see below)
+                              caption → frozen SigLIP text encoder → target embedding (Dt=768)
+
+Total loss (stage B) = crash_loss (CE) + semantic_weight * semantic_loss
+```
+**Semantic loss, two variants** (both now supported in B1 AND Stage B; the batching
+objection below was resolved 2026-08-06 by precomputing a frozen caption bank —
+`build_caption_bank`/`infonce_from_bank` — so batch-size-1 Stage B still gets N negatives):
+- `cosine` (original, **proven degenerate** 2026-07-25): `1 - cos(pred, target)`. Minimizer
+  for a video-blind predictor is `target_mean/‖target_mean‖` — the real B1 run beat that
+  floor by only 0.53% of the available range.
+- `infonce` (added 2026-07-25, B1 only so far): in-batch contrastive, CLIP/SigLIP-style,
+  learnable temperature (init 0.07). Sibling-TTE rows of the same `video_id` masked out of
+  the negative set. The collapse solution above scores at chance under this loss instead of
+  getting a free ride — verified via a synthetic proof, see EXPERIMENTS.md.
+**Inference (final target):** `video → BADAS ViT-L (LoRA) → crash head → P(collision)`.
+Semantic branch (Predictor + SigLIP) is fully discarded — zero added inference cost. Language
+is **train-only privileged information**; the precise framing is *cross-modal distillation
+under the LUPI regime* (see EXPERIMENTS.md literature check).
+
+## Concurrent I/O pipeline (training)
+Root cause: reading+decoding 16 JPEGs per window costs ~1.17s (670ms raw read + 503ms
+decode/resize) vs. an unmeasurably fast GPU forward pass — the trainer was I/O-bound, not
+GPU-bound (verified via direct phase-by-phase profiling on the pod, not inferred from GPU
+utilization graphs, which only showed the symptom: 24-33% utilization).
+
+- `TrainableBadasWrapper.forward(frame_paths)` → now delegates to `forward_clip(clip)` after
+  preprocessing (unchanged behavior/signature for any existing caller).
+- `TrainableBadasWrapper.forward_clip(self, clip)` → runs the model on an already-decoded
+  tensor; this is the actual GPU-compute entry point, separated out so it can be called from a
+  pipeline that overlaps decode (CPU/IO) of window N+1 with compute (GPU) of window N.
+- `TrainableBadasWrapper.prefetch_clips(self, examples, num_workers=8, prefetch=16,
+  key="frame_paths")` → generator. `ThreadPoolExecutor`-based; maintains a futures dict keyed
+  by index, keeps `prefetch` items in flight ahead of the current position, yields
+  `(i, ex, clip_or_None, error_or_None)` strictly in submission order via `.pop(i).result()`.
+  Works despite the GIL because file I/O and PIL JPEG decompression release it during their C-level
+  work. Per-item errors are caught *inside* the worker function and yielded as a 4th-element
+  exception rather than raised — raising inside a generator would kill the whole generator
+  mid-stream; catching and yielding a sentinel lets iteration continue past a single bad clip.
+  `num_workers<=0` falls back to a fully serial path (debugging escape hatch).
+- Used in `semsup_train.py` for: the training loop, the merged `evaluate_val()` (combines what
+  used to be two separate passes — `evaluate_crash_ap` + `evaluate_val_loss` — into one), and
+  `score_checkpoint()` (test-set scoring; `records_wp` is precomputed once with a `frame_paths`
+  key added via `frame_paths_for()` so the default `key="frame_paths"` works unchanged).
+- Verified: isolated benchmark on the pod (workers=0 vs 8 vs 16) → 5.3× at 8 workers; live
+  resumed A1-v2 run → 6.3× (epoch 1-2 pre-fix ~97 min avg/epoch → epoch 3 post-fix 15.5 min),
+  GPU utilization 24-33% → 83-94%.
+
+## Concurrent captioning pipeline
+Same diagnosis applied to `semsup_caption_promptbakeoff.py`'s OpenRouter calls: latency-bound
+(network round-trip per clip), not CPU-bound.
+- `_fetch_one(row)` — worker-thread function, isolates exactly the network-bound part (missing-
+  frame check, prompt build, image encode, `_call_model()` call). Returns a 4-tuple
+  `(row, raw_text_or_None, error_or_None, usage_or_None)` — all 4 internal early-return points
+  (including the 3 failure paths) were made consistent to this arity after an earlier bug where
+  only the success path returned 4 elements.
+- Main loop: `futures = [pool.submit(_fetch_one, row) for row in pending]`, consumed via
+  `for idx, fut in enumerate(as_completed(futures), start=1)`. All downstream parsing/
+  validation/row-building/file-writing stays serial in the main thread — only the network call
+  itself is parallelized.
+- New `--concurrency` CLI arg (default 4; used at 16 for the real V12 recaption run).
+- **Usage/cost logging** (previously the `usage` field from every OpenRouter response was
+  silently discarded): `usage_path = out_path.with_suffix(out_path.suffix + ".usage.jsonl")`,
+  written alongside the main output; running totals accumulated per call
+  (`total_prompt_tok`, `total_completion_tok`, `total_cost`); `_cost_str()` closure formats
+  `"tok=N"` or `"tok=N cost=$X.XXX"` depending on whether the API returned a `cost` field.
+  Printed at the 25-row progress cadence and in the final `DONE.` summary. This is now the
+  source of truth for captioning cost — not the older, never-fully-verified doc estimates.
+- Verified: serial 11.8s/clip → concurrency=16 ~1s/clip (~12×); cost-neutral (OpenRouter bills
+  per-token, not per-request or wall-clock).
+
+## LoRA target-module selection
+`--lora-target-modules` accepts either the legacy comma-separated substring list (e.g.
+`query,key,value` — matches 108 modules: 72 encoder + 36 V-JEPA2-predictor-stack) or a
+`re:<regex>` prefix passed through untouched to `peft.LoraConfig(target_modules=<regex>)` (e.g.
+`re:backbone\.encoder\.layer\.\d+\.attention\.(query|key|value)` — matches 72, encoder only).
+`TrainableBadasWrapper`'s LoRA construction reports **adapters by stack**
+(`{'backbone.encoder': N, 'backbone.predictor': M}`, via `Counter` on `lora_A.default` module
+names) at construction time, with a printed NOTE if any adapter lands on `backbone.predictor` —
+this makes the true scope of a run visible in the log without having to inspect the config file,
+which is what caught the discrepancy between A1_1761 (108 modules, encoder+predictor) and
+A1-v2's intended encoder-only design.
+
+## V12 neutral captioning prompt (`prompts/PROMPT_SEMSUP_V12_NEUTRAL.py`)
+Register-neutral redesign of the captioning prompt, built to close the label-leak found by the
+`/project-review` audit. `build_prompt()` takes **no arguments** — there is no GT-informed vs.
+blind branch at all (V10's leak came precisely from that branch: positives got a "this DOES end
+in collision" framing, negatives didn't). Structure: `NEUTRALITY_BLOCK`, `ROLE_AUDIENCE`,
+`INPUT_BLOCK`, `STEP123_BLOCK` (reused verbatim from V10), `STEP4_BLOCK` (primary-agent
+identification), `GAP_TREND_BLOCK` (closed 4-way vocabulary:
+`decreasing/increasing/constant/none_visible`, replacing V10's free-text `closing_dynamic`),
+`CAPTION_RULES` (symmetric bans — outcome words, alarm words, reassurance words — applied
+identically regardless of class), `_SCHEMA`. Drops `verdict`/`risk_score`/`confidence`/
+`risk_clause` entirely (the model only describes, never judges). Field renames for register
+hygiene (not a fabrication fix): `hazard_agent→primary_agent`, `hazard_motion→agent_motion`,
+`hazard_position→agent_position`, `mechanism_visible→agent_visible`.
+
+Wired into `semsup_caption_promptbakeoff.py` via `_v12_builder(gt_mode=None, is_positive=None)`
+(adapter matching `TEMPLATE_BUILDERS`'s calling convention despite `build_prompt()` itself taking
+no args), `V12_REQUIRED` tuple, `V12_GAP_TREND_VALUES` constant, a `validate_parsed()` branch
+(hard-fails on missing keys / invalid `agent_visible` / invalid `gap_trend`; soft-notes if the
+`gap_trend` word isn't found verbatim in the caption text), `prompt_tokens["v12"]=1050` for
+`--dry-run` estimates, and a dedicated output-row writer (separate from v10/v10q since field
+names differ) emitting `primary_agent`/`agent_motion`/`agent_position`/`gap_trend`/
+`evidence_frames`/`agent_visible`.
+
+Raw V12 output schema uses `caption_neutral` + `event_occurs` (0/1); `load_training_examples()`
+expects `caption` + `gt_verdict` (YES/NO string) — a derived `_fortrain.jsonl` file with both
+aliases added is what actually gets used for training/comparison scripts.
+
 ## Files that matter
+
 | Path | Purpose |
 |---|---|
-| `student_training/scripts/semsup_common.py` | Shared: caption↔frames_dir resolution (now reads only `teacher_dataset_e3b.jsonl` by default, raises on conflict), `TrainableBadasWrapper` (LoRA-capable, gradient-preserving patch tap), frozen SigLIP loader, `dry_run_modules()` |
-| `student_training/scripts/semsup_b1_probe.py` | Stage B1: predictor-only probe. Caches frozen features once, early stopping, top-3 ckpts, collapse control, `--loss {cosine,infonce}`, clip-level retrieval |
-| `student_training/scripts/semsup_train.py` | Unified A1/B LoRA trainer (`--semantic-weight 0.0` = A1, `>0` = B). `--seed`, per-clip val AP, `epoch_metrics.jsonl`, streamed test-scoring, per-clip error handling. Keeps top-3 ckpts by val_ap and scores **each** on the 677-clip test set |
-| `student_training/scripts/metrics_core.py` | Pure numpy/sklearn metrics — importable on a pod without matplotlib/seaborn/pandas |
-| `student_training/scripts/evaluate_metrics.py` | Local graph/report pipeline; delegates formulas to `metrics_core` instead of duplicating them (fixed 2026-07-25 — the two had diverged) |
-| `student_training/scripts/e4_stageA_badas_open_eval.py` | Reused as-is: `load_badas()`, `preprocess_clip()`, `load_manifest()`, `frame_paths_for()`, A0 scorer |
-| `student_training/models/vjepa_reason.py` | `ResamplerProjector` — semantic predictor now `num_queries=8` (was 1); self-attention conditionally built |
-| `student_training/configs/e4_stageA.yaml` | BADAS config: `hf_repo`, preprocessing, acceptance band, `gt_field=event_occurs`, `frame_filename_pattern` |
-| `outputs/semantic_captions/summary.md` | **Running experiment status doc — update on every stage run** (project convention) |
-| `outputs/semantic_captions/Caption_Train_All_Clips.jsonl` / `.xlsx` | 267-row caption dataset (89 clips × ≤3 TTE); force-added to git |
-| `outputs/semantic_captions/b1_metrics.json` | B1 real-run metrics, full per-epoch history |
-| `RUNPOD_SEMANTIC_SUPERVISION.txt` | Pod runbook, all 4 stages |
-| `reports/_scripts/report_helpers.py` | Shared python-docx styling for progress reports (`new_doc`, `title_page`, `h`, `body`, `bullet`, `warn`, `add_table`, `fig`, `side_by_side`) |
-| `reports/_scripts/_build_progress_report.py` | Overwritten per `/progress-report` run |
-| `reports/figures/semsup_architecture_2026-07-21.png` | High-level train-vs-inference block diagram (generated by `_build_arch_diagram.py`) — predictor sizing in the diagram now stale vs. the 2026-07-25 code change, not yet regenerated |
-| `reports/project_reviews/2026-07-25_project_review.md` | Full `/project-review` findings (12 sections, severity-ranked). Gitignored — not tracked unless `git add -f`'d |
-| `prompts/PROMPT_SEMSUP_V2.py` | **NEW (2026-07-27).** Single captioning prompt, JSON output `{caption_neutral, risk_clause, verdict, confidence}`. Replaces an earlier two-prompt draft that failed the 64-token SigLIP limit |
-| `student_training/scripts/semsup_sample_clips.py` | **NEW.** Preflight + balanced distinct-video sampler for the prompt bake-off. Fails loudly (non-zero exit) rather than silently shrinking the target `--n` |
-| `student_training/scripts/semsup_caption_qa.py` | **NEW.** Gate 0: token compliance, banned-word, duplicate-sentence, verdict-leakage checks; builds `arm_a/b/c.jsonl`. Also runs as a legacy self-test directly on `Caption_Train_All_Clips.jsonl` |
-| `student_training/scripts/semsup_caption_geometry.py` | **NEW.** Gate 1: SigLIP-embedding geometry (anisotropy, mean pairwise cosine, effective rank, NN purity, centroid separation) per arm — free, CPU-only |
-| `student_training/scripts/semsup_promptbakeoff_report.py` | **NEW.** Gate 2 collation: per-arm exact binomial test vs chance, paired bootstrap between arms on shared val clips, mechanical decision-rule application, writes `summary.md` |
-| `outputs/semantic_captions/_build_promptbakeoff_xlsx.py` | **NEW.** Reviewable spreadsheet for the raw bake-off captions, reusing `_build_caption_xlsx.py`'s styling plus new banned-word/over-token QA colors |
-| `student_training/scripts/semsup_extract_promptbakeoff_frames.py` | **NEW (2026-07-28).** Extracts 16-frame windows from the sibling project's raw Nexar MP4s for new distinct-video clips (positives at TTE_0.5/1.0/1.5 from `train.csv`'s `time_of_event`, negatives at MID/MID-4/MID-8) - produced the 500-clip bake-off set |
-| `prompts/PROMPT_SEMSUP_V3_COT.py` | **NEW.** v6-style chain-of-thought pipeline (STEP 1-7) then distill into the same caption_neutral/risk_clause/verdict/confidence schema as V2, plus 3 extra CoT-audit fields (scene_context/dynamic_objects/temporal_analysis) |
-| `prompts/PROMPT_SEMSUP_V4_QWEN.py` | **NEW.** Written in Qwen's own recommended prompt structure (Role/Task/Context/Instructions-with-forced-thinking/worked-examples/Do-NOT/Priority); adds an explicit anti-under-calling instruction. Did not fix the under-calling pattern (see Constraints) but scored the highest caption-fidelity mean of anything tested |
-| `student_training/scripts/semsup_caption_promptbakeoff.py` | **NEW.** Calls any OpenRouter vision model with `--prompt {v2,v3,v4}` to caption a manifest; self-contained (copies, doesn't import, the retry/JSON-extraction/image-encoding helpers - see a Constraints note on why); resumable; `--max-tokens` for thinking models |
-| `student_training/scripts/semsup_v6_control_rerun.py` | **NEW.** Runs the UNMODIFIED `PROMPT_G_OPT_v6_balanced` against any `--model` on the 18 val_e3a clips - built as a same-day reproducibility control, became the generic teacher-model bake-off runner. `--resume` supported |
-| `teacher_distillation/scripts/reasoning_analysis_semsup_val18.py` | **NEW.** Scores V2/V3/Gemini-rerun captions against GT on the 18 val clips (0-10 rubric + BERTScore), modeled on `reasoning_analysis_v6_debate.py` |
-| `teacher_distillation/scripts/reasoning_analysis_teacher_bakeoff.py` | **NEW.** Same scoring, comparing Gemini-today vs Qwen3.7 Flash vs GPT-5.6 Luna Pro (all on unmodified v6) |
-| `teacher_distillation/scripts/reasoning_analysis_qwen3vl_val18.py` | Same scoring for V4/Qwen3-VL-235B, formatted to match `v11_100clips/results_v6_debate_v11.xlsb.xlsx`'s whole-row green/orange/red convention |
-| `prompts/PROMPT_SEMSUP_V5_BALANCED.py` .. `PROMPT_SEMSUP_V9_MINIMAL.py` | 5 more captioning-prompt versions from the (now-superseded) 18-clip screen — V5 risk-score+pre-mortem, V6 kinematic, V7 ego-frame, V8 narrative, V9 minimal. None statistically distinguishable at n=18 (see the "under-calling" constraint note). Not deleted; kept as a record of what was tried |
-| `student_training/scripts/build_train4500_manifest.py` | **NEW (2026-08-01).** Emits the 4,446-window train manifest in the Stage-A scorer's schema (`event_occurs`/`group`/`frame_indices`/`frames_dir`), excludes val_e3a's 18 clips (drawn from the same train.csv pool, used for Stage-C checkpoint selection), fails loudly on any test/val overlap. Owns `NEG_BUCKETS` (the `MID-10`/`MID-4`/`MID-8` definitions) |
-| `student_training/scripts/run_train4500_pipeline.py` | **NEW.** Chunked orchestrator: local extraction (`--chunk-size`/`--start-chunk`/`--stop-after-chunk`) + prints the exact rsync/pod-scoring commands per chunk (does not itself touch the pod). Class-interleaves videos before chunking (see gotcha) |
-| `student_training/scripts/mine_train_failures.py` | **NEW.** Joins scorer output back to the manifest via `(video_id, group)`, emits `failures.jsonl` + a per-bucket taxonomy, and prints the automated A0-test-error-rate gap checkpoint (>5pp = stop-and-diagnose) plus a systematic-vs-diffuse classifier that recommends failure-targeted vs uniform caption allocation |
-| `teacher_distillation/scripts/build_caption_monitor.py` | **NEW.** The coverage monitor the original Stage-0 plan specified but never built. Clones `build_teacher_monitor.py`'s train-sheet grid (4,500 rows, `video_id × GT_verdict × TTE`), adds a `model_verdict` column/color pass so caption coverage and frozen-scorer correctness show on the same grid |
-| `RUNPOD_TRAIN4500_STAGEA.sh` | **NEW.** Pod-side runbook for scoring train4500 chunks — chunked (not one-shot like `RUNPOD_E4_STAGEA_RUN.sh`), does not self-terminate the pod, safe to re-run (skips already-scored chunks) |
-| `student_training/scripts/semsup_extract_promptbakeoff_frames.py` | Extended (2026-08-01): `--manifest`/`--workers`/`--chunk-size`/`--chunk-index` for driving from `build_train4500_manifest.py`'s output instead of only its own sampler; **sequential per-window decode** (1 seek + sequential read instead of 16 seeks/window — 3.9× faster, verified byte-identical output); label JSONL is now upsert-append instead of truncate-on-open |
-| `student_training/scripts/e4_stageA_badas_open_eval.py` | `--split` gained a `"Train"` choice (cosmetic — written to output, never read by scoring logic) |
+| `student_training/scripts/semsup_train.py` | Main trainer. Crash-only or crash+semantic (cosine/InfoNCE) LoRA fine-tuning of BADAS-Open. Cosine/constant LR schedule, checkpointing, val/test scoring, all via the concurrent prefetch pipeline. |
+| `student_training/scripts/semsup_common.py` | `TrainableBadasWrapper` — model construction, LoRA wiring (legacy list or regex target modules), `forward`/`forward_clip`/`prefetch_clips`. |
+| `student_training/scripts/semsup_caption_promptbakeoff.py` | Captioning runner against OpenRouter — all prompt versions (v2-v12), concurrent fetch, usage/cost logging, validation per prompt family. |
+| `prompts/PROMPT_SEMSUP_V12_NEUTRAL.py` | The V12 register-neutral prompt (no GT/blind branch). |
+| `student_training/scripts/build_pool_from_manifest.py` | Wraps a Stage-A-scorer-schema manifest into the caption-training schema with a placeholder-caption tripwire, for crash-only (no semantic loss) runs against a manifest that has no captions yet (e.g. the full 4,446-window pool). |
+| `student_training/scripts/sample_val_check_clips.py` | Draws a balanced, distinct-clip sample from a manifest excluding a given val manifest's video_ids — used to extend the n=18 leakage-judge check to n=100. |
+| `student_training/scripts/plot_semsup_curves.py` | Reads `epoch_metrics.jsonl` (current trainer's schema), plots loss/val_AP/LR/train-val-gap curves with the selected epoch starred. (Distinct from the older, incompatible `plot_training_curves.py` built for the superseded InternVL3.5 pipeline — do not confuse the two.) |
+| `teacher_distillation/scripts/score_val18_neutral.py` | Scores V12 vs V10 on the 18-clip val set (grounding/neutrality via calibrated `score_blob()`) and runs the leakage judge; writes Excel/summary.md. Contains `binom_ci()`. |
+| `teacher_distillation/scripts/leakage_judge_100.py` | Combines 18 val + 82 sampled clips into n=100, runs the leakage judge with numeric IDs (not letter-capped), computes exact one-sided binomial p-value/CI (no scipy dependency, `math.comb` summation). |
+| `docs_agents/ARCHITECTURE_BLOCKS.md` | Block-by-block reference (shapes/equations/frozen-status) for the architecture diagram. |
 
-## APIs / functions — semantic-supervision
+## APIs / functions (new or changed this segment, signatures only)
+
+```python
+# semsup_common.py
+TrainableBadasWrapper.forward(self, frame_paths) -> ...          # unchanged signature, now delegates
+TrainableBadasWrapper.forward_clip(self, clip) -> ...             # NEW: compute on pre-decoded tensor
+TrainableBadasWrapper.prefetch_clips(self, examples, num_workers=8, prefetch=16, key="frame_paths")
+    -> Iterator[tuple[int, dict, Tensor|None, Exception|None]]     # NEW: ordered concurrent prefetch
+
+# semsup_train.py
+evaluate_val(...) -> dict            # NEW: merged evaluate_crash_ap + evaluate_val_loss, single pass
+score_checkpoint(...)                # rewired to use prefetch_clips + records_wp precompute
+# new CLI args: --prefetch-workers (default 8), --prefetch-depth (default 16),
+#   --lr-schedule {constant,cosine} (default constant), --warmup-frac (default 0.05),
+#   --lora-dropout (default 0.05, now exposed)
+
+# semsup_caption_promptbakeoff.py
+_fetch_one(row) -> tuple[dict, str|None, Exception|None, dict|None]   # NEW: worker-thread network call
+_v12_builder(gt_mode=None, is_positive=None) -> str                    # NEW: V12 adapter for TEMPLATE_BUILDERS
+# new CLI arg: --concurrency (default 4)
+# new output: <out_path>.usage.jsonl (per-call token/cost sidecar)
+
+# prompts/PROMPT_SEMSUP_V12_NEUTRAL.py
+build_prompt() -> str                 # NEW: no gt_mode/is_positive args, single neutral prompt
+```
+
+## Tooling / meta (user-level, affects all projects)
+| Path | Purpose |
+|---|---|
+| `~/.claude/skills/handoff/SKILL.md` | Writes `docs_agents/` cold-start briefing + the freshness token the PreCompact gate checks |
+| `~/.claude/skills/project-review/SKILL.md` | **NEW.** `/project-review` — whole-project ML+code audit; asks for scope, docs-first gate, 2 parallel agents, 12-section report to `reports/project_reviews/`. Deliberately NOT named `code-review` (built-in command owns that) |
+| `~/.claude/hooks/precompact_gate.py` | Blocks compaction when handoff docs are stale (once per session, fails open) |
+| `~/.claude/hooks/session_reload_docs.py` | Re-injects `docs_agents/` after a compaction (12k char cap) |
+| `.claude/commands/progress-report.md` | Project-level `/progress-report` command |
+
+**Hook design constraint:** the `cwd` field in Claude Code hook payloads is the app's *launch*
+directory (e.g. `C:\Users\eviatar.ohayon`), **not** the project folder. Both hooks therefore
+locate the project via a session-keyed pointer file
+`~/.claude/hooks/.handoff_location_<session_id>.json` written by `/handoff`. Do not "simplify"
+them back to trusting `cwd`.
+
+## APIs / functions — semantic-supervision (pre-existing, carried forward)
 - `TrainableBadasWrapper(stagea_cfg, lora_target_modules=None|[...], lora_r, lora_alpha, lora_dropout)`
   → `.forward(frame_paths: list) -> (logits (1,2), patches (P,D))`. Patches are **not**
   detached when `lora_target_modules` is set.
@@ -239,18 +372,3 @@ badas.nn_model.create_or_update_model_card = lambda *a, **k: None
 ```
 `peft`'s `save_pretrained()` builds a model card before writing weights and assumes
 `base_model.config` is dict-like; BADAS's `ModelArgs` isn't, so every checkpoint save crashed.
-
-## Tooling / meta (user-level, affects all projects)
-| Path | Purpose |
-|---|---|
-| `~/.claude/skills/handoff/SKILL.md` | Writes `docs_agents/` cold-start briefing + the freshness token the PreCompact gate checks |
-| `~/.claude/skills/project-review/SKILL.md` | **NEW.** `/project-review` — whole-project ML+code audit; asks for scope, docs-first gate, 2 parallel agents, 12-section report to `reports/project_reviews/`. Deliberately NOT named `code-review` (built-in command owns that) |
-| `~/.claude/hooks/precompact_gate.py` | Blocks compaction when handoff docs are stale (once per session, fails open) |
-| `~/.claude/hooks/session_reload_docs.py` | Re-injects `docs_agents/` after a compaction (12k char cap) |
-| `.claude/commands/progress-report.md` | Project-level `/progress-report` command |
-
-**Hook design constraint:** the `cwd` field in Claude Code hook payloads is the app's *launch*
-directory (e.g. `C:\Users\eviatar.ohayon`), **not** the project folder. Both hooks therefore
-locate the project via a session-keyed pointer file
-`~/.claude/hooks/.handoff_location_<session_id>.json` written by `/handoff`. Do not "simplify"
-them back to trusting `cwd`.
