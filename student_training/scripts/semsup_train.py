@@ -110,6 +110,26 @@ def infonce_from_bank(pred, anchor_idx, bank, vids, log_tau):
     return F.cross_entropy(logits.unsqueeze(0), label)
 
 
+def _clip_grads(args, lora_params, aux_params, trainable):
+    """Gradient clipping, matching A1's budget for the LoRA trunk when requested.
+
+    Default (--clip-grad-per-group not set): ONE clip_grad_norm_(trainable, 1.0) over
+    every trainable param combined - the original behavior, kept as default so existing
+    runs (A1, B_1761-parallel, B-v2) remain reproducible byte-for-byte.
+
+    --clip-grad-per-group: clip lora_params and aux_params (Predictor+log_tau) against
+    SEPARATE budgets of 1.0 each. See the CLI help for --clip-grad-per-group for why this
+    matters: without it, a large early Predictor gradient can inflate the shared global
+    norm and shrink the LoRA trunk's effective update below what A1 (LoRA-only, nothing
+    else in its `trainable` to share the budget with) receives for an identical crash loss.
+    """
+    if args.clip_grad_per_group and aux_params:
+        torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
+        torch.nn.utils.clip_grad_norm_(aux_params, 1.0)
+    else:
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+
+
 def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                  siglip_tok=None, semantic_loss="cosine", val_bank=None,
                  val_vids=None, log_tau=None):
@@ -233,6 +253,16 @@ def main():
                           "matches semsup_b1_probe.py's default)")
     ap.add_argument("--siglip-model", default="google/siglip-base-patch16-224")
     ap.add_argument("--predictor-init", default=None, help="warm-start from B1 checkpoint")
+    ap.add_argument("--clip-grad-per-group", action="store_true",
+                     help="clip the LoRA trunk and the semantic branch (Predictor+log_tau) "
+                          "on SEPARATE gradient-norm budgets (1.0 each), instead of one "
+                          "shared clip_grad_norm_(trainable, 1.0) over all params combined. "
+                          "Without this, A1 (LoRA-only) and B (LoRA+Predictor) do not use "
+                          "the same effective clip budget for the LoRA trunk - large "
+                          "Predictor gradients can inflate the shared global norm and "
+                          "silently shrink B's crash-loss updates relative to A1's, for "
+                          "reasons unrelated to semantic_weight. No-op when semantic_weight=0 "
+                          "(A1: aux_params is empty either way).")
     ap.add_argument("--grad-cosine-every", type=int, default=8,
                      help="measure the angle between the crash and semantic gradients on the "
                           "SHARED LoRA params every N windows (0=off). Reported per epoch as "
@@ -400,6 +430,10 @@ def main():
         log_tau = torch.nn.Parameter(
             torch.log(torch.tensor(args.infonce_tau_init, device=device)))
         trainable = trainable + [log_tau]
+
+    # Params trained ONLY for the semantic branch (Predictor + log_tau) - everything
+    # in `trainable` after `lora_params` was captured above, in construction order.
+    aux_params = trainable[len(lora_params):]
 
     opt = torch.optim.AdamW(trainable, lr=args.lr)
     if args.optimizer_init:
@@ -579,14 +613,14 @@ def main():
             n += 1
             pending += 1
             if pending == args.grad_accum:
-                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                _clip_grads(args, lora_params, aux_params, trainable)
                 opt.step()
                 if scheduler is not None:
                     scheduler.step()
                 opt.zero_grad()
                 pending = 0
         if pending:                     # tail window - same counter, so never dropped
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            _clip_grads(args, lora_params, aux_params, trainable)
             opt.step()
             if scheduler is not None:
                 scheduler.step()

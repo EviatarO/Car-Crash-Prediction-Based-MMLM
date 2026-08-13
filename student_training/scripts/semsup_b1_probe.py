@@ -83,7 +83,13 @@ def main():
     ap.add_argument("--captions", default=None,
                     help="override caption JSONL (default: the 267-row "
                          "Caption_Train_All_Clips.jsonl). Use for the prompt-bakeoff "
-                         "arm_{a,b,c}.jsonl files from semsup_caption_qa.py.")
+                         "arm_{a,b,c}.jsonl files from semsup_caption_qa.py, or the V12 "
+                         "1,761-window pool.")
+    ap.add_argument("--train-frac", type=float, default=1.0,
+                    help="subsample this fraction of TRAIN video_ids (by clip, seeded on "
+                         "--seed) AFTER the train/val split, so val stays IDENTICAL across "
+                         "different fractions - for a clean scaling curve (retrieval vs n) "
+                         "without val-set drift confounding the comparison. 1.0 = no subsample.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -123,6 +129,19 @@ def main():
     examples = load_training_examples(limit=args.limit, captions_path=args.captions)
     train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac)
     print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split, Dt={dt})")
+
+    if args.train_frac < 1.0:
+        # Subsample TRAIN video_ids only, val_ex is untouched above this point - so
+        # every --train-frac value in a scaling-curve sweep scores against the exact
+        # same held-out clips, and the curve isn't confounded by val-set drift.
+        import random as _random
+        train_vids = sorted({e["video_id"] for e in train_ex})
+        _random.Random(args.seed).shuffle(train_vids)
+        n_keep = max(1, int(len(train_vids) * args.train_frac))
+        keep_vids = set(train_vids[:n_keep])
+        train_ex = [e for e in train_ex if e["video_id"] in keep_vids]
+        print(f"[data] --train-frac={args.train_frac}: subsampled to "
+              f"train={len(train_ex)} rows / {n_keep} clips (val unchanged at {len(val_ex)})")
 
     # -------------------------------------------------------------------------
     # Cache the frozen features ONCE. BADAS and SigLIP never update, so patches
@@ -257,8 +276,24 @@ def main():
 
     print(f"\n[train] Predictor only (BADAS + SigLIP frozen)  loss={args.loss}")
     t0 = time.time()
-    history, best = [], []          # best = [(val_loss, epoch, path)], keep 3
-    best_loss, since_improved = float("inf"), 0
+    # Checkpoint/early-stop criterion (2026-08-12 fix - was val_loss unconditionally,
+    # even under --loss infonce, where val_loss is a temperature-scaled softmax CE
+    # that does NOT rank checkpoints the same way as retrieval accuracy - the actual
+    # thing predictor_b1.pt is warm-started for downstream. /project-review found this
+    # exact mismatch on the 267-row run: epoch 28 (lowest val_loss, selected) scored
+    # val_retrieval_top1_acc_clip=0.1086 while epoch 43 (never selected) scored 0.1267.
+    # cosine keeps the original val_loss criterion (its own degenerate-optimum analysis
+    # was done in terms of that loss, so changing it there would break comparability).
+    sel_key = "retrieval_clip" if args.loss == "infonce" else "loss"
+    def sel_value(hist_row):
+        return hist_row["val_retrieval_top1_acc_clip"] if sel_key == "retrieval_clip" \
+            else hist_row["val_loss"]
+    sel_better = (lambda new, old: new > old) if sel_key == "retrieval_clip" \
+        else (lambda new, old: new < old)
+    print(f"[select] checkpoint/early-stop criterion: "
+          f"{'val_retrieval_top1_acc_clip (higher better)' if sel_key == 'retrieval_clip' else 'val_loss (lower better)'}")
+    history, best = [], []          # best = [(sel_value, epoch, path)], keep 3, sorted BEST-first
+    best_sel, since_improved = (float("-inf") if sel_key == "retrieval_clip" else float("inf")), 0
 
     for epoch in range(1, args.epochs + 1):
         predictor.train()
@@ -293,26 +328,32 @@ def main():
               f"val_ret@1_sib={va_acc_sib:.4f}  val_ret@1_clip={va_acc_clip:.4f}  "
               f"({time.time()-t0:.1f}s)")
 
-        # Keep the 3 lowest-val_loss checkpoints.
+        # Keep the 3 best-by-sel_key checkpoints (val_loss for cosine,
+        # val_retrieval_top1_acc_clip for infonce - see sel_key comment above).
         ckpt = out_dir / f"predictor_b1_ep{epoch:03d}.pt"
         torch.save(predictor.state_dict(), ckpt)
-        best.append((va_loss, epoch, ckpt))
-        best.sort(key=lambda r: r[0])
+        cur_sel = sel_value(history[-1])
+        best.append((cur_sel, epoch, ckpt))
+        # sort so index 0 is always the BEST regardless of sel_key's direction
+        best.sort(key=lambda r: r[0], reverse=(sel_key == "retrieval_clip"))
         for _, _, stale in best[3:]:
             stale.unlink(missing_ok=True)
         best = best[:3]
 
-        if va_loss < best_loss - 1e-5:
-            best_loss, since_improved = va_loss, 0
+        if sel_better(cur_sel, best_sel):
+            best_sel, since_improved = cur_sel, 0
         else:
             since_improved += 1
             if since_improved >= args.patience:
-                print(f"[early-stop] no val_loss improvement for {args.patience} epochs "
-                      f"(best={best_loss:.4f} @ epoch {best[0][1]})")
+                print(f"[early-stop] no {('retrieval@1_clip' if sel_key=='retrieval_clip' else 'val_loss')} "
+                      f"improvement for {args.patience} epochs "
+                      f"(best={best_sel:.4f} @ epoch {best[0][1]})")
                 break
 
     # predictor_b1.pt = the BEST checkpoint (Stage B warm-starts from this path).
-    best_loss, best_epoch, best_path = best[0]
+    # best_sel_final is in sel_key's units (val_loss for cosine, retrieval_top1_acc_clip
+    # for infonce) - NOT always "loss", despite the historical variable name elsewhere.
+    best_sel_final, best_epoch, best_path = best[0]
     predictor.load_state_dict(torch.load(best_path, map_location=device))
     torch.save(predictor.state_dict(), out_dir / "predictor_b1.pt")
     final_loss, mean_cos, retrieval_acc, retrieval_acc_sib, retrieval_acc_clip = evaluate(Xva, Yva, vids_va)
@@ -351,7 +392,10 @@ def main():
                                   if log_tau is not None else None),
             "n_train": len(train_ex), "n_val": len(val_ex),
             "n_val_clips": len(set(vids_va)),
-            "best_epoch": best_epoch, "best_val_loss": best_loss,
+            "selection_criterion": sel_key,   # "loss" (cosine) or "retrieval_clip" (infonce)
+            "best_epoch": best_epoch,
+            "best_selection_value": best_sel_final,
+            "train_frac": args.train_frac,
             "held_out_mean_cosine": mean_cos,
             "held_out_retrieval_top1_acc": retrieval_acc,
             "held_out_retrieval_top1_acc_sibling_ok": retrieval_acc_sib,
