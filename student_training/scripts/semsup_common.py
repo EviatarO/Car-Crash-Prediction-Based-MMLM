@@ -205,7 +205,18 @@ class TrainableBadasWrapper:
         def _pre_hook(_module, args):
             self._captured["patches"] = args[0]   # NOTE: no .detach() -> keeps grad
 
+        def _post_hook(_module, _args, output):
+            # The probe's OUTPUT: the single pooled vector the classifier consumes.
+            # Verified 2026-08-13 on BADAS-Open: input (1, 2560, 1024) -> output
+            # (1, 1024), i.e. all 2560 spatiotemporal tokens collapse to ONE vector.
+            # That vector is the entire basis for the crash decision, so anything a
+            # semantic loss shapes OUTSIDE it is invisible to the classifier - which
+            # is exactly what the `pooled` tap in semsup_b1_probe.py measures.
+            # No .detach() here either, for the same reason as the pre-hook.
+            self._captured["pooled"] = output[0] if isinstance(output, (tuple, list)) else output
+
         probe.register_forward_pre_hook(_pre_hook)
+        probe.register_forward_hook(_post_hook)
 
         self.lora_enabled = lora_target_modules is not None
         if self.lora_enabled:

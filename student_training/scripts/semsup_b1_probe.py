@@ -61,6 +61,28 @@ from semsup_common import (  # noqa: E402
 from vjepa_reason import ResamplerProjector  # noqa: E402
 
 
+class _VectorMLP(torch.nn.Module):
+    """Predictor for the single-vector taps ('pooled' / 'meanpool').
+
+    Returns (B, 1, out_dim) so that every existing `predictor(x).mean(dim=1)` call
+    site is tap-agnostic - averaging a length-1 axis is an identity, so the training
+    loop, evaluate() and the collapse control all work without a branch.
+    """
+
+    def __init__(self, in_dim, out_dim, hidden_dim=512):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x):           # x: (B, in_dim)
+        return self.net(x).unsqueeze(1)     # -> (B, 1, out_dim)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="e4_stageA.yaml (BADAS hf_repo etc.)")
@@ -85,6 +107,17 @@ def main():
                          "Caption_Train_All_Clips.jsonl). Use for the prompt-bakeoff "
                          "arm_{a,b,c}.jsonl files from semsup_caption_qa.py, or the V12 "
                          "1,761-window pool.")
+    ap.add_argument("--tap", choices=["patches", "pooled", "meanpool"], default="patches",
+                    help="WHERE the predictor reads its visual features from. "
+                         "'patches' (default, the historical behavior) = the probe's INPUT, "
+                         "the full (2560, 1024) spatiotemporal grid. "
+                         "'pooled' = the probe's OUTPUT, the single 1024-d vector the crash "
+                         "classifier actually consumes - a 2560x compression. "
+                         "'meanpool' = uniform mean over the 2560 patch tokens, also 1024-d: "
+                         "the CONTROL that separates 'this dimensionality loses caption info' "
+                         "from 'the crash-tuned attention specifically selects it away'. "
+                         "patches vs pooled answers whether a semantic loss attached to the "
+                         "classifier's own representation has anything to learn from.")
     ap.add_argument("--train-frac", type=float, default=1.0,
                     help="subsample this fraction of TRAIN video_ids (by clip, seeded on "
                          "--seed) AFTER the train/val split, so val stays IDENTICAL across "
@@ -115,8 +148,20 @@ def main():
     # (softmax over 1 key), so ~1M of those params were dead weight (2026-07-25
     # review, A-2). This config is ~1.25M params. Multi-token output is
     # mean-pooled to one Dt vector before comparison to the SigLIP target.
-    predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=8,
-                                    hidden_dim=256, n_heads=8, ffn_mult=2).to(device)
+    if args.tap == "patches":
+        predictor = ResamplerProjector(in_dim=1024, out_dim=dt, num_queries=8,
+                                        hidden_dim=256, n_heads=8, ffn_mult=2).to(device)
+    else:
+        # 'pooled'/'meanpool' hand the predictor a SINGLE 1024-d vector, not a token
+        # sequence, so ResamplerProjector's cross-attention would be a no-op (softmax
+        # over one key - the same dead-weight trap as the old num_queries=1 config).
+        # A plain MLP is the right shape here. It emits (B, 1, Dt) rather than (B, Dt)
+        # purely so the existing `predictor(x).mean(dim=1)` call sites work unchanged
+        # for every tap - the mean over a length-1 axis is an identity.
+        predictor = _VectorMLP(in_dim=1024, out_dim=dt, hidden_dim=512).to(device)
+    n_pred_params = sum(p.numel() for p in predictor.parameters())
+    print(f"[tap] {args.tap}  predictor={type(predictor).__name__} "
+          f"({n_pred_params:,} params)")
     trainable = list(predictor.parameters())
     log_tau = None
     if args.loss == "infonce":
@@ -149,18 +194,31 @@ def main():
     # ~15x wasted ViT-L forward passes. Cached on CPU, moved per batch.
     # -------------------------------------------------------------------------
     def build_cache(exs, tag):
-        patches, targets, vids = [], [], []
+        feats, targets, vids = [], [], []
         for ex in tqdm(exs, desc=f"[cache] {tag}", leave=False):
             with torch.no_grad():
-                _, p = badas.forward(ex["frame_paths"])
+                _, p = badas.forward(ex["frame_paths"])          # p: (P, D) = (2560, 1024)
                 t = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
+            if args.tap == "patches":
+                f = p                                            # (2560, 1024)
+            elif args.tap == "pooled":
+                # The probe's own output, captured by the post-hook in
+                # TrainableBadasWrapper: the 1024-d vector the classifier consumes.
+                f = badas._captured["pooled"].squeeze(0)         # (1024,)
+            else:                                                # meanpool control
+                # Same 1024-d shape as 'pooled' but with UNIFORM weights over the
+                # 2560 tokens instead of the crash-tuned attention. Isolates
+                # "this dimensionality is too small" from "the crash-tuned pooling
+                # specifically discards caption-relevant directions".
+                f = p.mean(dim=0)                                # (1024,)
             # BADAS may run in fp16; the Predictor is fp32 - cast at this boundary.
-            patches.append(p.to(dtype=torch.float32).cpu())
+            feats.append(f.to(dtype=torch.float32).cpu())
             targets.append(t.squeeze(0).cpu())
             vids.append(ex["video_id"])  # needed to mask sibling-TTE false negatives
-        return torch.stack(patches), torch.stack(targets), vids  # (N,P,D), (N,Dt), list[N]
+        # (N,P,D) for 'patches'; (N,D) for the single-vector taps.
+        return torch.stack(feats), torch.stack(targets), vids
 
-    print("\n[cache] precomputing frozen BADAS patches + SigLIP targets")
+    print(f"\n[cache] precomputing frozen BADAS features (tap={args.tap}) + SigLIP targets")
     tc = time.time()
     Xtr, Ytr, vids_tr = build_cache(train_ex, "train")
     Xva, Yva, vids_va = build_cache(val_ex, "val")
@@ -392,6 +450,9 @@ def main():
                                   if log_tau is not None else None),
             "n_train": len(train_ex), "n_val": len(val_ex),
             "n_val_clips": len(set(vids_va)),
+            "tap": args.tap,                  # patches | pooled | meanpool
+            "predictor_type": type(predictor).__name__,
+            "predictor_params": n_pred_params,
             "selection_criterion": sel_key,   # "loss" (cosine) or "retrieval_clip" (infonce)
             "best_epoch": best_epoch,
             "best_selection_value": best_sel_final,
