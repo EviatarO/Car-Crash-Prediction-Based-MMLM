@@ -410,14 +410,32 @@ the same run: cos continued oscillating between −0.04 and +0.01, the ratio spi
 as `‖g_crash‖` collapsed toward zero, and `train_val_gap` climbed from 0.63 to 1.04 —
 overfitting, not further learning).
 
-**Not yet measured** (flagged, not resolved): whether the gradient a §5-default (patches-tap)
-run actually *produces* in the pooled representation is comparable in magnitude to a random
-perturbation of equal norm applied to the patch grid. If it is much smaller than random, the
-gradient is moving directions the pooler's attention weights ignore even though those
-directions *could* in principle carry caption information (§5b) — i.e. bypass, not just
-weak/orthogonal signal. If comparable, the gradient is already reaching the decision path
-and the §5b tap change would be redundant. Cheap to check (existing checkpoints, no
-training) and not yet run.
+✅ **Measured 2026-08-16** (`student_training/scripts/p3_delta_patches_vs_pooled.py`,
+40 held-out clips, A1_1761 epoch 4 vs. the fully-corrected Stage-B run's epoch 2): loaded
+both checkpoints' LoRA weights on the same frozen base, captured `patches` and `pooled` for
+the same 40 clips under each, and compared `‖Δpooled‖ / ‖Δpatches‖` against the same ratio
+for a random perturbation of the patch grid with equal norm.
+
+| | mean ratio (‖Δpooled‖ / ‖Δpatches‖) |
+|---|---|
+| Real (A1 → B weight difference) | **0.00341** |
+| Random-noise control (same norm) | 0.00186 |
+
+The real ratio is ~1.8× the random-noise baseline — higher, but not dramatically so, and
+this is a single point estimate over 40 clips with no confidence interval computed. Read
+together with §5b's pooled-tap probe (22× chance, comparable to `meanpool`'s 18×), this is a
+second, independent line of evidence that the weight difference between the crash-only and
+crash+semantic checkpoints is **not** being preferentially routed into directions the pooler
+discards — if anything it leans mildly the other way. **This weakens the "bypass" framing
+further**: the semantic signal's influence on the trunk does appear to reach the
+classifier-relevant representation, at least to a comparable-or-greater degree than a random
+weight perturbation would. Combined with §7c's own finding (cos≈0, drifting mildly negative,
+not a bypass signature), the more likely account of B's underperformance is **near-orthogonal
+or mildly conflicting objectives that already reach the decision path**, not a routing
+problem — which reprioritizes the two-stage training design (P1 in
+`outputs/e4_vjepa_reason/problems_and_solutions_2026-08-15.md` — pretrain the semantic
+branch, then fine-tune on crash) over the §5b pooled-tap architecture change as the more
+promising next step.
 
 ---
 

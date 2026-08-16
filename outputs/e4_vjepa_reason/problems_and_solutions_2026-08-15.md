@@ -38,7 +38,7 @@ That pattern is itself the strongest evidence that the problem is structural.
 |---|---|---|---|---|
 | **P1** | Gradient reaches trunk but is **orthogonal** to crash (cos≈0, 44-56% conflict) — joint-λ co-training has failed 4× | **Two-stage: semantic pre-train → crash fine-tune**, pooler unfrozen in stage 2 | 1-2 d | The paradigm that *actually works* in the literature (CLIP/SLIP/LiT). Our joint-λ variant is the unproven one. **Never tried in this order** |
 | **P2** | Semantic loss attaches to the 2560×1024 patch grid; the classifier reads only a 1024-d vector | **Move the semantic loss to the pooler's output** (`forward_hook` not `pre_hook`) | 0.5-1 d | Structurally forces every semantic gradient through the decision path. Probe confirms the target is learnable there (22× chance) |
-| **P3** | Unknown whether the semantic gradient moves *high-weight* or *low-weight* tokens — the unresolved half of the bypass question | **Δpatches vs Δpooled measurement** on existing B-v3 / A1 checkpoints | 0.5 h | Dirt cheap, no training, uses checkpoints we already have. Tells us whether P2 is necessary or redundant |
+| **P3** ✅ | **RESOLVED 2026-08-16.** Unknown whether the semantic gradient moves *high-weight* or *low-weight* tokens | Measured: real ratio 1.8× the random-noise control (0.0034 vs 0.0019, n=40, no CI). Gradient reaches the decision-relevant representation at least as well as chance — **P2 downgraded**, **P1 upgraded** | done | See elaboration below |
 | **P4** | λ=0.05 was never swept; chosen by a magnitude-matching heuristic | **λ sweep {0.01, 0.05, 0.2, 0.5}**, short runs | 1 d | A reviewer *will* ask whether a flat B is just bad λ. Cannot be defended without it |
 | **P5** | The leakage gate punished **legitimate** predictive signal as if it were contamination | **Re-frame the gate**: grounding check + outcome-word ban, drop the blanket AUC ceiling | 0.5 d + API | Cleaning V10→V12 made B *worse* (0.0105→0.0189). Strong hint we stripped the useful part |
 | **P6** | Never established whether caption **content** matters at all, vs just caption **class** | **B-shuffle control** (permute captions within class) | 1 d | Needed for the writeup *whatever* the outcome. Cleanest single control in the whole design |
@@ -58,7 +58,7 @@ That pattern is itself the strongest evidence that the problem is structural.
 | **"Train longer / 12 epochs"** | **ANSWERED: no.** Pure overfitting — `train_val_gap` climbs 0.63 → 1.04 across epochs 9-12, train crash loss → 0.119 while val → 1.133. 8 epochs was already past the useful window |
 | **Gradient gating / PCGrad** | **NOT APPLICABLE.** These fix cos ≪ 0 (opposition). We measured cos ≈ 0 (orthogonality). Gating would do nothing |
 | **Bigger λ to strengthen a weak signal** | **WON'T WORK ALONE.** cos is scale-invariant — λ cannot change direction, only magnitude. Pushing harder sideways is still sideways. (λ sweep in P4 is for *defensibility*, not as the fix) |
-| **Bypass hypothesis (strong form)** | **PARTIALLY REFUTED.** I predicted pooled retrieval would collapse if semantics lived outside the classifier's subspace. It didn't (22×). The weak form — whether the *gradient* moves visible tokens — remains open, hence P3 |
+| **Bypass hypothesis (strong and weak form)** | **REFUTED, both forms, 2026-08-16.** Strong form (info can't survive the bottleneck): refuted 2026-08-15, pooled retrieval stayed at 22× chance. Weak form (the trained gradient specifically avoids pooler-visible directions): refuted by P3 — the real A1→B weight difference reaches the pooled space at 1.8× the rate a random perturbation would, not less. The bottleneck is not where the problem is |
 
 ---
 
@@ -140,17 +140,40 @@ statistically indistinguishable from 22× at n=221 (±1.9pp), so the crash-tuned
 
 ---
 
-### P3 — Δpatches vs Δpooled (cheap gate, run before P2)
+### P3 — Δpatches vs Δpooled — ✅ RESOLVED 2026-08-16
 
-**The unresolved question.** The probe proved caption info *exists* in the pooled vector.
-It did **not** prove that the semantic gradient, applied at patch level, produces changes that
-*show up* in the pooled vector. Those are different claims and I conflated them earlier.
+**The question.** The pooled-tap probe (§5b) proved caption info *exists* in the pooled
+vector. It did **not** prove that the semantic gradient, applied at patch level in the
+runs we've actually trained, produces changes that *show up* in the pooled vector. Those
+are different claims, and this was run to settle the second one.
 
-**Steps:**
-1. Load the B-v3 encoder and the A1_1761 encoder.
-2. Run the same held-out clips through both; capture `patches` and `pooled` for each.
-3. Compute `‖Δpooled‖ / ‖Δpatches‖` (relative change induced by semantic training).
-4. Compare against the same ratio for a **random perturbation** of `patches` of equal norm.
+**What was run** (`student_training/scripts/p3_delta_patches_vs_pooled.py`): loaded
+A1_1761 epoch 4 and the fully-corrected Stage-B run's epoch 2 LoRA weights on the same
+frozen base, captured `patches` and `pooled` for the same 40 held-out clips under each,
+computed `‖Δpooled‖ / ‖Δpatches‖`, and compared it against the same ratio for a random
+perturbation of `patches` with equal norm (the control that separates "the real weight
+difference reaches the pooled space" from "any equal-sized change would").
+
+**Result:**
+
+| | mean ratio ‖Δpooled‖ / ‖Δpatches‖ |
+|---|---|
+| Real (A1 → B) | 0.00341 |
+| Random-noise control | 0.00186 |
+
+Real is ~1.8× the random baseline — higher, but a modest effect, and this is one point
+estimate over 40 clips with no confidence interval. Read plainly: the weight difference
+between the crash-only and crash+semantic checkpoints is **not** being preferentially
+routed away from the pooler; if anything it leans mildly toward directions the pooler keeps.
+
+**Consequence.** Combined with §7c's gradient-angle finding (cos≈0, drifting mildly
+negative — not the signature of a blocked signal, but of a genuinely weak-or-conflicting
+one), the bypass framing no longer explains the result well. The semantic signal's
+influence does appear to reach the classifier-relevant representation. **P2 (move the loss
+to the pooled tap) is downgraded** — it would likely relocate an already-arriving gradient
+rather than unblock a stuck one. **P1 (two-stage training) is upgraded** to the leading
+hypothesis, since it's the one untested lever that changes *what* the gradient says, not
+*where* it lands.
 
 **Reading it:** if the semantic-training ratio is **much lower** than random, the gradient moved
 patches in directions the pooler ignores → P2 is necessary. If it's **comparable**, the gradient
@@ -243,12 +266,15 @@ Standard fixes — **don't scale negatives with dataset size**:
 
 ## Suggested execution order
 
-1. **P3** (30 min, gate) → decides whether P2 is needed
-2. **P1** (1-2 d) — the highest-expected-value experiment
-3. **P2** (0.5-1 d) — run if P3 says the gradient isn't reaching the decision path
-4. **P6** + **P4** — can run unattended alongside
-5. **P7** → then **P9** if scaling works
-6. **P5** — feeds the next captioning round
+1. ~~**P3** (30 min, gate)~~ — **done 2026-08-16.** Gradient reaches the decision path;
+   P2 downgraded, P1 upgraded (see P3's elaboration above).
+2. **P1** (1-2 d) — now the leading hypothesis, and the highest-expected-value experiment
+3. **P6** + **P4** — can run unattended alongside
+4. **P7** → then **P9** if scaling works
+5. **P5** — feeds the next captioning round
+6. **P2** — demoted, not eliminated: worth a cheap ablation later if P1 also underperforms,
+   since a mild routing effect (1.8×, not overwhelming) could still compound with a better
+   training order
 7. **P8**, **P10** — cheap ablations, fill gaps
 
 **Standing rule:** every arm must match A1_1761's recipe except the one variable under test,
