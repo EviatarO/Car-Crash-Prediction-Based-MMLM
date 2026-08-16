@@ -47,12 +47,11 @@ resizes internally, so pre-squashed frames would incur a lossy double-resize.
 
 **Frozen.** N/A.
 
-⚠️ **Open discrepancy.** `ARCHITECTURE.md` records the resize as 224×224, but a ViT-L at
-224 with patch 16 / tubelet 2 over 16 frames yields (224/16)² × (16/2) = **1568** tokens,
-not the 2560 recorded as "confirmed at runtime". 2560 = (256/16) × (320/16) × 8, i.e. a
-non-square 256×320 aspect-preserving resize. One of the two statements is wrong. It does
-not break anything (every downstream block is `P`-agnostic), but it should be settled with
-one `print(clip.shape)` on the pod.
+✅ **Discrepancy resolved 2026-08-13/15.** Directly measured on the pod (a purpose-built
+inspection script hooking the pooler with both a pre-hook and a post-hook, run against one
+real preprocessed clip): patches tensor shape is `(1, 2560, 1024)`. This confirms the
+non-square 256×320 resize path, **not** the 224×224 figure `ARCHITECTURE.md` records — that
+statement in `ARCHITECTURE.md` is the stale one and should be corrected to match.
 
 ---
 
@@ -133,13 +132,19 @@ results stay comparable to the published A0 baseline (AP 0.853).
 
 **Input / output.** `(P, D) = (2560, 1024)` → `(1, 2)` logits.
 
-**Architecture.** ✅ From the module dump (widths not independently confirmed — they need
-a live model load):
+**Architecture.** ✅ From the module dump, and ✅ shapes now confirmed by direct measurement
+(2026-08-13/15, see below):
 
 - `temporal_processor` (`AttentionProcessor`) — an **attentive-probe pool**: one
   `nn.MultiheadAttention` + `LayerNorm`. A learned query attends over the `P` patch tokens
   and collapses them to a single vector. This is the standard V-JEPA2/DINOv2 evaluation
   recipe, not mean-pooling.
+  **Measured I/O**, via a `forward_pre_hook` (captures the pooler's input) and a
+  `forward_hook` (captures its output) on the same real clip: `(1, 2560, 1024) → (1, 1024)`
+  — a **2560×  compression, 0.04% of values retained**. All 2560 spatiotemporal patch tokens
+  collapse to a single 1024-d vector, and that vector is the *entire* basis for the crash
+  decision — nothing downstream of it ever sees the patch grid again. This is the exact
+  bottleneck the §5b tap-point experiments below test.
 - `classifier` (`MLPHead`) — a `Sequential` of exactly 9 modules:
 
 ```
@@ -239,6 +244,57 @@ boundary cast is `.to(dtype=torch.float32)`, which is differentiable, and the pa
 hook stores `args[0]` **without** `.detach()`. So the semantic loss really does reach the
 LoRA weights — it is not a detached side-branch.
 
+**Warm-starting (`--predictor-init`).** ✅ The written experimental plan
+(`2026-07-07_Plan Semantic-Supervision...`, lines 113/122-129/141) mandates a specific run
+order: a standalone "B1" probe first (frozen trunk, frozen SigLIP, train **only** the
+Predictor against the InfoNCE loss), then warm-start Stage B's Predictor from that
+checkpoint via `--predictor-init <path>` before training the crash+semantic arm. **This was
+not followed for the first Stage-B runs on the 1,761-window pool** (both the V10-corpus and
+first V12-corpus runs used `predictor_init: null`, i.e. a randomly-initialized Predictor
+trained from scratch alongside the LoRA). It was corrected in the run following it, warm-
+started from a B1 probe trained on the corrected corpus. Note the plan does **not** ask for
+the Predictor to be frozen after warm-starting — it keeps training jointly in Stage B either
+way (§8's "Trainable in arm B" figure already includes it); no `--freeze-predictor` flag
+exists.
+
+---
+
+## 5b. Alternate semantic-loss tap points — `--tap {patches, pooled, meanpool}`
+
+**Purpose.** The default Predictor (above) reads from the pooler's **input** — the full
+`(P, D)` patch grid — which the crash classifier never sees directly (§3). Whether a
+semantic gradient applied there can shape the classifier's actual decision was an open
+question; these tap points test it directly. Implemented in the standalone B1 probe
+(`semsup_b1_probe.py --tap ...`), not (yet) in the joint Stage-B trainer.
+
+**The three taps**, all evaluated against the identical 221-clip held-out set used for the
+patches-tap retrieval number in §7b (chance level = 1/221 ≈ 0.45%):
+
+| Tap | Predictor reads from | Shape | Predictor architecture | Params | Clip retrieval@1 | × chance |
+|---|---|---|---|---|---|---|
+| `patches` (default, §5 above) | pooler **input** | `(P, 1024)` | `ResamplerProjector` (§5) | 1,253,632 | 14.03% | **31×** |
+| `pooled` | pooler **output** — the classifier's actual input | `(1024,)` | `_VectorMLP` (below) | 1,181,440 | 9.95% | **22×** |
+| `meanpool` (control) | uniform mean over the same 2560 patch tokens | `(1024,)` | `_VectorMLP` (below) | 1,181,440 | 8.14% | **18×** |
+
+**`_VectorMLP`** (new, `semsup_b1_probe.py`): a plain 3-layer MLP, `1024 → 512 → 512 → 768`
+with GELU activations, used for both single-vector taps. `ResamplerProjector`'s
+cross-attention is mathematically a no-op on a single input token (softmax over one key —
+the same dead-weight trap documented for the old `num_queries=1` config in §5), so it is not
+reused here.
+
+**Reading the result.** Caption-recoverable information **survives** the 2560× pooling
+bottleneck comfortably (22× chance, not collapsed to ~1×), and the `meanpool` control (18×)
+is statistically indistinguishable from `pooled` (22×) at n=221 (±1.9pp) — so the
+crash-tuned attention is **not** specifically discarding caption-relevant directions
+relative to uniform pooling. This partially refutes the strong form of the "bypass"
+hypothesis (that semantic information lives entirely outside what the classifier can read)
+and gives the `pooled` tap a confirmed, learnable target for a future Stage-B run that
+attaches the semantic loss there instead of at the patch grid — which would make it
+structurally impossible for the semantic gradient to shape anything the classifier doesn't
+see. Whether the *gradient produced by patches-tap training* actually reaches the pooled
+representation (as opposed to merely "the information exists there") is a distinct,
+still-open question — see the "not yet measured" note in §7c.
+
 ---
 
 ## 6. SigLIP text encoder — the supervision target
@@ -314,6 +370,57 @@ semantic term by roughly 20–40×.
 
 ---
 
+## 7c. Gradient-angle diagnostic (`--grad-cosine-every`)
+
+**Purpose.** §5b established that caption-recoverable information reaches the pooled
+representation. It does **not** establish whether the semantic loss's gradient, computed at
+the patch grid, pulls the LoRA trunk toward or away from the crash objective. This
+diagnostic measures that directly rather than inferring it from AP deltas.
+
+**Mechanism.** ✅ Every `N`th window (default `N=8`), computes `∂L_crash/∂θ` and
+`∂L_sem/∂θ` **separately** via `torch.autograd.grad()` — restricted to `lora_params`, the
+LoRA weights captured **before** the Predictor's parameters are appended to the optimizer's
+trainable list. This restriction matters: the Predictor sits only on the semantic path, so
+its `∂L_crash/∂θ_predictor` is identically zero, which would drag any cosine computed over
+the full trainable set toward 0 for a reason having nothing to do with gradient conflict.
+`torch.autograd.grad()` does **not** populate `.grad` or touch optimizer state, so the probe
+is bit-identical to having it off — pure observation, verified by construction, not just
+claimed. Logged per epoch: `grad_cos_mean` (mean cosine of the two gradients),
+`grad_cos_frac_neg` (fraction of sampled steps where they point in opposing directions),
+`grad_norm_crash`, `grad_norm_sem`.
+
+**Measured, first fully-corrected Stage-B run** (warm-started predictor + per-group
+clipping — see §8's clipping note):
+
+| Epoch | cos(crash, sem) | conflicting steps | λ·‖g_sem‖ / ‖g_crash‖ |
+|---|---|---|---|
+| 1 | +0.0165 | 45.2% | 0.048 |
+| 4 | −0.0007 | 49.2% | 0.089 |
+| 8 | −0.0244 | 55.9% | 0.089 |
+
+Reading: the two gradients start **near-orthogonal with a mild positive lean** (cos≈0.02,
+well above the ~0.0006 expected from two random vectors in this ~2.36M-dim space, but far
+from aligned) and drift toward **mild opposition** by epoch 8, with the fraction of
+outright-conflicting steps crossing 50%. Simultaneously the semantic term's *relative*
+magnitude after λ-weighting roughly doubles (0.048 → 0.089) as the crash loss saturates —
+so the semantic gradient becomes both louder and more adversarial later in training, which
+is offered as a mechanistic account of why later checkpoints in this run underperformed
+earlier ones (a pattern that repeated, more severely, in an unplanned 12-epoch extension of
+the same run: cos continued oscillating between −0.04 and +0.01, the ratio spiked to ~0.19
+as `‖g_crash‖` collapsed toward zero, and `train_val_gap` climbed from 0.63 to 1.04 —
+overfitting, not further learning).
+
+**Not yet measured** (flagged, not resolved): whether the gradient a §5-default (patches-tap)
+run actually *produces* in the pooled representation is comparable in magnitude to a random
+perturbation of equal norm applied to the patch grid. If it is much smaller than random, the
+gradient is moving directions the pooler's attention weights ignore even though those
+directions *could* in principle carry caption information (§5b) — i.e. bypass, not just
+weak/orthogonal signal. If comparable, the gradient is already reaching the decision path
+and the §5b tap change would be redundant. Cheap to check (existing checkpoints, no
+training) and not yet run.
+
+---
+
 ## 8. Total objective
 
 ```
@@ -325,8 +432,22 @@ L = L_crash + λ · L_sem ,    λ = 0.05
   crash-loss magnitude given InfoNCE's scale.
 
 **Optimisation.** AdamW, lr 2e-4, batch size 1 with gradient accumulation 8 (effective
-batch 8, ~176 optimiser steps per epoch at the 1,761 pool). No LR schedule currently.
-Gradient clipping at norm 1.0.
+batch 8, ~176 optimiser steps per epoch at the 1,761 pool). No LR schedule currently
+(a separate `--lr-schedule cosine` option exists and was tested in a rejected recipe
+variant — see DECISIONS.md — but is not the default).
+
+**Gradient clipping — two modes** (`--clip-grad-per-group`, default off): ✅
+- **Default (off):** ONE `clip_grad_norm_(trainable, 1.0)` over every trainable parameter
+  combined. In arm A1, `trainable` = LoRA only. In arm B, `trainable` = LoRA + Predictor +
+  `log τ`, all sharing the same budget of 1.0.
+- **`--clip-grad-per-group` (on):** LoRA and the semantic branch (Predictor + `log τ`) are
+  clipped against **separate** budgets of 1.0 each.
+
+This distinction is not cosmetic: under the default mode, a large early Predictor gradient
+can inflate the *combined* norm and scale down the LoRA trunk's effective update below what
+arm A1 receives for an identical crash loss — a confound unrelated to `λ` that makes A1 and
+B not strictly comparable. Every run before this fix used the default (shared-budget) mode;
+the fix is applied starting with the first fully-corrected run cited in §7c.
 
 ---
 
@@ -361,3 +482,9 @@ to stock BADAS-Open.
 
 ⚠️ `log τ` is *not* checkpointed — a resumed InfoNCE run silently restarts it at
 `--infonce-tau-init` while `--optimizer-init` restores stale Adam moments for that slot.
+
+**Note on the table above:** the Predictor row (1.25 M, `ResamplerProjector`) is the
+default `patches`-tap architecture used by the joint Stage-B trainer. The standalone B1
+probe's `pooled`/`meanpool` taps (§5b) use a different, smaller `_VectorMLP` (1.18 M) —
+not yet wired into Stage B, so arm B's live trainable-param count is still governed by this
+table as written.
