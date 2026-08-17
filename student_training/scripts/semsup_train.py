@@ -1,18 +1,22 @@
 """
 semsup_train.py
 ================
-Unified A1 / B trainer. LoRA-unfreezes the BADAS ViT-L trunk; always trains
-with the crash loss (CE on BADAS's own 2-logit head vs label).
+Unified A1 / B / P1-two-stage trainer. LoRA-unfreezes the BADAS ViT-L trunk.
+Optimized loss = crash_weight * crash_CE + semantic_weight * semantic_loss.
 
-  --semantic-weight 0    -> Stage A1 (crash-only control)
-  --semantic-weight >0   -> Stage B   (crash + semantic-aux; needs --predictor-init
-                             from semsup_b1_probe.py for warm-start, or trains the
-                             Predictor from scratch alongside if omitted)
+  --crash-weight 1 (default) --semantic-weight 0   -> Stage A1 (crash-only control)
+  --crash-weight 1           --semantic-weight >0   -> Stage B   (crash + semantic-aux;
+                              needs --predictor-init from semsup_b1_probe.py for
+                              warm-start, or trains the Predictor from scratch alongside)
+  --crash-weight 0           --semantic-weight >0   -> Stage A of the P1 two-stage
+                              design (2026-08 plan): semantic objective ONLY, no crash
+                              gradient reaches the trunk. Requires --select-by retrieval
+                              (val_ap is uninformative when nothing optimizes it).
 
-Selects the best epoch by held-out (clip-level, from the 267-caption set) crash
-AP, then scores the REAL 677-clip Private test set with the selected checkpoint
-and writes a results JSONL compatible with evaluate_metrics.py's schema
-({video_id, ground_truth, score, group}).
+Selects the best epoch by --select-by (default val_ap, clip-level; 'retrieval' = clip-
+level caption retrieval@1, required for Stage A), then scores the REAL 677-clip Private
+test set with the selected checkpoint(s) and writes a results JSONL compatible with
+evaluate_metrics.py's schema ({video_id, ground_truth, score, group}).
 
 IMPORTANT: run --dry-run-modules in semsup_common.py FIRST on the pod to confirm
 real LoRA target_modules names before running this for real (BADAS internals are
@@ -32,6 +36,14 @@ Usage (RunPod):
       --epochs 8 --out-dir /root/semsup/b \
       --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
       --test-frames-root ../../dataset/test
+
+  # P1 Stage A (semantic-only, select on retrieval - no test scoring, no crash label
+  # ever touches the trunk):
+  python semsup_train.py --config ../configs/e4_stageA.yaml \
+      --lora-target-modules query,key,value \
+      --crash-weight 0.0 --semantic-weight 1.0 --semantic-loss infonce \
+      --select-by retrieval --epochs 12 --clip-grad-per-group \
+      --out-dir /workspace/semsup/p1_stageA
 """
 from __future__ import annotations
 
@@ -57,6 +69,9 @@ from semsup_common import (  # noqa: E402
 from vjepa_reason import ResamplerProjector  # noqa: E402
 from e4_stageA_badas_open_eval import load_manifest, frame_paths_for  # noqa: E402
 from metrics_core import metrics_from_arrays  # noqa: E402
+# Lifted to module level in semsup_b1_probe.py 2026-08-17 (P1 plan, change #2)
+# specifically so this import is possible - was nested inside that file's main().
+from semsup_b1_probe import clip_level_retrieval_acc  # noqa: E402
 
 
 def build_caption_bank(examples, siglip_model, siglip_tok, device, batch=64):
@@ -132,8 +147,10 @@ def _clip_grads(args, lora_params, aux_params, trainable):
 
 def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                  siglip_tok=None, semantic_loss="cosine", val_bank=None,
-                 val_vids=None, log_tau=None):
-    """ONE pass over the val set -> (val_ap, val_crash_loss, val_sem_loss, n_failed).
+                 val_vids=None, log_tau=None, full_bank=None,
+                 retrieval_tolerance=0.92):
+    """ONE pass over the val set ->
+    (val_ap, val_crash_loss, val_sem_loss, n_failed, retrieval_stats).
 
     Replaces the old evaluate_crash_ap + evaluate_val_loss pair. Each of those ran a
     FULL ViT-L forward over every val window, and the second returned a strict
@@ -155,6 +172,56 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
     For semantic_loss='infonce' the val bank is the VAL set's own captions, keeping
     val InfoNCE the analogue of the train term. Note N differs between train and val,
     so compare the TREND across epochs, not the absolute train-vs-val difference.
+
+    retrieval_stats (2026-08-17, P1 plan changes #3/#5): a dict, EMPTY unless both
+    `predictor` and `val_bank` are given (i.e. semantic_loss='infonce' - cosine has
+    no bank to retrieve against). Every anchor's own true target is looked up via
+    its `_bank_idx` rather than assumed positionally aligned with `val_bank`, so
+    this is correct even when some val windows fail to load this epoch (n_failed>0
+    would otherwise desync a positional lookup). Keys:
+      retrieval_clip            - strict clip-level retrieval@1 among the val set's
+                                   own ~221 clips (chance = 1/n_clips). PRIMARY metric.
+      collapse_control_clip     - same task, but every prediction replaced by this
+                                   epoch's constant mean target embedding. If the
+                                   real model doesn't clear this, it learned nothing
+                                   beyond "always guess the average caption" - see
+                                   the B1 probe's identical control and EXPERIMENTS.md.
+      retrieval_clip_full1761   - retrieval among the val clips' own targets PLUS
+                                   every train-set caption as extra distractors
+                                   (only computed when `full_bank` is given). Chance
+                                   drops from ~1/221 to ~1/(221+len(full_bank)).
+                                   Distractors are train ROWS not train CLIPS (a
+                                   train clip with multiple TTE windows contributes
+                                   multiple near-duplicate distractor rows) - they
+                                   can never be a val clip's correct answer (train
+                                   and val share no video_id), so this only makes
+                                   the task marginally harder, not incorrect.
+      retrieval_clip_tolerant   - counts the top-1 retrieval a HIT if it is within
+                                   `retrieval_tolerance` cosine of the true target,
+                                   even when it is not the exact match - catches the
+                                   case where the model retrieves a DIFFERENT clip's
+                                   caption that still correctly describes the scene,
+                                   which strict retrieval@1 scores as a plain miss.
+      embed_margin_mean         - mean(s_true - max(s_other)) across anchors, on the
+                                   SAME same-video-masked similarity row InfoNCE
+                                   trains against. Shrinking/negative = the true
+                                   caption is losing its lead over the field.
+      embed_max_q_mean          - mean softmax-max-probability across anchors, on
+                                   that same masked row. ->1.0 = SATURATION (the
+                                   failure mode that actually matters here - see
+                                   docs_agents/ARCHITECTURE_BLOCKS.md's embedding-
+                                   health note: temperature AMPLIFIES this band's
+                                   gradient ~18x, so saturation kills it, not size).
+      embed_std_s_mean          - mean std of the masked similarity row. ->0 =
+                                   every caption looks equally (dis)similar to this
+                                   anchor - a different collapse signature.
+      embed_std_p               - std of predicted embeddings across ALL processed
+                                   val rows (mean over the Dt feature dims). ->0 =
+                                   the Predictor is emitting a near-constant vector
+                                   regardless of input video - the exact degenerate
+                                   solution that made the original cosine loss null
+                                   (see B1's collapse control in EXPERIMENTS.md).
+      n_retrieval_clips         - denominator for retrieval_clip (~221 on val).
     """
     badas.nn_model.eval()
     if predictor is not None:
@@ -162,6 +229,8 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
     from collections import defaultdict
     by_clip = defaultdict(list)
     total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
+    # Only populated when predictor+val_bank both exist - see retrieval_stats above.
+    pred_list, tgt_list, vid_list, bank_idx_list = [], [], [], []
     with torch.no_grad():
         # Same prefetch pipeline as the training loop - see
         # TrainableBadasWrapper.prefetch_clips()'s docstring. `i` is the
@@ -192,8 +261,13 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                     # stamped bank index, not the loop counter - val_ex happens not
                     # to be shuffled, but relying on that is exactly the assumption
                     # that would break silently if it ever changes.
-                    sem_loss = infonce_from_bank(pred, ex.get("_bank_idx", i),
-                                                  val_bank, val_vids, log_tau)
+                    bank_idx = ex.get("_bank_idx", i)
+                    sem_loss = infonce_from_bank(pred, bank_idx, val_bank, val_vids, log_tau)
+                    if val_bank is not None:
+                        pred_list.append(pred.squeeze(0).detach())
+                        tgt_list.append(val_bank[bank_idx])
+                        vid_list.append(ex["video_id"])
+                        bank_idx_list.append(bank_idx)
                 else:
                     tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
                     sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
@@ -204,7 +278,7 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
     if n_failed:
         print(f"  [warn] val: {n_failed}/{len(examples)} windows failed to load")
     if n == 0:
-        return float("nan"), float("nan"), float("nan"), n_failed
+        return float("nan"), float("nan"), float("nan"), n_failed, {}
 
     ys, yt = [], []
     for pairs in by_clip.values():
@@ -218,7 +292,77 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
         yt.append(label)
     val_ap = average_precision_score(yt, ys) if len(set(yt)) >= 2 else float("nan")
 
-    return val_ap, total_crash / n, total_sem / n, n_failed
+    retrieval_stats = {}
+    if pred_list and val_bank is not None:
+        P = torch.stack(pred_list)              # (n_rows, Dt)
+        T = torch.stack(tgt_list)                # (n_rows, Dt) - each row's OWN true target
+
+        # --- primary + collapse-control retrieval (reuses the lifted, tested helper) ---
+        retrieval_stats["retrieval_clip"] = clip_level_retrieval_acc(P, T, vid_list)
+        mean_emb = F.normalize(T.mean(dim=0, keepdim=True), dim=-1).expand_as(T)
+        retrieval_stats["collapse_control_clip"] = clip_level_retrieval_acc(mean_emb, T, vid_list)
+
+        # --- pool predictions and their own targets per clip once, reused below ---
+        by_p, by_t = defaultdict(list), defaultdict(list)
+        for idx, v in enumerate(vid_list):
+            by_p[v].append(P[idx])
+            by_t[v].append(T[idx])
+        clip_ids = sorted(by_p.keys())
+        n_clips = len(clip_ids)
+        retrieval_stats["n_retrieval_clips"] = n_clips
+        if n_clips >= 2:
+            Pc = torch.stack([F.normalize(torch.stack(by_p[v]).mean(0), dim=-1) for v in clip_ids])
+            Tc = torch.stack([F.normalize(torch.stack(by_t[v]).mean(0), dim=-1) for v in clip_ids])
+
+            # --- retrieval vs the full corpus (val's own clips + all train rows as
+            #     extra distractors). Correct index for clip k is k, since Tc is
+            #     placed first in the candidate matrix. ---
+            if full_bank is not None and full_bank.numel() > 0:
+                candidates = torch.cat([Tc, full_bank.to(Tc.device)], dim=0)
+                sims_full = Pc @ candidates.T
+                top1_full = sims_full.argmax(dim=1)
+                correct_idx = torch.arange(n_clips, device=Pc.device)
+                retrieval_stats["retrieval_clip_full1761"] = \
+                    (top1_full == correct_idx).float().mean().item()
+
+            # --- similarity-tolerant retrieval: credit a near-miss whose retrieved
+            #     caption still genuinely resembles the true one. ---
+            sims_val = Pc @ Tc.T
+            top1_val = sims_val.argmax(dim=1)
+            retrieved = Tc[top1_val]
+            sim_to_true = F.cosine_similarity(retrieved, Tc, dim=-1)
+            retrieval_stats["retrieval_clip_tolerant"] = \
+                (sim_to_true >= retrieval_tolerance).float().mean().item()
+
+        # --- embedding-health stats, on the SAME same-video-masked row InfoNCE
+        #     actually trains against (see the docstring above for what each catches) ---
+        if log_tau is not None and val_vids is not None:
+            tau_val = log_tau.exp().clamp(min=1e-2, max=1.0)
+            sims_bank = P @ val_bank.T                     # (n_rows, N_val_bank)
+            margins, max_qs, stds = [], [], []
+            for row_i, bidx in enumerate(bank_idx_list):
+                anchor_vid = val_vids[bidx]
+                same_vid = torch.tensor([v == anchor_vid for v in val_vids], device=device)
+                same_vid[bidx] = False
+                s_row = sims_bank[row_i].masked_fill(same_vid, float("-inf"))
+                s_true = s_row[bidx].item()
+                s_wo_true = s_row.clone()
+                s_wo_true[bidx] = float("-inf")
+                margins.append(s_true - s_wo_true.max().item())
+                q = torch.softmax(s_row / tau_val, dim=0)
+                max_qs.append(q.max().item())
+                finite = s_row[s_row > -1e30]
+                if finite.numel() > 1:
+                    stds.append(finite.std().item())
+            if margins:
+                retrieval_stats["embed_margin_mean"] = sum(margins) / len(margins)
+                retrieval_stats["embed_max_q_mean"] = sum(max_qs) / len(max_qs)
+            if stds:
+                retrieval_stats["embed_std_s_mean"] = sum(stds) / len(stds)
+
+        retrieval_stats["embed_std_p"] = P.std(dim=0).mean().item()
+
+    return val_ap, total_crash / n, total_sem / n, n_failed, retrieval_stats
 
 
 def main():
@@ -235,6 +379,15 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
+    ap.add_argument("--crash-weight", type=float, default=1.0,
+                     help="weight on the crash CE term in the optimized loss (default 1.0, "
+                          "matching every prior run). 0.0 = Stage A of the P1 two-stage design "
+                          "(2026-08 plan): train the semantic branch ALONE, with no crash "
+                          "gradient reaching the trunk at all. The raw (unweighted) crash loss "
+                          "is still computed and logged every epoch regardless of this weight - "
+                          "it is a free diagnostic of whether the frozen crash head still fits "
+                          "the drifting representation, it just doesn't drive the LoRA update "
+                          "when --crash-weight 0.")
     ap.add_argument("--semantic-weight", type=float, default=0.0)
     ap.add_argument("--semantic-loss", default="cosine", choices=["cosine", "infonce"],
                      help="'cosine' (default, preserves the original Stage-B behavior) is "
@@ -329,6 +482,27 @@ def main():
                           "the train/val loss gap in epoch_metrics.jsonl rather than trusting "
                           "val_ap alone (val_ap is noisy at this data scale and only measures "
                           "ranking quality, not overfitting).")
+    ap.add_argument("--select-by", default="val_ap", choices=["val_ap", "retrieval"],
+                     help="checkpoint-ranking/early-stop metric (default val_ap, unchanged "
+                          "behavior). 'retrieval' = clip-level caption retrieval@1 on the val "
+                          "set - REQUIRED for Stage A of the P1 two-stage design, where "
+                          "crash_weight=0 makes val_ap uninformative about what Stage A is "
+                          "actually optimizing. This is the same bug class fixed in "
+                          "semsup_b1_probe.py on 2026-08-12 (that probe was selecting InfoNCE "
+                          "checkpoints on val_loss, which ranked differently from retrieval and "
+                          "picked a measurably worse predictor: 0.1086 vs 0.1267 available). "
+                          "Requires --semantic-weight > 0 (a predictor + caption bank must "
+                          "exist to compute retrieval at all).")
+    ap.add_argument("--retrieval-tolerance", type=float, default=0.92,
+                     help="cosine threshold for the similarity-tolerant retrieval@1 variant: "
+                          "count a hit if the TOP-1 retrieved caption is within this cosine of "
+                          "the true one, even if it is not the exact match. Addresses a real "
+                          "blind spot in strict retrieval@1 - if the model retrieves a DIFFERENT "
+                          "clip's caption that happens to correctly describe the scene, strict "
+                          "retrieval scores it as a miss. Default 0.92 sits above the measured "
+                          "p99 cross-video caption similarity (0.870, see "
+                          "docs_agents/ARCHITECTURE_BLOCKS.md), so it should not credit "
+                          "genuinely-different captions as tolerant hits.")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--test-manifest", default=None, help="e.g. test_manifest_hires.jsonl (677 Private)")
     ap.add_argument("--test-frames-root", default=None, help="e.g. dataset/test")
@@ -340,6 +514,13 @@ def main():
                      help="fail fast if fewer than this many training examples load "
                           "(catches a partially-synced/missing frames volume early)")
     args = ap.parse_args()
+
+    if args.crash_weight == 0 and args.semantic_weight == 0:
+        raise ValueError("--crash-weight and --semantic-weight are both 0 - nothing would be "
+                          "optimized. Pick at least one nonzero weight.")
+    if args.select_by == "retrieval" and args.semantic_weight <= 0:
+        raise ValueError("--select-by retrieval requires --semantic-weight > 0 (a Predictor + "
+                          "caption bank must exist to compute retrieval@1 at all).")
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -356,9 +537,18 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stage = "B (crash+semantic)" if args.semantic_weight > 0 else "A1 (crash-only)"
+    # Three-way, not two: crash_weight=0 is Stage A of the P1 two-stage design
+    # (semantic-only, no crash gradient reaches the trunk at all) - distinct from
+    # both the crash-only control (A1) and the joint crash+semantic arm (B).
+    if args.crash_weight > 0 and args.semantic_weight > 0:
+        stage = "B (crash+semantic)"
+    elif args.crash_weight > 0:
+        stage = "A1 (crash-only)"
+    else:
+        stage = "A (semantic-only, P1 Stage A)"
     sem_note = f"  semantic_loss={args.semantic_loss}" if args.semantic_weight > 0 else ""
-    print(f"[cfg] stage={stage}  semantic_weight={args.semantic_weight}{sem_note}  "
+    print(f"[cfg] stage={stage}  crash_weight={args.crash_weight}  "
+          f"semantic_weight={args.semantic_weight}{sem_note}  select_by={args.select_by}  "
           f"lora_target_modules={args.lora_target_modules}  seed={args.seed}")
 
     # 're:' prefix -> pass the regex through to peft untouched (peft accepts a single
@@ -517,7 +707,7 @@ def main():
 
     saved = []          # [(val_ap, epoch)] for every epoch, ranked at the end
     t0 = time.time()
-    best_val_ap_seen, epochs_since_improve = float("-inf"), 0
+    best_sel_seen, epochs_since_improve = float("-inf"), 0
     for epoch in range(args.start_epoch, args.epochs + 1):
         badas.nn_model.train()
         if predictor is not None:
@@ -606,7 +796,13 @@ def main():
                         print(f"  [warn] grad-cosine probe disabled this epoch: {exc}")
                     gc_probe_failed = True
 
-            loss = (crash_loss + args.semantic_weight * sem_loss) / args.grad_accum
+            # crash_loss/sem_loss are ALWAYS both computed and logged raw (unweighted) -
+            # crash_weight only controls what reaches the backward pass. At
+            # --crash-weight 0 (Stage A), crash_loss is still a free diagnostic of
+            # whether the frozen head still fits the drifting representation; it
+            # just contributes zero gradient.
+            loss = (args.crash_weight * crash_loss
+                    + args.semantic_weight * sem_loss) / args.grad_accum
             loss.backward()
             total_crash += crash_loss.item()
             total_sem += sem_loss.item()
@@ -630,11 +826,13 @@ def main():
             print(f"  [warn] {n_failed}/{len(train_ex)} examples failed to load this epoch")
 
         # ONE val pass for both the ranking metric and the two loss terms (was two
-        # full ViT-L sweeps over the same windows).
-        val_ap, val_crash_loss, val_sem_loss, n_val_failed = evaluate_val(
+        # full ViT-L sweeps over the same windows). full_bank=train_bank enables the
+        # vs-1761 retrieval variant (None under cosine loss, where no bank exists).
+        val_ap, val_crash_loss, val_sem_loss, n_val_failed, retrieval_stats = evaluate_val(
             badas, val_ex, device, predictor, siglip_model, siglip_tok,
             semantic_loss=args.semantic_loss, val_bank=val_bank,
-            val_vids=val_bank_vids, log_tau=log_tau)
+            val_vids=val_bank_vids, log_tau=log_tau, full_bank=train_bank,
+            retrieval_tolerance=args.retrieval_tolerance)
         now = time.time()
         epoch_s = now - epoch_t0
         elapsed = now - t0
@@ -643,10 +841,16 @@ def main():
         # combined train/val loss, same weighting as the actual optimized objective -
         # this (not crash_loss alone) is what "train vs val gap" should compare, since
         # for B the model is optimizing crash+semantic jointly.
-        train_total_loss = avg_crash + args.semantic_weight * avg_sem
-        val_total_loss = val_crash_loss + args.semantic_weight * val_sem_loss
+        train_total_loss = args.crash_weight * avg_crash + args.semantic_weight * avg_sem
+        val_total_loss = args.crash_weight * val_crash_loss + args.semantic_weight * val_sem_loss
         train_val_gap = val_total_loss - train_total_loss  # >0 and growing = overfitting
         cur_lr = opt.param_groups[0]["lr"]
+        # Checkpoint-ranking/early-stop metric (P1 plan, change #4). Both val_ap and
+        # retrieval_clip are "higher is better", so no direction flip is needed
+        # between the two --select-by modes (unlike semsup_b1_probe.py's val_loss
+        # vs retrieval_clip, which point opposite ways).
+        sel_value = (retrieval_stats.get("retrieval_clip", float("nan"))
+                     if args.select_by == "retrieval" else val_ap)
         # Gradient-angle summary for this epoch. cos<0 on a step means the crash and
         # semantic objectives asked the shared trunk to move in opposing directions.
         grad_cos_mean = cos_sum / cos_n if cos_n else float("nan")
@@ -657,6 +861,17 @@ def main():
               f"sem_loss={avg_sem:.4f}  val_crash_loss={val_crash_loss:.4f}  "
               f"val_sem_loss={val_sem_loss:.4f}  val_ap={val_ap:.4f}  "
               f"train_val_gap={train_val_gap:.4f}  lr={cur_lr:.2e}  ({elapsed:.1f}s)")
+        if retrieval_stats:
+            print(f"      [retrieval] clip={retrieval_stats.get('retrieval_clip', float('nan')):.4f}  "
+                  f"vs_control={retrieval_stats.get('collapse_control_clip', float('nan')):.4f}  "
+                  f"tolerant={retrieval_stats.get('retrieval_clip_tolerant', float('nan')):.4f}  "
+                  f"vs_full1761={retrieval_stats.get('retrieval_clip_full1761', float('nan')):.4f}  "
+                  f"n_clips={retrieval_stats.get('n_retrieval_clips', 0)}  "
+                  f"(select_by={args.select_by}, sel_value={sel_value:.4f})")
+            print(f"      [embed-health] margin={retrieval_stats.get('embed_margin_mean', float('nan')):.4f}  "
+                  f"max_q={retrieval_stats.get('embed_max_q_mean', float('nan')):.4f}  "
+                  f"std_s={retrieval_stats.get('embed_std_s_mean', float('nan')):.4f}  "
+                  f"std_p={retrieval_stats.get('embed_std_p', float('nan')):.4f}")
         if cos_n:
             # Relative pull = how big the semantic update is vs the crash update AFTER
             # lambda is applied - the number that says whether the aux term is even
@@ -686,6 +901,19 @@ def main():
                 "val_total_loss": _j(val_total_loss),
                 "train_val_gap": _j(train_val_gap),
                 "val_ap": _j(val_ap),
+                "select_by": args.select_by, "sel_value": _j(sel_value),
+                # Retrieval + embedding-health stats (empty dict under cosine loss,
+                # or before a Predictor exists at all - see evaluate_val()'s
+                # retrieval_stats docstring for what each key means/catches).
+                "retrieval_clip": _j(retrieval_stats.get("retrieval_clip", float("nan"))),
+                "collapse_control_clip": _j(retrieval_stats.get("collapse_control_clip", float("nan"))),
+                "retrieval_clip_full1761": _j(retrieval_stats.get("retrieval_clip_full1761", float("nan"))),
+                "retrieval_clip_tolerant": _j(retrieval_stats.get("retrieval_clip_tolerant", float("nan"))),
+                "n_retrieval_clips": retrieval_stats.get("n_retrieval_clips", 0),
+                "embed_margin_mean": _j(retrieval_stats.get("embed_margin_mean", float("nan"))),
+                "embed_max_q_mean": _j(retrieval_stats.get("embed_max_q_mean", float("nan"))),
+                "embed_std_s_mean": _j(retrieval_stats.get("embed_std_s_mean", float("nan"))),
+                "embed_std_p": _j(retrieval_stats.get("embed_std_p", float("nan"))),
                 # Crash-vs-semantic gradient angle on the shared LoRA params.
                 # grad_cos_mean < 0 or grad_cos_frac_neg > ~0.5 = destructive
                 # interference: the aux objective is fighting crash prediction.
@@ -711,18 +939,20 @@ def main():
         # Optimizer state per epoch, so an interrupted run can resume on the SAME
         # trajectory (--optimizer-init) rather than restarting Adam momentum.
         torch.save(opt.state_dict(), ep_dir / "optimizer.pt")
-        saved.append((val_ap, epoch))
+        # (sel_value, epoch) - val_ap under the default --select-by, retrieval_clip
+        # under Stage A. Both are "higher is better" so downstream ranking is unchanged.
+        saved.append((sel_value, epoch))
 
-        # Early stopping on val_ap (opt-in). Every epoch's checkpoint is already
+        # Early stopping on sel_value (opt-in). Every epoch's checkpoint is already
         # written above, so stopping early discards nothing.
         if args.early_stop_patience > 0:
-            if val_ap == val_ap and val_ap > best_val_ap_seen:   # NaN-safe
-                best_val_ap_seen, epochs_since_improve = val_ap, 0
+            if sel_value == sel_value and sel_value > best_sel_seen:   # NaN-safe
+                best_sel_seen, epochs_since_improve = sel_value, 0
             else:
                 epochs_since_improve += 1
                 if epochs_since_improve >= args.early_stop_patience:
-                    print(f"  [early-stop] val_ap has not improved for "
-                          f"{epochs_since_improve} epochs (best={best_val_ap_seen:.4f}); "
+                    print(f"  [early-stop] {args.select_by} has not improved for "
+                          f"{epochs_since_improve} epochs (best={best_sel_seen:.4f}); "
                           f"stopping at epoch {epoch}")
                     break
 
@@ -739,16 +969,26 @@ def main():
     for _, e in saved:
         if e not in keep:
             shutil.rmtree(out_dir / f"epoch_{e:02d}", ignore_errors=True)
-    best_ap, best_epoch = topk[0]
-    print(f"\n[done] top-{args.keep_top_k} by val_ap: " +
-          ", ".join(f"ep{e} (val_ap={va:.4f})" for va, e in topk))
+    # best_sel is in --select-by's units (val_ap by default, retrieval_clip under
+    # Stage A) - NOT always literally val_ap, despite the historical variable name
+    # this replaces. Mislabeling a retrieval score as "val_ap" downstream is exactly
+    # the class of bug already fixed once in semsup_b1_probe.py - avoided here by
+    # naming the JSON field after args.select_by instead of hardcoding "val_ap".
+    best_sel, best_epoch = topk[0]
+    print(f"\n[done] top-{args.keep_top_k} by {args.select_by}: " +
+          ", ".join(f"ep{e} ({args.select_by}={sv:.4f})" for sv, e in topk))
     with open(out_dir / "train_metrics.json", "w", encoding="utf-8") as f:
         json.dump({"stage": stage,
-                    "best_val_ap": (None if best_ap != best_ap else round(best_ap, 4)),
+                    "selection_metric": args.select_by,
+                    "best_selection_value": (None if best_sel != best_sel else round(best_sel, 4)),
+                    # Kept for backward compatibility with every prior run's schema -
+                    # only meaningful when select_by == 'val_ap' (the default).
+                    "best_val_ap": (None if (args.select_by != "val_ap" or best_sel != best_sel)
+                                     else round(best_sel, 4)),
                     "best_epoch": best_epoch,
                     "keep_top_k": args.keep_top_k,
-                    "top_checkpoints": [{"epoch": e, "val_ap": (None if va != va else round(va, 4))}
-                                         for va, e in topk],
+                    "top_checkpoints": [{"epoch": e, args.select_by: (None if sv != sv else round(sv, 4))}
+                                         for sv, e in topk],
                     "n_train": len(train_ex), "n_val": len(val_ex),
                     "semantic_weight": args.semantic_weight,
                     "semantic_loss": args.semantic_loss if args.semantic_weight > 0 else None,
@@ -813,15 +1053,16 @@ def main():
         return yt, ys, grp
 
     summary = []
-    for rank, (va, epoch) in enumerate(topk, 1):
+    for rank, (sv, epoch) in enumerate(topk, 1):
         print(f"\n[test] scoring top-{rank} checkpoint (epoch {epoch}, "
-              f"val_ap={va:.4f}) on {len(records)} clips ...")
+              f"{args.select_by}={sv:.4f}) on {len(records)} clips ...")
         res_path = out_dir / f"test_results_ep{epoch:02d}.jsonl"
         yt, ys, grp = score_checkpoint(epoch, res_path)
         m = metrics_from_arrays(yt, ys, groups=grp, threshold=0.5)
         with open(out_dir / f"metrics_ep{epoch:02d}.json", "w", encoding="utf-8") as f:
             json.dump({"stage": stage, "epoch": epoch, "rank": rank,
-                       "val_ap": (None if va != va else round(va, 4)), **m}, f, indent=2)
+                       "selection_metric": args.select_by,
+                       "selection_value": (None if sv != sv else round(sv, 4)), **m}, f, indent=2)
         per = m.get("per_tte_ap", {})
         print(f"       test_AP={m['ap']}  AUC={m['auc_roc']}  F1={m['f1']} "
               f"(F1*={m['f1_optimal']}@{m['optimal_threshold']})  "
@@ -830,7 +1071,8 @@ def main():
         print(f"       per-TTE AP: " +
               "  ".join(f"{k}={v['ap']}(n={v['n']})" for k, v in per.items()))
         summary.append({"rank": rank, "epoch": epoch,
-                        "val_ap": (None if va != va else round(va, 4)),
+                        "selection_metric": args.select_by,
+                        "selection_value": (None if sv != sv else round(sv, 4)),
                         "test_ap": m["ap"], "auc_roc": m["auc_roc"], "f1": m["f1"],
                         "f1_optimal": m["f1_optimal"], "recall": m["recall_sensitivity_tpr"],
                         "specificity": m["specificity_tnr"], "brier": m["brier"],

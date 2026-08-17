@@ -83,6 +83,43 @@ class _VectorMLP(torch.nn.Module):
         return self.net(x).unsqueeze(1)     # -> (B, 1, out_dim)
 
 
+def clip_level_retrieval_detail(P, T, vids_list):
+    """Pool rows sharing a video_id (mean, renormalize) before retrieval, so
+    the candidate pool is the real independent sample size (~17 clips), not
+    51 correlated TTE-window rows. See evaluate()'s docstring. Returns
+    (clip_ids SORTED for a canonical cross-run order, per-clip hit 0/1 list)
+    so a paired arm-vs-arm comparison (semsup_promptbakeoff_report.py) can
+    resample clips together across two separately-trained arms - the
+    aggregate accuracy alone can't support that.
+
+    2026-08-17: lifted to MODULE level (was nested inside main()) so
+    semsup_train.py can import it for Stage-A checkpoint selection (P1 plan) -
+    a pure move, no logic change. Pure function of its arguments; no closure
+    over anything from main()."""
+    from collections import defaultdict
+    by_p, by_t = defaultdict(list), defaultdict(list)
+    for i, v in enumerate(vids_list):
+        by_p[v].append(P[i])
+        by_t[v].append(T[i])
+    clip_ids = sorted(by_p.keys())
+    if len(clip_ids) < 2:
+        return [], []
+    Pc = torch.stack([F.normalize(torch.stack(by_p[v]).mean(0), dim=-1) for v in clip_ids])
+    Tc = torch.stack([F.normalize(torch.stack(by_t[v]).mean(0), dim=-1) for v in clip_ids])
+    top1c = (Pc @ Tc.T).argmax(dim=1)
+    idxc = torch.arange(len(clip_ids), device=P.device)
+    hits = (top1c == idxc).int().tolist()
+    return clip_ids, hits
+
+
+def clip_level_retrieval_acc(P, T, vids_list):
+    """Lifted alongside clip_level_retrieval_detail - see its docstring."""
+    clip_ids, hits = clip_level_retrieval_detail(P, T, vids_list)
+    if not clip_ids:
+        return float("nan")
+    return sum(hits) / len(hits)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="e4_stageA.yaml (BADAS hf_repo etc.)")
@@ -265,35 +302,6 @@ def main():
         acc_sibling_ok = sib_hit.mean().item()
         acc_clip = clip_level_retrieval_acc(P, T, vids_arr)
         return loss, diag.mean().item(), acc, acc_sibling_ok, acc_clip
-
-    def clip_level_retrieval_detail(P, T, vids_list):
-        """Pool rows sharing a video_id (mean, renormalize) before retrieval, so
-        the candidate pool is the real independent sample size (~17 clips), not
-        51 correlated TTE-window rows. See evaluate()'s docstring. Returns
-        (clip_ids SORTED for a canonical cross-run order, per-clip hit 0/1 list)
-        so a paired arm-vs-arm comparison (semsup_promptbakeoff_report.py) can
-        resample clips together across two separately-trained arms - the
-        aggregate accuracy alone can't support that."""
-        from collections import defaultdict
-        by_p, by_t = defaultdict(list), defaultdict(list)
-        for i, v in enumerate(vids_list):
-            by_p[v].append(P[i])
-            by_t[v].append(T[i])
-        clip_ids = sorted(by_p.keys())
-        if len(clip_ids) < 2:
-            return [], []
-        Pc = torch.stack([F.normalize(torch.stack(by_p[v]).mean(0), dim=-1) for v in clip_ids])
-        Tc = torch.stack([F.normalize(torch.stack(by_t[v]).mean(0), dim=-1) for v in clip_ids])
-        top1c = (Pc @ Tc.T).argmax(dim=1)
-        idxc = torch.arange(len(clip_ids), device=P.device)
-        hits = (top1c == idxc).int().tolist()
-        return clip_ids, hits
-
-    def clip_level_retrieval_acc(P, T, vids_list):
-        clip_ids, hits = clip_level_retrieval_detail(P, T, vids_list)
-        if not clip_ids:
-            return float("nan")
-        return sum(hits) / len(hits)
 
     def infonce_loss(pred, tgt, vids_batch, log_tau):
         """In-batch contrastive loss. Same-video (sibling-TTE) rows are masked out

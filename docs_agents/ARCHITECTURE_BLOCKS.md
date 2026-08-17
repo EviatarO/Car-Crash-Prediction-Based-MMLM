@@ -410,32 +410,41 @@ the same run: cos continued oscillating between −0.04 and +0.01, the ratio spi
 as `‖g_crash‖` collapsed toward zero, and `train_val_gap` climbed from 0.63 to 1.04 —
 overfitting, not further learning).
 
-✅ **Measured 2026-08-16** (`student_training/scripts/p3_delta_patches_vs_pooled.py`,
-40 held-out clips, A1_1761 epoch 4 vs. the fully-corrected Stage-B run's epoch 2): loaded
-both checkpoints' LoRA weights on the same frozen base, captured `patches` and `pooled` for
-the same 40 clips under each, and compared `‖Δpooled‖ / ‖Δpatches‖` against the same ratio
-for a random perturbation of the patch grid with equal norm.
+✅ **Measured 2026-08-16, corrected/re-run 2026-08-17** (`student_training/scripts/
+p3_delta_patches_vs_pooled.py`, 40 held-out clips, A1_1761 epoch 4 vs. the fully-corrected
+Stage-B run's epoch 2): loaded both checkpoints' LoRA weights on the same frozen base,
+captured `patches` and `pooled` for the same 40 clips under each, and compared
+`‖Δpooled‖ / ‖Δpatches‖` against the same ratio for a random perturbation of the patch grid
+with equal norm — **20 independent noise draws per clip** (averaged before comparison, not
+the single draw used in the first pass), with a **paired bootstrap 95% CI** on the
+real-minus-random difference (5,000 resamples over clips).
 
 | | mean ratio (‖Δpooled‖ / ‖Δpatches‖) |
 |---|---|
 | Real (A1 → B weight difference) | **0.00341** |
-| Random-noise control (same norm) | 0.00186 |
+| Random-noise control (20 draws/clip, averaged) | 0.00186 |
 
-The real ratio is ~1.8× the random-noise baseline — higher, but not dramatically so, and
-this is a single point estimate over 40 clips with no confidence interval computed. Read
-together with §5b's pooled-tap probe (22× chance, comparable to `meanpool`'s 18×), this is a
-second, independent line of evidence that the weight difference between the crash-only and
-crash+semantic checkpoints is **not** being preferentially routed into directions the pooler
-discards — if anything it leans mildly the other way. **This weakens the "bypass" framing
-further**: the semantic signal's influence on the trunk does appear to reach the
-classifier-relevant representation, at least to a comparable-or-greater degree than a random
-weight perturbation would. Combined with §7c's own finding (cos≈0, drifting mildly negative,
-not a bypass signature), the more likely account of B's underperformance is **near-orthogonal
-or mildly conflicting objectives that already reach the decision path**, not a routing
-problem — which reprioritizes the two-stage training design (P1 in
-`outputs/e4_vjepa_reason/problems_and_solutions_2026-08-15.md` — pretrain the semantic
-branch, then fine-tune on crash) over the §5b pooled-tap architecture change as the more
-promising next step.
+**Paired diff (real − random): mean = 0.00152, 95% CI [0.00143, 0.00163], excludes zero.**
+The ratio is ~1.8× the random-noise baseline, and this is now a statistically supported
+claim, not just a point estimate — the first pass (2026-08-16) reported this same 1.8× but
+with no per-clip data saved and a single noise draw per clip, so no CI could be computed;
+that version's claim was directionally right but unquantified, and has been superseded by
+this one. Caveat that survives the correction: 40 clips, one checkpoint pair — the CI says
+the *effect is real*, not that it is *large* (1.8× is a modest effect size, tightly bounded).
+
+Read together with §5b's pooled-tap probe (22× chance, comparable to `meanpool`'s 18×), this
+is a second, independent, now-quantified line of evidence that the weight difference between
+the crash-only and crash+semantic checkpoints is **not** being preferentially routed into
+directions the pooler discards — if anything it leans mildly the other way. **This weakens
+the "bypass" framing further**: the semantic signal's influence on the trunk does appear to
+reach the classifier-relevant representation, at least as well as a random weight
+perturbation would. Combined with §7c's own finding (cos≈0, drifting mildly negative, not a
+bypass signature), the more likely account of B's underperformance is **near-orthogonal or
+mildly conflicting objectives that already reach the decision path**, not a routing problem —
+one of several open levers (see `outputs/e4_vjepa_reason/problems_and_solutions_2026-08-15.md`),
+with the two-stage training design (P1 — pretrain the semantic branch, then fine-tune on
+crash) currently prioritized over the §5b pooled-tap architecture change as the next
+experiment, not as "the" remaining fix.
 
 ---
 
