@@ -217,19 +217,45 @@
   (b) a 43% reduction in excess-over-chance signal is a real, reportable improvement regardless
   of whether B-v2's result is decisive.
 
+### P3 correction and P1 two-stage (2026-08-16 – 17)
+- **Report P3's "1.8×" ratio without a confidence interval** → rejected 2026-08-17, after the
+  user pointed out the first pass (single noise draw per clip, no per-clip data saved) couldn't
+  support the claim. Re-ran with 20 draws/clip and a paired bootstrap; same point estimate, now
+  with a real CI [0.00143, 0.00163] excluding zero. The general lesson: a ratio between a real
+  effect and a noise control needs the control's own variance estimated (multiple draws), not
+  assumed from one sample.
+- **Call P1 (two-stage training) "the last untested structural lever"** → rejected 2026-08-16,
+  after the user pushed back. Several levers remain genuinely untested: B-rev (reverse
+  projection direction), structured-field targets, the λ sweep, SigLIP's sigmoid loss, corpus
+  scale-up, unfreezing the crash head. P1 was one candidate among several, not a final one.
+- **P1 two-stage training, reusing A1_1761's LR unchanged for Stage B** → this IS what was run,
+  and it lost by the widest margin in the thread (+0.0716 AP). Not rejected as a design in
+  principle — the specific choice to reuse the from-scratch LR on a warm-started checkpoint is
+  the likely proximate cause (train_val_gap more than doubled vs A1 under identical settings).
+  Whether a Stage-B-specific LR fixes this is an open question (see below), not yet tested.
+
 ## Unresolved design questions
 
-- **Does InfoNCE semantic supervision (B) beat crash-only LoRA (A1) on the 1,761-window mixed
-  pool?** **Partially resolved 2026-08-08, reopened same day.** Sequential design: no benefit
-  (test_AP 0.897 vs 0.900). Parallel design (fresh matched-init, λ/loss the only difference) DID
-  run: test_AP=0.8901 vs A1_1761's 0.900, paired bootstrap ΔAP=0.0105, 95% CI [0.0040, 0.0173]
-  — B is significantly *worse*. But the `/project-review` audit found the V10 caption corpus
-  leaks the label (text-only AUC=0.9643), so this result can't be trusted as a clean answer —
-  a redundant, label-correlated auxiliary loss could plausibly hurt for reasons unrelated to
-  whether real semantic grounding would help. **Reopened, now pending B-v2**: same parallel
-  design, same corpus except captioned with the register-neutral V12 prompt (residual leak
-  AUC=0.7640, down from 0.9643). B-v2 is running now — see PROJECT_STATE.md/EXPERIMENTS.md.
-  This is the answer that will actually resolve the question.
+- **Does semantic supervision beat crash-only LoRA (A1) on the 1,761-window mixed pool?**
+  **Resolved, repeatedly, always in the negative.** Five real GPU attempts, gap widening each
+  time execution got cleaner, not narrowing:
+
+  | Arm | ΔAP vs A1_1761 (paired bootstrap) |
+  |---|---|
+  | B_1761 parallel (V10, leaky corpus) | +0.0105, CI [0.0040, 0.0173] |
+  | B-v2 (V12, clean corpus, cold-start predictor) | +0.0189, CI [0.0099, 0.0285] |
+  | B-v3 (V12, warm-started + per-group clip) | +0.0218, CI [0.0117, 0.0325] |
+  | P1 two-stage (Stage A pretrain → Stage B finetune) | **+0.0716, CI [0.0477, 0.0977]** |
+
+  Three independent diagnoses now rule out routing/leakage explanations: caption leakage fixed
+  (didn't help), the semantic gradient measurably reaches the classifier's own representation
+  (P3, paired CI excludes zero) at least as well as random, and the crash/semantic gradients are
+  near-orthogonal rather than opposed (gradient-angle probe). P1 (the most different design
+  tried) is currently the *worst* result, with a specific measured mechanism (overfitting under
+  a warm-started-but-unchanged LR, not unexplained forgetting) — see EXPERIMENTS.md. **Open:**
+  whether a Stage-B-specific (lower) LR recovers P1's loss, and whether any of the untested
+  levers (B-shuffle control, B-rev/reverse-projection, λ sweep, corpus scale-up) change the
+  picture. Not yet run.
 
 - **Why does the frozen A0 scorer do notably better on train (13.2% error, n=4,446) than on
   the known 677-clip test set (23.6% error)?** Confirmed real and stable at full scale
@@ -291,20 +317,31 @@
   difference between the two pools. Pipeline mechanics checked and ruled out as the cause
   (byte-identical extraction verified). Chunks 1-2, once scored, will show whether this holds
   at 3× the sample or was a chunk-0-specific artifact of which 500 videos landed there.
-- **Does B-v2 (InfoNCE on the V12 corrected corpus) beat A1_1761?** Open, pending the run in
-  progress — this is now the decisive experiment for the thesis's central question. See
-  PROJECT_STATE.md for how to check status and EXPERIMENTS.md for the exact comparison method
-  (paired bootstrap, 677 test clips) once it finishes.
 - **Is A1-v2's underperformance driven by the natural (non-enriched) pool distribution, the
   recipe bundle (cosine LR / dropout 0.10 / encoder-only LoRA), or both?** Not isolated —
-  deprioritized in favor of B-v2. Whoever revisits pool-scaling should ablate these separately
-  rather than re-running the same bundled config.
+  deprioritized in favor of the B-vs-A1 question, which is now resolved (see above). Still
+  genuinely open if anyone revisits pool-scaling; should ablate separately rather than
+  re-running the same bundled config.
 - **Is V12's residual leak (AUC=0.7640) removable by further prompt work, or is it an inherent
   floor once captions are kinematically accurate?** Open. The diagnosis (genuine `braking`/
   `decreasing gap` vocabulary, not register violations) suggests a floor, but this wasn't tested
-  by trying a V13 that also normalizes kinematic phrasing — not attempted, not clearly worth the
-  cost given B-v2 is already running on V12.
-- **Should `semsup_b1_probe.py`'s checkpoint-selection bug (selects on cosine loss even under
-  `--loss infonce`) be fixed?** Found by `/project-review`, not fixed. Low priority — B-v2
-  doesn't warm-start from any B1 probe checkpoint — but anyone reusing that script for a fresh
-  InfoNCE probe should fix `evaluate()` to select on `val_retrieval_top1_acc_clip` first.
+  by trying a V13 that also normalizes kinematic phrasing. Lower priority now that leakage is
+  ruled out as B's failure mode (fixing it made the gap wider, not narrower).
+- **Does a lower Stage-B learning rate recover P1's loss?** New, open. P1's Stage B reused
+  A1_1761's from-scratch LR (2e-4) on LoRA weights already displaced by 12 epochs of semantic
+  pretraining, and overfit roughly 2× faster (train_val_gap 0.870 vs A1's 0.370 by epoch 8).
+  Untested whether a gentler Stage-B LR (e.g. 0.1-0.5×) closes some of the +0.0716 AP gap, or
+  whether the underlying representation is simply not crash-compatible regardless of LR.
+- **Does Stage B's final encoder still retain Stage A's semantic structure, or was it
+  overwritten?** New, open — the "retention probe" scoped but not run. Needs a small script
+  pairing Stage B's LoRA weights with Stage A's (frozen, discarded-at-inference) Predictor to
+  measure retrieval@1 post-Stage-B. Would distinguish "semantics got erased" from "semantics
+  survived but are irrelevant to crash prediction" as P1's failure mode.
+- **B-shuffle control (captions permuted within class) — still not run**, despite being on the
+  plan since W3. This is the cleanest available test of whether caption *content* (vs. caption
+  *class*) does any work at all, and would strengthen any write-up of the negative result.
+- **`semsup_b1_probe.py`'s checkpoint-selection bug (selected on cosine loss even under
+  `--loss infonce`)** → **Fixed 2026-08-13**: now selects on `val_retrieval_top1_acc_clip`
+  under InfoNCE, `val_loss` under cosine. The two retrieval helpers (`clip_level_retrieval_
+  {detail,acc}`) were also lifted to module level 2026-08-17 so other scripts can import them
+  (`semsup_train.py` now does, for P1's Stage-A selection).

@@ -46,6 +46,7 @@ That pattern is itself the strongest evidence that the problem is structural.
 | **P8** | Predictor trains jointly — free to re-aim at convenient features | **Freeze predictor after warm-start** (one-line ablation) | 0.5 d | Closes one bypass route from the other end. Nearly free to test |
 | **P9** | Full-bank InfoNCE won't scale past ~10k captions (peaked softmax, not compute) | **SigLIP sigmoid loss** or MoCo-style fixed queue | 1 d | Only matters *if* P7 succeeds and we scale. Not blocking now |
 | **P10** | A1 control could be stronger (crash head is frozen) | **A1-v3: unfreeze head at 0.1× LR** | 1 d | Raises the *control* bar — makes B's job harder. Optional, do last |
+| **P11** | LoRA adapts only the **routing** half of each block (`query,key,value`). `attention.proj` + `mlp.fc1/fc2` — where content is computed, ~2/3 of block params — are **never adapted** | **Re-place LoRA on the MLP** (`fc1,fc2`, or QKV+MLP), everything else = B-v2's recipe | 1 d | Semantic supervision needs to change *what feature is computed*; we only opened *where the model looks*. Would explain cos≈0 alongside a gradient that provably reaches the pooler (P3). **Never tested** — A1-v2's 72-vs-108 comparison was confounded by 3 simultaneous changes |
 
 ---
 
@@ -271,6 +272,63 @@ Standard fixes — **don't scale negatives with dataset size**:
 
 ---
 
+### P11 — LoRA placement: we adapt routing, never content
+
+**The problem (measured from `badas_named_modules.txt`, 2026-08-22).** The trunk has **36
+attention blocks** (24 `backbone.encoder.layer.*` + 12 `backbone.predictor.layer.*`). Each
+exposes **6 adaptable Linear layers**:
+
+```
+attention.query   attention.key   attention.value   attention.proj
+mlp.fc1           mlp.fc2
+```
+
+The legacy `query,key,value` target list adapts **3 of 6 → 108 modules** (2.8M params, 0.84%).
+The other 108 — `attention.proj` (36) and `mlp.fc1`/`mlp.fc2` (72) — have **never been adapted
+in any run of this project**. In a ViT-L the MLP is 1024→4096→1024, so the untouched half holds
+roughly **two-thirds of each block's weights**.
+
+**Why this could be the mechanism.** Q/K/V control *routing* — which patches attend to which,
+i.e. where the model looks. The MLP controls *content* — what feature is computed from a token;
+transformer feed-forward layers are well-characterised as key-value memories storing semantic
+content (Geva et al., EMNLP 2021, "Transformer Feed-Forward Layers Are Key-Value Memories").
+
+The caption asks the trunk to encode **content** ("gray SUV merging, gap decreasing"). We have
+only ever opened the **routing** parameters. The semantic gradient therefore cannot express
+"compute a richer feature" — only "attend somewhere else." What reaches the weights is the
+projection of the semantic objective's natural direction onto routing-space, which may be close
+to arbitrary with respect to the crash decision.
+
+**This predicts exactly the observed signature:** cos(g_crash, g_sem) ≈ 0; a gradient that
+provably reaches the pooled representation (P3) yet does not help; caption signal that scales
+with corpus size (B1, ~n^0.63) but never converts into AP. It also fits that A1 *does* work by
+re-routing — BADAS already attends to roughly the right things, so the crash task never needed
+new content, while the semantic task plausibly does and was never given the parameters to add
+any.
+
+**Status of prior evidence.** A1-v2 compared encoder-only (72) vs encoder+predictor (108), but
+bundled with the 4,446 pool, cosine LR, and dropout 0.10 changed simultaneously — the placement
+effect was **never isolated**. That is a confounded result, not a negative one.
+
+**Steps:**
+1. Rerun **B** with `--lora-target-modules fc1,fc2`, everything else byte-identical to B-v2.
+2. Rerun **B** with `--lora-target-modules query,key,value,fc1,fc2` (routing + content).
+3. Matching **A1 controls** at the same placements — placement changes trainable capacity, so
+   an A1 at the same placement is required before any B-vs-A1 claim.
+4. **Leading indicator, available after ~1 epoch:** `grad_cos_mean` (already instrumented). If
+   opening the MLP moves crash/semantic alignment off ~0.02, that is a mechanistic result on its
+   own, independent of final AP — and it is visible long before the run finishes.
+
+**Budget note.** `fc1`/`fc2` are non-square (1024↔4096), so at equal rank they cost ~2.5× the
+params per module. Use `--lora-r 8` on MLP-only arms for a budget-neutral comparison, or accept
+a larger adapter and report it explicitly.
+
+⚠️ **Do not pass a bare `proj`** as a substring target — it also matches
+`temporal_processor.attention.out_proj` and `backbone.predictor.proj`, which sit outside the
+block structure. Use the `re:` regex form for that one.
+
+---
+
 ## Suggested execution order
 
 1. ~~**P3** (30 min, gate)~~ — **done 2026-08-16.** Gradient reaches the decision path;
@@ -283,6 +341,10 @@ Standard fixes — **don't scale negatives with dataset size**:
    since a mild routing effect (1.8×, not overwhelming) could still compound with a better
    training order
 7. **P8**, **P10** — cheap ablations, fill gaps
+8. **P11** (1 d) — **added 2026-08-22.** Now competitive with P1 for leading hypothesis: it is
+   the only entry that proposes a *mechanism* consistent with all three diagnostics
+   simultaneously (cos≈0, P3-positive, B1-scaling). Has a 1-epoch leading indicator, so it
+   self-terminates early if wrong
 
 **Standing rule:** every arm must match A1_1761's recipe except the one variable under test,
 and final Private-677 scoring happens **once** per chosen configuration.

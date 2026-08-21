@@ -272,7 +272,42 @@ aliases added is what actually gets used for training/comparison scripts.
 | `student_training/scripts/plot_semsup_curves.py` | Reads `epoch_metrics.jsonl` (current trainer's schema), plots loss/val_AP/LR/train-val-gap curves with the selected epoch starred. (Distinct from the older, incompatible `plot_training_curves.py` built for the superseded InternVL3.5 pipeline — do not confuse the two.) |
 | `teacher_distillation/scripts/score_val18_neutral.py` | Scores V12 vs V10 on the 18-clip val set (grounding/neutrality via calibrated `score_blob()`) and runs the leakage judge; writes Excel/summary.md. Contains `binom_ci()`. |
 | `teacher_distillation/scripts/leakage_judge_100.py` | Combines 18 val + 82 sampled clips into n=100, runs the leakage judge with numeric IDs (not letter-capped), computes exact one-sided binomial p-value/CI (no scipy dependency, `math.comb` summation). |
-| `docs_agents/ARCHITECTURE_BLOCKS.md` | Block-by-block reference (shapes/equations/frozen-status) for the architecture diagram. |
+| `teacher_distillation/scripts/caption_leakage_gate.py` | Persisted (2026-08-16) TF-IDF+LogReg+GroupKFold label-leakage gate — was run ad-hoc before. Reproduced V10=0.9643/V12=0.7640 exactly. |
+| `student_training/scripts/p3_delta_patches_vs_pooled.py` | Does the semantic gradient reach the classifier's own pooled representation, or land where the pooler discards it? Paired bootstrap CI (20 noise draws/clip) on `‖Δpooled‖/‖Δpatches‖`, real vs random. |
+| `student_training/scripts/p1_stageA_gate.py` | Scores a Stage-A (semantic-only) checkpoint's encoder against the UNCHANGED frozen crash head on the 677-clip test set — no training. The cheap check before committing to Stage B. |
+| `docs_agents/ARCHITECTURE_BLOCKS.md` | Block-by-block reference (shapes/equations/frozen-status) for the architecture diagram. Also covers the pooled-tap experiments and the gradient-angle diagnostic (§5b/7c). |
+
+## P1 — two-stage (semantic-pretrain → crash-finetune) training
+
+All four joint-training attempts (B_1761-parallel, B-v2, B-v3, +12-epoch extension) lost to
+A1_1761, with the gap *widening* as execution defects were fixed — evidence the failure isn't
+routing/leakage but something about training both objectives jointly under a fixed λ. P1 tests
+the alternative: converge the semantic objective fully first, then fine-tune on crash alone.
+
+```
+STAGE A (semantic only)                    STAGE B (crash only)
+16 frames → ViT-L + LoRA ─┐                16 frames → ViT-L + LoRA(init from Stage A)
+                          ↓                            ↓
+                     Predictor                    crash head (FROZEN)
+                          ↓                            ↓
+            InfoNCE vs frozen SigLIP bank        CE vs GT label
+       train: LoRA + Predictor + log τ          train: LoRA only (Predictor discarded)
+```
+
+`semsup_train.py` implements both stages via two new flags:
+- `--crash-weight` (default 1.0): weight on the crash CE term in the optimized loss
+  (`loss = crash_weight*crash_loss + semantic_weight*sem_loss`). `0.0` = Stage A — no crash
+  gradient reaches the trunk at all. Crash loss is still computed and logged every epoch
+  regardless (a free diagnostic of head-compatibility), just not optimized. Guards against
+  both weights being 0.
+- `--select-by {val_ap, retrieval}` (default `val_ap`): checkpoint-ranking/early-stop metric.
+  Stage A **requires** `retrieval` — val_ap is uninformative when nothing optimizes it (the
+  same bug class already fixed once in `semsup_b1_probe.py`).
+
+Real result (2026-08-17): Stage A peaked at epoch 10 (retrieval@1 46× chance) then overfit;
+the gate passed (small expected dip vs A0); Stage B **lost by the widest margin in the entire
+thread** (ΔAP=+0.0716 vs A1_1761, 95% CI excludes zero) — see EXPERIMENTS.md for the full
+numbers and the measured overfitting mechanism (warm-started LoRA + unchanged from-scratch LR).
 
 ## APIs / functions (new or changed this segment, signatures only)
 
@@ -298,6 +333,29 @@ _v12_builder(gt_mode=None, is_positive=None) -> str                    # NEW: V1
 
 # prompts/PROMPT_SEMSUP_V12_NEUTRAL.py
 build_prompt() -> str                 # NEW: no gt_mode/is_positive args, single neutral prompt
+
+# semsup_train.py (2026-08-17, P1 two-stage)
+evaluate_val(..., full_bank=None, retrieval_tolerance=0.92)
+    -> (val_ap, val_crash_loss, val_sem_loss, n_failed, retrieval_stats: dict)
+    # retrieval_stats keys (empty dict unless predictor+val_bank both exist):
+    #   retrieval_clip, collapse_control_clip, retrieval_clip_full1761,
+    #   retrieval_clip_tolerant, n_retrieval_clips,
+    #   embed_margin_mean, embed_max_q_mean, embed_std_s_mean, embed_std_p
+    # BREAKING for existing callers: was a 4-tuple, now 5. Only call site
+    # (inside main()) already updated.
+_clip_grads / gradient-angle probe / --clip-grad-per-group   # unchanged, pre-existing
+# new CLI args: --crash-weight (default 1.0), --select-by {val_ap,retrieval} (default val_ap),
+#   --retrieval-tolerance (default 0.92)
+# checkpoint-summary JSON fields renamed: "val_ap" -> "selection_metric"/"selection_value"
+#   in metrics_ep*.json/test_summary.json's per-checkpoint entries (train_metrics.json keeps
+#   "best_val_ap" for backward compat, populated only when select_by=='val_ap'). Nothing
+#   downstream currently parses these fields programmatically - verified before the rename.
+
+# semsup_b1_probe.py (2026-08-17)
+clip_level_retrieval_detail(P, T, vids_list) -> (clip_ids: list, hits: list[int])  # LIFTED to
+clip_level_retrieval_acc(P, T, vids_list) -> float                                 # module level
+    # were nested inside main(), uncallable from outside. Pure move, no logic change.
+    # semsup_train.py now imports clip_level_retrieval_acc directly.
 ```
 
 ## Tooling / meta (user-level, affects all projects)

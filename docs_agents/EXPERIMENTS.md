@@ -666,12 +666,128 @@ Three stages, increasing scale/rigor, run in sequence with an explicit stop/go d
 - Config: from-scratch LoRA, seed=0, A1_1761's exact recipe (`query,key,value`, constant LR,
   dropout 0.05, grad-accum 8, 8 epochs), `--semantic-weight 0.05 --semantic-loss infonce
   --infonce-tau-init 0.07`, captions = `Caption_V12_Neutral_1761_fortrain.jsonl`.
-- Status: **launched, in progress.** Confirmed correct at construction: trainable params
-  2,801,664/334,355,842 (0.84%), adapters by stack `{'backbone.encoder': 72,
-  'backbone.predictor': 36}` — matches A1_1761 exactly. Data loaded correctly: 1,761/1,761
-  examples (0 skipped), train=1413/val=348 (matches A1_1761's split), InfoNCE caption banks
-  built (train=(1413,768), val=(348,768)).
-- Result: **pending** — this is the decisive experiment for the thesis's core question. Compare
-  final test_AP against A1_1761's 0.900 via paired bootstrap (677-clip per-clip scores) once
-  finished.
-- Output dir: `/workspace/semsup/b_v2_1761/`, log `/workspace/semsup/b_v2_1761_train.log`.
+- **Result: lost.** Selected checkpoint (epoch 2, best val_ap): test_AP=0.8796, AUC=0.8905.
+  Paired bootstrap vs A1_1761: ΔAP=+0.0189, 95% CI [0.0099, 0.0285], excludes zero. **Wider**
+  than B_1761-parallel's gap on the leaky V10 corpus (+0.0105) — cleaning the caption leak did
+  NOT close the gap, ruling out leakage as the sole explanation.
+- **But this run had two real execution defects** (found 2026-08-12, present in this run and
+  B_1761-parallel both): (1) Predictor cold-started, contrary to the written plan's B1→B
+  warm-start requirement; (2) shared gradient-clip budget across LoRA+Predictor, unlike A1's
+  LoRA-only budget. See B-v3 below, which fixes both.
+- Output dir: `/workspace/semsup/b_v2_1761/`.
+
+## B-v3 — B-v2 with both execution defects fixed (2026-08-13)
+- Same recipe as B-v2, plus: `--predictor-init` from a B1 probe trained on the V12 corpus
+  (warm-start, per the written plan), and `--clip-grad-per-group` (LoRA and Predictor clipped
+  on separate 1.0 budgets, matching A1's effective LoRA budget).
+- **Result: lost, and by MORE than B-v2** — fixing the defects made it worse, not better.
+  Selected checkpoint (epoch 2): test_AP=0.8768, AUC=0.8877. Paired bootstrap vs A1_1761:
+  ΔAP=+0.0218, 95% CI [0.0117, 0.0325], excludes zero.
+- **Crash-vs-semantic gradient-angle probe** (new instrumentation, `--grad-cosine-every`,
+  `torch.autograd.grad()` on shared LoRA params only — bit-identical to off, no `.grad`
+  accumulation): cos(crash,sem) drifted from +0.0165 (epoch 1) to −0.0244 (epoch 8); the
+  fraction of conflicting sampled steps climbed from 45.2% to 55.9%; the semantic term's
+  relative magnitude after λ-weighting grew from 0.048 to 0.089. Reading: the two objectives
+  are **near-orthogonal, drifting mildly adversarial**, not strongly opposed — and getting
+  relatively louder as the crash loss saturates.
+- A 12-epoch exploratory extension (resumed from epoch 8) confirmed pure overfitting past
+  epoch 8, not further learning: train_val_gap climbed from 0.63 to 1.04, best-on-test ΔAP vs
+  A1_1761 widened further to +0.0330 (95% CI [0.0156, 0.0519]).
+- Output dirs: `/workspace/semsup/b_v3_1761/` (8-epoch), `/workspace/semsup/b_v3_1761_ext12/`
+  (12-epoch extension). **Known bug**: the 8-epoch `test_summary.json`/`epoch_metrics.jsonl`
+  were accidentally overwritten locally by the ext12 pull — the correct 8-epoch files still
+  exist on the pod's persistent volume, not yet re-pulled.
+
+## Caption leakage gate — persisted as a script (2026-08-16)
+`teacher_distillation/scripts/caption_leakage_gate.py`: TF-IDF(1,2-gram, min_df≥3) +
+LogisticRegression + GroupKFold(5) by `video_id`, previously run ad-hoc and never saved.
+Reproduces both prior numbers **exactly**: V10 AUC=0.9643, V12 AUC=0.7640. Writes results
+(per-fold AUCs, top predictive n-grams) to JSON — `outputs/semantic_captions/
+leakage_gate_{v10,v12}.json`.
+
+## Pooled-tap B1 probe — does the classifier's own bottleneck carry caption info? (2026-08-15)
+The crash classifier reads a single 1024-d pooled vector, not the full 2560×1024 patch grid
+the semantic loss has always attached to (`semsup_b1_probe.py --tap {patches,pooled,
+meanpool}`, `_VectorMLP` predictor for the single-vector taps). All measured against the same
+221-clip held-out set, chance=0.45%:
+
+| Tap | retrieval@1 | × chance |
+|---|---|---|
+| `patches` (default) | 14.03% | 31× |
+| `pooled` (classifier's actual input) | 9.95% | 22× |
+| `meanpool` (control — uniform pooling) | 8.14% | 18× |
+
+Caption info survives the 2560× compression comfortably, and `pooled` ≈ `meanpool` (within
+noise at n=221) — the crash-tuned attention is **not** specifically discarding caption-relevant
+directions relative to uniform pooling. Refutes the *strong* form of the bypass hypothesis
+(information can't reach the classifier).
+
+## InfoNCE false-negative check — eliminated as a concern (2026-08-15)
+Concern: near-duplicate captions across different clips get punished as false negatives.
+Measured directly: cross-video caption cosine (SigLIP embeddings) averages 0.701 (p99=0.870).
+At a 0.90 masking threshold, only ~4 of 1,413 negatives per anchor would be masked (0.3%) —
+cannot explain a 0.02 AP gap. **Not implemented; not needed.** Bonus: confirms V12 captions
+are genuinely clip-specific despite the constrained vocabulary.
+
+## P3 — does the semantic gradient reach the classifier's representation? (2026-08-16, corrected 2026-08-17)
+`student_training/scripts/p3_delta_patches_vs_pooled.py`: loaded A1_1761 (epoch 4) and B-v3
+(epoch 2) LoRA weights on the same frozen base, captured `patches`+`pooled` for the same 40
+held-out clips under each, computed `‖Δpooled‖/‖Δpatches‖` vs the same ratio for a random
+patch-grid perturbation of equal norm.
+
+**First pass (2026-08-16) was under-powered**: single noise draw per clip, no per-clip data
+saved, paired design analyzed as independent means — "1.8×" reported with no error bar.
+**Corrected 2026-08-17**: 20 noise draws per clip (averaged), per-clip arrays saved, paired
+bootstrap CI (5,000 resamples). Same point estimate, now quantified: real ratio 0.00341 vs
+random-control 0.00186 (~1.8×), **paired diff mean=0.00152, 95% CI [0.00143, 0.00163],
+excludes zero.**
+
+**Refutes the *weak* form of the bypass hypothesis too**: the real weight difference reaches
+the pooled representation at least as well as (if anything slightly better than) a random
+perturbation of equal size would — not preferentially routed away from it. Combined with the
+gradient-angle finding above (near-orthogonal, not opposed), the account of B's underperformance
+is "the signal reaches the decision path but doesn't help there," not a routing problem.
+
+## P1 — two-stage (semantic-pretrain → crash-finetune) training (2026-08-17)
+Implemented in `semsup_train.py`: `--crash-weight` (0.0 = Stage A, semantic-only, no crash
+gradient reaches the trunk at all) and `--select-by {val_ap,retrieval}` (Stage A requires
+`retrieval` — val_ap is uninformative when nothing optimizes it). `evaluate_val()` extended
+with clip-level retrieval@1, a per-epoch collapse control, retrieval vs the full 1,761-caption
+bank, similarity-tolerant retrieval, and embedding-health diagnostics (margin, softmax
+saturation, similarity spread, predictor collapse) — all from tensors already in hand, no
+extra forward passes. `semsup_b1_probe.py`'s retrieval helpers lifted to module level so
+`semsup_train.py` can import them. New `p1_stageA_gate.py`: scores a Stage-A checkpoint's
+encoder against the **unchanged frozen crash head** on the 677-clip test set, no training —
+the cheap check before committing to Stage B.
+
+**Stage A** (12 epochs, semantic-only, `--select-by retrieval`, full 1,761-window corpus):
+retrieval@1 climbed to a peak at **epoch 10 (20.81%, 46× chance)**, then declined (epoch 11:
+15.38%, epoch 12: 15.84%) — the held-out retrieval metric caught overfitting directly, with
+`train_val_gap` corroborating (crosses from negative to positive right at epoch 10). Selected
+epoch 10 (correctly, by the ranking — not just "most recent").
+
+**Gate** (epoch 10 encoder + frozen head, 677-clip test, no training): test_AP=0.8448,
+AUC=0.8595 — a small, expected dip below A0 (0.853), not a catastrophic collapse. **Passed.**
+
+**Stage B** (8 epochs, crash-only, LoRA warm-started from Stage A epoch 10, otherwise
+identical to A1_1761's recipe): selected epoch 2 (val_ap=0.9029), **test_AP=0.8266,
+AUC=0.8481**. Paired bootstrap vs A1_1761: **ΔAP=+0.0716, 95% CI [0.0477, 0.0977], excludes
+zero** — the **largest negative result in the entire thread** (>3× the prior worst, B-v3's
++0.0218), and **below the frozen A0 baseline**. Even the best-on-test checkpoint across all 8
+(epoch 1, illegitimate to select on) only reaches 0.8538, essentially tying A0, nowhere near
+A1's 0.900.
+
+**Mechanism, not just a number**: Stage B's `train_val_gap` grew to more than double
+A1_1761's under an identical LR schedule (0.870 vs 0.370 by epoch 8; train crash_loss 0.192
+vs 0.314, val_crash_loss 1.062 vs 0.684). Warm-starting LoRA from Stage A's already-adapted
+weights and reusing A1's from-scratch learning rate (2e-4) overfits much faster — a specific,
+measured mechanism, not unexplained forgetting.
+
+**Not yet run**: the retention probe (does Stage B's final encoder still retain Stage A's
+semantic structure, measured via retrieval@1 using Stage A's frozen Predictor paired with
+Stage B's LoRA weights) — Stage B never constructs a Predictor (`semantic_weight=0`), so this
+needs a small standalone script, not yet written.
+
+Output dirs: `/workspace/semsup/p1_stageA/`, `/workspace/semsup/p1_stageB/`. Local copies:
+`outputs/e4_vjepa_reason/p1_stageB/{test_summary.json, epoch_metrics.jsonl, train_metrics.json,
+test_results_ep0{1,2}.jsonl, bootstrap_vs_a1_1761.json}`.

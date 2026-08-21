@@ -22,17 +22,26 @@ IMPORTANT: run --dry-run-modules in semsup_common.py FIRST on the pod to confirm
 real LoRA target_modules names before running this for real (BADAS internals are
 only knowable at runtime - see plan risk note).
 
+Real adaptable Linear names, confirmed from badas_named_modules.txt (36 attention
+blocks: 24 backbone.encoder.layer.* + 12 backbone.predictor.layer.*):
+    attention.query  attention.key  attention.value  attention.proj
+    mlp.fc1          mlp.fc2
+There is NO 'qkv' fused module in BADAS - passing it matches nothing and peft raises
+"Target modules not found". Bare 'proj' is also unsafe: it additionally matches
+temporal_processor.attention.out_proj and backbone.predictor.proj, which sit outside
+the block structure - use the re: regex form to target attention.proj alone.
+
 Usage (RunPod):
   python semsup_train.py --config ../configs/e4_stageA.yaml \
-      --lora-target-modules qkv,proj,fc1,fc2 \
+      --lora-target-modules query,key,value \
       --semantic-weight 0.0 --epochs 8 --out-dir /root/semsup/a1 \
       --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
       --test-frames-root ../../dataset/test
 
   # Stage B (add semantic loss, warm-start predictor from B1):
   python semsup_train.py --config ../configs/e4_stageA.yaml \
-      --lora-target-modules qkv,proj,fc1,fc2 \
-      --semantic-weight 0.3 --predictor-init /root/semsup/b1/predictor_b1.pt \
+      --lora-target-modules query,key,value \
+      --semantic-weight 0.05 --predictor-init /root/semsup/b1/predictor_b1.pt \
       --epochs 8 --out-dir /root/semsup/b \
       --test-manifest ../../dataset/manifests/test_manifest_hires.jsonl \
       --test-frames-root ../../dataset/test
