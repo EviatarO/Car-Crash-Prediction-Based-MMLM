@@ -234,7 +234,69 @@
   the likely proximate cause (train_val_gap more than doubled vs A1 under identical settings).
   Whether a Stage-B-specific LR fixes this is an open question (see below), not yet tested.
 
+### Per-clip diagnostic and label noise (2026-08-23/24)
+- **Remove the 230 mined windows where A0 is >0.95 confident and wrong** → rejected as
+  circular. That filters on *our model's* output, deleting exactly the hard cases; AP would
+  improve for free and mean nothing. Only input-side evidence (the teacher's own
+  `mechanism_visible=false` / blind-verdict disagreement) is a defensible filter.
+- **Treat `mechanism_visible=false` as a noise flag on all windows** → rejected: it is normal
+  and expected on negatives (44–59% of them — a safe clip has no collision mechanism). Only
+  meaningful on positives.
+- **Join the caption files on `(video_id, t_seconds)` or `horizon_label`** → rejected: the
+  three files use incompatible conventions (failures587 fills `horizon_label` and nulls
+  `requested_time_to_event`; the fortrain file does the reverse) and a clip has up to 3 windows,
+  so the key collides. **Always join on `frames_dir`.**
+- **Read accuracy-at-0.5 on the 1,761 pool as evidence any arm beats A0** → rejected: one third
+  of the pool was selected *because* A0 fails it, so every arm beats A0 there almost
+  automatically. Only threshold-free AP/AUC on the held-out test set is informative.
+- **Quote train-row fix counts from the summary sheet** (e.g. B-v3 `net = 406`) → rejected:
+  B-v3 sits at train AP 0.9990. Those are memorised labels. Only the 348 val rows support a
+  claim.
+- **Characterise B-v3 as "scoring everything lower"** → rejected, contradicted by measurement:
+  its median val score is 0.991 on YES and 0.002 on NO (spread 0.989, wider than A0's 0.979).
+  It is confident in *both* directions; its errors are confident errors, which is why AP
+  punishes it while accuracy@0.5 flatters it.
+- **Run the B-shuffle control on its own, before unfreezing the pooler/classifier** → rejected
+  on ordering grounds: if the decision path is closed, real and shuffled captions both show
+  nothing and the result is a false negative on the content question. Run
+  A1-unfrozen / B-unfrozen / B-unfrozen-shuffled as one batch instead.
+- **Fully unfreeze the pooler + classifier** → rejected in favour of LoRA-ing them: full
+  unfreeze adds ~5–6M params (roughly tripling the trainable count) on 1,413 rows that already
+  overfit. LoRA at r=8 adds ~0.1–0.2M and keeps the run inside the current data budget.
+- **Conclude "the model overfits to val-specific event types" from val-vs-test** → rejected:
+  every arm gains *more* on test than on val (A1 +0.047 test vs +0.019 val). The val pool only
+  looks worse because it is failure-enriched. P1 is the sole arm that loses on test.
+- **Switch to a different dataset because the mined failures look unlearnable** → deferred, not
+  adopted: the hypothesis is testable inside the current data (drop the 45 teacher-flagged
+  windows, re-run, see whether the train/val gap shrinks). Switching datasets confounds
+  everything and is expensive.
+- **Caption the 4,446 pool with Qwen3-VL to save money** → superseded: `gemini-3.7-flash`
+  (batch) does it for ~$20 based on the real measured token usage, so the stronger teacher no
+  longer costs meaningfully more.
+
 ## Unresolved design questions
+
+- **Do the captions still carry class-discriminating information, and is that why the semantic
+  arms lose on positives?** Leading hypothesis, not yet tested. V12 de-leaking dropped
+  text→label AUC 0.964→0.764; cross-caption cosine averages 0.701; observed examples include a
+  YES clip captioned "increasing distance" and a NO clip captioned "decreasing the following
+  distance". If both classes receive near-identical caption embeddings, aligning vision
+  features to them pulls the classes together, opposing the crash objective — which predicts
+  the observed TTE_1.5 collapse (41% vs A1's 66%). **Direct test:** measure pooled-feature
+  class separation for A1 vs B-v3. No training required. Not run.
+- **Is label noise inflating B-v3's memorisation?** 36/269 mined positives have
+  `mechanism_visible=false` (teacher told GT=crash, saw no mechanism) vs 20/587 among easy
+  positives — a ~4× enrichment. B-v3 sits at train AP 0.9990. Untested: drop the 45
+  teacher-flagged mined windows, re-run A1 + B-v2, check whether the train/val gap shrinks.
+- **Should the training pool stay failure-enriched at all?** It is one-third mined failures by
+  construction, which is not the deployment distribution. A1-v2 on the un-enriched 4,446 scored
+  0.888 vs A1_1761's 0.900, but that run changed four things at once so it is not clean
+  evidence. Open.
+- **Is A0 a clean baseline on the 1,761 pool?** Probably not. A0 is Nexar's own BADAS-Open and
+  the pool comes from Nexar's train split; A0 scores AP 0.9535 there vs 0.853 on held-out test,
+  both class-balanced. Nexar's training manifest cannot be verified from this repo. Treat A0's
+  column on this pool as circumstantially contaminated.
+
 
 - **Does semantic supervision beat crash-only LoRA (A1) on the 1,761-window mixed pool?**
   **Resolved, repeatedly, always in the negative.** Five real GPU attempts, gap widening each

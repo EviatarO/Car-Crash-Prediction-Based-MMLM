@@ -29,6 +29,24 @@ match" which describes cosine, not the current InfoNCE default).
   serial `for` loops over frame paths or API calls; the whole trunk is I/O/latency-bound, not
   compute-bound, at this problem scale.
 
+- **The three caption files use incompatible field conventions — join them ONLY on
+  `frames_dir`.** `Caption_Train4500_Failures_587.jsonl` populates `horizon_label` and leaves
+  `requested_time_to_event` null; `Caption_V12_Neutral_1761_fortrain.jsonl` does the reverse;
+  `Caption_Train4500_Mixed_1761.jsonl` (V10) matches the failures convention. Joining on
+  `(video_id, t_seconds)` additionally collides because one clip contributes up to 3 windows.
+  `frames_dir` is unique per window and present in all of them.
+- **A clip is not a window.** 1,761 windows come from 1,107 unique clips (578 clips give 1
+  window, 404 give 2, 125 give 3). `clip_level_split` partitions by `video_id`, so 20% of
+  clips (221) yields 348 windows, not 352. Any per-window 80/20 assumption is wrong and leaks.
+- **V10 and V12 have different schemas.** V10 blind-mode rows carry `verdict`, `confidence`,
+  `risk_score`; V10 gt-mode rows do not (the teacher was told the label); both carry
+  `mechanism_visible`. **V12 dropped `verdict`/`risk_score`/`confidence`/`risk_clause`
+  entirely**, so no teacher-prediction-vs-label check is possible on V12 alone — it must read
+  the raw V10 files under `outputs/semantic_captions/failures587/`.
+- **Conditional-formatting fills in `openpyxl` render from `bgColor`, not `fgColor`** — the
+  reverse of a normal cell fill. Using `fgColor` in a `FormulaRule`/`CellIsRule` produces a
+  rule that matches correctly but paints nothing in Excel.
+
 ### Pre-existing constraints (still true, carried forward)
 - BADAS-Open's backbone is a plain **V-JEPA2 ViT-L**, loaded via `nexar-ai/BADAS-Open`'s
   official `badas_loader.py` (which pulls `nexar-ai/nexight`). It is a **gated HF repo** —
@@ -275,6 +293,13 @@ aliases added is what actually gets used for training/comparison scripts.
 | `teacher_distillation/scripts/caption_leakage_gate.py` | Persisted (2026-08-16) TF-IDF+LogReg+GroupKFold label-leakage gate — was run ad-hoc before. Reproduced V10=0.9643/V12=0.7640 exactly. |
 | `student_training/scripts/p3_delta_patches_vs_pooled.py` | Does the semantic gradient reach the classifier's own pooled representation, or land where the pooler discards it? Paired bootstrap CI (20 noise draws/clip) on `‖Δpooled‖/‖Δpatches‖`, real vs random. |
 | `student_training/scripts/p1_stageA_gate.py` | Scores a Stage-A (semantic-only) checkpoint's encoder against the UNCHANGED frozen crash head on the 677-clip test set — no training. The cheap check before committing to Stage B. |
+| `student_training/scripts/score_arms_on_pool1761.py` | Scores one checkpoint (or the frozen A0 baseline, if `--lora-adapter` is omitted) on all 1,761 training-pool windows, inference only. Emits per-window JSONL. Fills the gap that the semantic arms were only ever scored on the 677-clip test set. |
+| `student_training/scripts/build_pool1761_comparison.py` | Merges the 6 arms' score files into the per-clip comparison workbook. Fails loudly if A0's re-score does not reproduce the 587 mined failures, or if the split is not 1,413/348. |
+| `student_training/scripts/plot_pool1761_comparison.py` | 7 diagnostic figures, each rendered twice (`_all1761` and `_val348`). Reads the same score dir as the workbook so numbers cannot diverge. |
+| `student_training/scripts/build_status_presentation_2026-08-22.py` | Builds the 14-slide dark-theme status deck. Asserts every confusion-matrix number against the per-clip result files before writing. |
+| `student_training/scripts/make_arch_figures_2026-08-22.py` | The 3 architecture figures (idea / inference / training) for the deck, dark theme. |
+| `student_training/scripts/make_dataset_figure_2026-08-22.py` | Dataset+captioning pipeline block diagram; counts read live from the caption files. |
+| `student_training/scripts/make_semantic_positive_figure.py` | Retrieval-vs-chance + caption-scaling figure, dark theme. |
 | `docs_agents/ARCHITECTURE_BLOCKS.md` | Block-by-block reference (shapes/equations/frozen-status) for the architecture diagram. Also covers the pooled-tap experiments and the gradient-angle diagnostic (§5b/7c). |
 
 ## P1 — two-stage (semantic-pretrain → crash-finetune) training
@@ -356,6 +381,30 @@ clip_level_retrieval_detail(P, T, vids_list) -> (clip_ids: list, hits: list[int]
 clip_level_retrieval_acc(P, T, vids_list) -> float                                 # module level
     # were nested inside main(), uncallable from outside. Pure move, no logic change.
     # semsup_train.py now imports clip_level_retrieval_acc directly.
+```
+
+## APIs / functions (added 2026-08-23/24, signatures only)
+
+```python
+# score_arms_on_pool1761.py  (CLI, runs on the pod)
+#   --config --captions-path --arm-name --out  [--lora-adapter]
+#   omit --lora-adapter  -> frozen A0 baseline, no adapter attached at all
+#   emits one JSON row per window:
+#     {arm, video_id, frames_dir, requested_time_to_event, gt_verdict, score}
+
+# build_pool1761_comparison.py  (CLI, local)
+#   --scores-dir --out
+clip_level_split(video_ids, val_frac=0.2, seed=0) -> set   # replica of semsup_common's
+    # partition, kept in sync deliberately: the train/val column is wrong if it drifts
+#   Hard gates (SystemExit): row counts != 1761, missing arm, arm-name divergence between
+#   CM_ROWS and EXPERIMENTS, A0 re-score not matching the 587 mined failures.
+
+# plot_pool1761_comparison.py  (CLI, local)
+#   --scores-dir --out-dir   -> 7 figures x {_all1761, _val348}
+
+# build_status_presentation_2026-08-22.py
+verify()   # asserts every CM cell against outputs/e4_vjepa_reason/*/test_results_*.jsonl
+           # and that arm names match across the two slide tables; exits non-zero on mismatch
 ```
 
 ## Tooling / meta (user-level, affects all projects)

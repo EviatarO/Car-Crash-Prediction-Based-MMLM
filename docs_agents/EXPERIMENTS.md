@@ -791,3 +791,165 @@ needs a small standalone script, not yet written.
 Output dirs: `/workspace/semsup/p1_stageA/`, `/workspace/semsup/p1_stageB/`. Local copies:
 `outputs/e4_vjepa_reason/p1_stageB/{test_summary.json, epoch_metrics.jsonl, train_metrics.json,
 test_results_ep0{1,2}.jsonl, bootstrap_vs_a1_1761.json}`.
+
+
+---
+
+# Per-clip arm comparison over the 1,761-window training pool (2026-08-23/24)
+
+**Motivation.** Aggregate AP says which arm is better; it cannot say *which clips* move. Every
+arm had only ever been scored on the 677-clip test set, so per-window training-pool scores did
+not exist for any of them.
+
+**Run.** `score_arms_on_pool1761.py`, 6 configurations × 1,761 windows, **inference only**, on
+the pod. ~5 min per arm. A0 = frozen baseline, no adapter attached. Checkpoints used are the
+same epochs the reported test numbers came from: A1 `a1_1761/epoch_04`, B-v1
+`b_1761_par/epoch_04`, B-v2 `b_v2_1761/epoch_02`, **B-v3 `b_v3_1761_ext12/epoch_10`** (note:
+the ext12 directory, not `b_v3_1761/` — that one only holds epochs 1–8), P1
+`p1_stageB/epoch_02`. All 6 returned 1,761/1,761 rows, zero skips.
+
+**Integrity check (the strongest one available):** by construction A0 must be wrong on exactly
+the 587 mined-failure windows and right on the other 1,174. The re-score reproduces this
+**exactly**, confirming the scoring path matches the original mining run.
+
+## Pool and split structure
+
+```
+1,761 windows = 587 mined A0-failures + 587 TP + 587 TN, from 1,107 unique clips
+  (578 clips give 1 window, 404 give 2, 125 give 3 — TTE_0.5/1.0/1.5 or MID-10/-8/-4)
+split by CLIP: 221 val clips -> 348 val windows / 1,413 train windows
+  of the 348 val windows: 117 are mined failures (51 YES / 66 NO), 231 are easy
+```
+
+Split is identical across all five trained arms (verified: V10 and V12 caption files contain
+the same 1,107 video_ids, so `clip_level_split(val_frac=0.2, seed=0)` partitions them
+identically). A0 never trained on any of it.
+
+## Train/val, per arm (threshold-free AP)
+
+| Arm | train AP | val AP | gap | train acc | val acc |
+|---|---|---|---|---|---|
+| A0 | 0.8435 | 0.8579 | −0.014 | 0.667 | 0.664 |
+| **A1** | 0.9395 | **0.8770** | 0.063 | 0.839 | 0.730 |
+| B-v1 | 0.9409 | 0.8751 | 0.066 | 0.850 | 0.739 |
+| B-v2 | 0.8972 | 0.8670 | 0.030 | 0.786 | 0.764 |
+| **B-v3** | **0.9990** | 0.8741 | **0.125** | **0.955** | 0.759 |
+| P1 | 0.9326 | 0.8575 | 0.075 | 0.834 | 0.753 |
+
+**B-v3 has memorised the training rows (train AP 0.9990).** Its large fix counts on train rows
+are recall of memorised labels, not capability. On val it sits *below* A1.
+
+**Accuracy and AP disagree here, and AP is right.** At threshold 0.5 B-v3 makes fewer val
+errors than A1 (84 vs 94 of 348) yet has lower AP. Cause: B-v3 is extremely confident in both
+directions (median val score 0.991 on YES, 0.002 on NO — spread 0.989, the widest of any arm,
+wider than A0's 0.979), so its errors are *confident* errors, which AP punishes heavily.
+⚠️ B-v3 is **not** "scoring everything lower" — an earlier characterisation that the data
+contradicts.
+
+⚠️ **The pool is adversarial against A0 at threshold 0.5 by construction** (one third selected
+*because* A0 fails it), so every arm beats A0 on accuracy almost automatically. Accuracy
+comparisons against A0 on this pool carry little information.
+
+## The core finding: false-alarm recovery up, missed-crash recovery down
+
+On the **677-clip held-out test set** (A0's 130 false alarms + 30 misses), Wilson 95% CIs:
+
+| Arm | recovers false alarms | recovers **missed crashes** |
+|---|---|---|
+| **A1** | 21.5% [15.3, 29.4] | **56.7%** [39.2, 72.6] |
+| B-v2 | 44.6% [36.3, 53.2] | 10.0% [3.5, 25.6] |
+| **B-v3** | **60.0%** [51.4, 68.0] | 20.0% [9.5, 37.3] |
+
+**McNemar, A1 vs B-v3 on A0's 30 misses (paired, same clips):**
+`A1 right & B-v3 wrong = 11`, `B-v3 right & A1 wrong = 0`, **p = 0.0026.**
+B-v3's correct set is a strict subset of A1's — a pure loss on the safety-critical axis.
+
+Replicated on the independent 348-window val split (117 mined-failure windows there):
+
+| Arm | correct / 117 | FP-type / 66 | FN-type / 51 |
+|---|---|---|---|
+| A0 | 0 | 0 | 0 |
+| A1 | 37 | 14 | **23** |
+| B-v1 | 40 | 18 | 22 |
+| B-v2 | 44 | 41 | 3 |
+| B-v3 | **57** | **46** | 11 |
+| P1 | 50 | 38 | 12 |
+
+## Regression: what the arms BREAK
+
+Of the 231 A0-correct windows in val:
+
+| Arm | broke | of which were YES (**detected crash → miss**) |
+|---|---|---|
+| A1 | 14 | 4 (29%) |
+| B-v2 | 9 | 8 (89%) |
+| **B-v3** | **24** | **21 (88%)** |
+| **P1** | 19 | **19 (100%)** |
+
+Semantic arms damage A0's correct predictions almost exclusively by converting detected
+collisions into misses.
+
+## Accuracy by horizon (val)
+
+| Bucket | A0 | A1 | B-v3 |
+|---|---|---|---|
+| MID-10 / MID-4 / MID-8 (safe) | 58–68% | 58–71% | **84–93%** |
+| TTE_0.5 | 88% | 92% | 87% |
+| TTE_1.0 | 73% | **88%** | 69% |
+| **TTE_1.5** (earliest warning) | 52% | **66%** | **41%** |
+
+Semantic arms win on safe windows, collapse on crash windows, worst at the longest horizon.
+
+## Val vs test gains — NOT overfitting to val
+
+| Arm | gain vs A0 (val) | gain vs A0 (test) |
+|---|---|---|
+| A1 | +0.019 | **+0.047** |
+| B-v1 | +0.017 | +0.037 |
+| B-v2 | +0.009 | +0.027 |
+| B-v3 | +0.016 | +0.024 |
+| P1 | −0.000 | **−0.026** |
+
+Every arm gains *more* on test than on val — the val pool merely looks worse because it is
+failure-enriched. **P1 is the only arm that goes backwards on test.**
+
+## Label noise in the pool (measured 2026-08-24)
+
+Using the teacher's own admissions, independent of any model of ours. Note the V10 schema
+differences: **blind-mode rows carry `verdict`/`confidence`/`risk_score`; gt-mode rows do not
+(the teacher was told the answer); V12 dropped verdict entirely.**
+
+| Signal | Mined (587) | Easy (1,174) |
+|---|---|---|
+| **Positives with `mechanism_visible=false`** — teacher told GT=crash, still saw no mechanism | **36 / 269 (13.4%)** | 20 / 587 (3.4%) |
+| Blind-mode verdict disagrees with the label | 9 / 318 | 5 / 587 |
+
+⚠️ `mechanism_visible=false` on a **negative** is normal (44–59% of them) — a safe clip has no
+collision mechanism. Only positives are meaningful. **Unexplainable positives are ~4× enriched
+in the mined failures**, consistent with off-camera impacts or mislabels. A0 scores 0.001–0.007
+on several of these YES-labelled clips.
+
+Also measured: **230 / 587 (39.2%)** of mined failures are windows where A0 is >0.95 confident
+and the label disagrees. This is *not* a usable filter — removing them would be circular.
+
+**70 suspect windows** (45 mined + 25 easy, 13 in val) itemised with frame paths, both caption
+versions and A0's score in `outputs/e4_vjepa_reason/suspect_windows_for_review.xlsx`.
+
+## Outputs
+
+| Path | Contents |
+|---|---|
+| `outputs/e4_vjepa_reason/pool1761_scores/{A0,A1,B-v1,B-v2,B-v3,P1}.jsonl` | 1,761 per-window scores per arm |
+| `outputs/e4_vjepa_reason/pool1761_arm_comparison.xlsx` | 4 sheets: `per_clip`, `summary`, `val_only`, `failures_only` |
+| `outputs/e4_vjepa_reason/pool1761_findings_2026-08-24.md` | Findings write-up incl. figure/sheet walkthroughs |
+| `outputs/e4_vjepa_reason/suspect_windows_for_review.xlsx` | The 70 label-noise candidates |
+| `reports/figures/pool1761_analysis/` | 14 figures (7 × `_all1761` / `_val348`) |
+
+**Read the `_val348` figures, not `_all1761`** — the latter includes memorised training rows.
+
+## Captioning cost, recomputed from the real usage log
+
+Measured per caption on the V12 run: **18,756 input tokens** (image-dominated) + **1,150
+output**. At `gemini-3.7-flash` batch rates ($0.1875/M in, $0.9375/M out) that is **$0.0046
+per caption → $20.43 for all 4,446 windows**, versus the $0.0365/caption the V12 run actually
+paid (= $162 for 4,446).

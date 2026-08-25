@@ -40,6 +40,31 @@ P1 (the most structurally different design tried) is the **worst result of all**
 3. **Crash-vs-semantic gradient-angle probe** — cos(crash,sem) ≈ 0, drifting mildly negative
    over training (not strongly opposed). Rules out "the objectives actively fight."
 
+**Per-clip diagnostic (2026-08-23/24) localised WHERE the semantic arms lose.** All 6 arms
+were re-scored on all 1,761 training-pool windows (inference only). On the 677-clip test set,
+splitting A0's 160 errors into its 130 false alarms and 30 misses:
+
+| Arm | recovers A0's false alarms | recovers A0's **missed crashes** |
+|---|---|---|
+| **A1** | 21.5% [15.3, 29.4] | **56.7%** [39.2, 72.6] |
+| B-v2 | 44.6% [36.3, 53.2] | 10.0% [3.5, 25.6] |
+| **B-v3** | **60.0%** [51.4, 68.0] | 20.0% [9.5, 37.3] |
+
+McNemar, A1 vs B-v3 on A0's 30 misses (paired): **A1-right/B-v3-wrong = 11, B-v3-right/A1-wrong
+= 0, p = 0.0026.** B-v3's correct set on missed crashes is a **strict subset** of A1's — on the
+safety-critical axis this is a pure loss, not a trade. Same pattern per horizon: semantic arms
+reach 84–93% on safe windows but collapse to **41% at TTE_1.5 vs A1's 66%** — worst exactly at
+the earliest, most valuable warning.
+
+**Leading mechanism hypothesis (testable, not yet confirmed): V12 de-leaking removed class
+discrimination from the captions.** Text→label AUC fell 0.964→0.764, cross-caption cosine
+averages 0.701, and real examples show a YES clip captioned "increasing distance" and a NO clip
+captioned "decreasing the following distance". If crash and non-crash clips get near-identical
+caption embeddings, aligning vision features to them pulls the classes *together*, opposing the
+crash objective. This predicts damage concentrated on benign-looking positives — which is
+exactly the TTE_1.5 collapse. **Direct test:** measure class separation in the pooled
+representation for A1 vs B-v3; no training required.
+
 **Conclusion so far: the semantic signal reaches the classifier-relevant representation; it
 just doesn't help once there.** P1 tested a genuinely different mechanism (training order
 instead of routing) and lost worse, with a **specific measured cause**, not a mystery: Stage
@@ -64,12 +89,30 @@ primary failure mode.
   text) — proposed, not implemented.
 - **λ sweep** — never run. A standing reviewer objection to the joint-training results (though
   now secondary, since P1 has no λ at all and still lost worst).
-- **Corpus scale-up** (full 4,446-window pool, ~$11 via Qwen3-VL vs ~$162 via Gemini) — not
-  done. The B1 scaling curve (13×/19×/31× chance at 25/50/100% of captions, still rising) is
-  the strongest positive evidence that more data could help, independent of the routing/timing
-  questions above.
+- **Corpus scale-up** (full 4,446-window pool) — not done. **Cost recomputed 2026-08-24 from
+  the real V12 usage log: ~$20 with `gemini-3.7-flash` (batch)**, vs $162 at the rate the V12
+  run actually paid. Measured per-caption usage: 18,756 input tokens (image-dominated) + 1,150
+  output. The B1 scaling curve (13×/19×/31× chance at 25/50/100% of captions, still rising) is
+  the strongest positive evidence that more data could help.
+- **Label-noise cleanup** — 70 suspect windows identified 2026-08-24, not yet removed or
+  reviewed. See EXPERIMENTS.md; list is `outputs/e4_vjepa_reason/suspect_windows_for_review.xlsx`.
+- **Caption content redesign** — current captions describe what the encoder already sees
+  (colour, lane position, gap trend). Untested alternative: target what it plausibly cannot
+  infer (occluded/peripheral agents, brake lights/indicators/wheel angle, ego manoeuvre, road
+  geometry ahead), drop colour. Must describe observable *causes*, never the outcome, or the
+  V10 leak returns.
 
 ## Known bugs / gotchas (this thread, still open)
+- **`semsup_caption_promptbakeoff.py:87` has a stale `DEFAULT_MODEL =
+  "google/gemini-3.1-pro-preview"`.** The real V12 captioning run passed `--model
+  google/gemini-3.6-flash` explicitly, so no existing result is wrong — but a re-run that omits
+  the flag silently uses the WRONG teacher. Not yet fixed.
+- **The three caption files use incompatible field conventions and will silently mis-join.**
+  `Caption_Train4500_Failures_587.jsonl` populates `horizon_label` with `requested_time_to_event`
+  = null; `Caption_V12_Neutral_1761_fortrain.jsonl` does the reverse. Joining on
+  `(video_id, t_seconds)` also collides (a clip has up to 3 windows).
+  **Always join these files on `frames_dir`** — it is unique per window and consistent across
+  all of them.
 - **B-v3's local `test_summary.json`/`epoch_metrics.jsonl` were overwritten** when pulling a
   later 12-epoch extension's results into the same local folder. The correct 8-epoch files
   still exist on the pod's persistent volume (`/workspace/semsup/b_v3_1761/`, distinct from
@@ -136,6 +179,16 @@ python -u p3_delta_patches_vs_pooled.py --config ../configs/e4_stageA.yaml \
     --n-clips 40 --n-noise 20 --n-boot 5000 --seed 0 \
     --out /workspace/semsup/p3_result.json
 
+# Per-clip arm comparison over the 1,761 pool (POD: 6 arms, inference only, ~5 min each)
+#   omit --lora-adapter to score the frozen A0 baseline
+python -u score_arms_on_pool1761.py --config ../configs/e4_stageA.yaml     --captions-path ../../outputs/semantic_captions/Caption_V12_Neutral_1761_fortrain.jsonl     --lora-adapter /workspace/semsup/a1_1761/epoch_04/lora_adapter     --arm-name A1 --out /workspace/semsup/pool1761_scores/A1.jsonl
+#   adapters: A1=a1_1761/epoch_04  B-v1=b_1761_par/epoch_04  B-v2=b_v2_1761/epoch_02
+#             B-v3=b_v3_1761_ext12/epoch_10  P1=p1_stageB/epoch_02   (B-v3 is in the _ext12 dir)
+
+# Then LOCALLY (both read the same score dir, so numbers cannot diverge):
+python student_training/scripts/build_pool1761_comparison.py     --scores-dir outputs/e4_vjepa_reason/pool1761_scores     --out outputs/e4_vjepa_reason/pool1761_arm_comparison.xlsx
+python student_training/scripts/plot_pool1761_comparison.py     --scores-dir outputs/e4_vjepa_reason/pool1761_scores     --out-dir reports/figures/pool1761_analysis
+
 # Caption label-leakage gate (persisted script, reuse for any new corpus)
 python teacher_distillation/scripts/caption_leakage_gate.py \
     --captions <corpus.jsonl> --caption-field <field> --label-field <field> \
@@ -156,30 +209,37 @@ python student_training/scripts/paired_bootstrap_ab.py \
 ```
 
 ## Git state
-Branch `main`, **HEAD = `46ec1b3`, matches `origin/main`** (0 ahead / 0 behind — pushed).
-Uncommitted right now: only `docs_agents/{ARCHITECTURE,DECISIONS,EXPERIMENTS,PROJECT_STATE}.md`
-(this handoff's updates). User pushes themselves — do not `git push`. Commit only if
-explicitly asked.
+Branch `main`, **HEAD = `5b40076`, matches `origin/main`** (0 ahead / 0 behind).
+Uncommitted: `plot_loss_vs_epoch_all_arms.py` (modified — dark-theme grid) plus 7 untracked
+scripts (`score_arms_on_pool1761.py`, `build_pool1761_comparison.py`,
+`plot_pool1761_comparison.py`, `build_status_presentation_2026-08-22.py`,
+`make_arch_figures_2026-08-22.py`, `make_dataset_figure_2026-08-22.py`,
+`make_semantic_positive_figure.py`). User pushes themselves — do not `git push`. Commit only
+if explicitly asked.
 
 ## Next step
 
-**Decision point, not a default action**: five real negative results is a lot of evidence.
-Before spending more GPU time, the open question is which (if any) of the untested items above
-is worth pursuing vs. writing this up as a well-controlled, mechanistically-diagnosed negative
-result. If continuing:
+**Decision point, not a default action.** Six negative results stand. The per-clip diagnostic
+has now localised the failure (missed crashes at long TTE) and produced a testable mechanism
+(captions no longer separate the classes). Candidate next actions, cheapest first:
 
-1. **Cheapest, most targeted**: re-run P1 Stage B with a reduced LR (see command above) — tests
-   the specific mechanism found (overfitting under an unchanged LR), not a new hypothesis.
-2. **B-shuffle control** — cheap, strengthens the write-up regardless of outcome.
-3. **Retention probe** — cheap, would clarify whether P1's failure is "forgot the semantics" or
-   "kept them but they're irrelevant."
+1. **Class-separation measurement** (hours, no training) — compare pooled-feature separation
+   between YES/NO for A1 vs B-v3. Directly tests the leading mechanism hypothesis.
+2. **Three-run batch with the decision path opened** — A1+unfrozen / B+unfrozen /
+   B+unfrozen+shuffled-captions. Run together, not sequentially: testing caption content while
+   the pooler+classifier are frozen risks a false negative, since neither real nor shuffled
+   captions could get through. Use **LoRA on the pooler/classifier, not full unfreezing** —
+   full unfreeze roughly triples trainable params on 1,413 rows that already overfit.
+3. **Drop the 45 teacher-flagged mined windows and re-run A1 + B-v2** — tests whether label
+   noise is inflating memorisation (B-v3 sits at train AP 0.999).
+4. **Corpus scale-up to 4,446** (~$20, see commands above).
 
 **What's already publishable regardless:**
 1. A1_1761 beats the published BADAS-Open baseline (0.900 vs 0.853, +0.047).
-2. A rigorously controlled negative result for language-only-at-train-time supervision, with
-   multiple diagnosed (not guessed) mechanisms — label leakage ruled out, routing ruled out,
-   gradient opposition ruled out, overfitting-under-warm-start identified and measured.
-3. The training-inversion failure mode (training only on mined failures against a frozen head
+2. A rigorously controlled negative result with multiple diagnosed mechanisms — leakage,
+   routing, gradient opposition, undertraining and InfoNCE false-negatives all eliminated by
+   measurement, and the residual failure localised to missed collisions at long TTE.
+3. The training-inversion failure mode (mined-failures-only training against a frozen head
    collapses to AP 0.333 / AUC 0.163) — a separate, reusable lesson.
 
 ## Known bugs / gotchas (all fixed — don't re-hit these)

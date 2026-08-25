@@ -75,6 +75,59 @@ def plot_arm(arm_dir, title, best_epoch, note):
     return out_path
 
 
+# 2x2 grid for the status deck. B-v3 is deliberately excluded: its local
+# epoch_metrics.jsonl holds only epochs 9-12 (1-8 were overwritten by a later 12-epoch
+# extension pull; the correct file is still on the pod). A partial curve reads as broken.
+GRID_ARMS = [
+    ("a1_1761", "A1_1761  -  crash-only  (champion, test AP 0.900)", 4),
+    ("b_1761_par", "B_1761 parallel  -  joint, V10 captions  (0.890)", 4),
+    ("b_v2_1761", "B-v2  -  joint, V12 clean captions  (0.880)", 2),
+    ("p1_stageB", "P1 Stage B  -  two-stage, warm-started  (0.827)", 2),
+]
+
+
+# dark theme, matching the 2026-08 status deck background (E3a-status palette)
+BG = "#1C2340"
+FG = "#FFFFFF"
+MUTED_C = "#A0B4CC"
+
+
+def plot_grid():
+    plt.rcParams.update({
+        "text.color": FG, "axes.labelcolor": FG, "xtick.color": MUTED_C,
+        "ytick.color": MUTED_C, "axes.edgecolor": MUTED_C,
+    })
+    fig, axes = plt.subplots(2, 2, figsize=(12.4, 7.0))
+    fig.patch.set_facecolor(BG)
+    for ax, (arm_dir, title, best_epoch) in zip(axes.ravel(), GRID_ARMS):
+        ax.set_facecolor(BG)
+        for sp in ax.spines.values():
+            sp.set_color(MUTED_C)
+        rows = load_epochs(ROOT / "outputs" / "e4_vjepa_reason" / arm_dir / "epoch_metrics.jsonl")
+        epochs = [r["epoch"] for r in rows]
+        ax.plot(epochs, [r.get("train_total_loss") for r in rows], "o-",
+                color="#00BFFF", label="Train loss", markersize=4.5, linewidth=1.7)
+        ax.plot(epochs, [r.get("val_total_loss") for r in rows], "s-",
+                color="#FF6B6B", label="Val loss", markersize=4.5, linewidth=1.7)
+        if best_epoch in epochs:
+            ax.axvline(best_epoch, color="#FFA726", linestyle="--", linewidth=1.5,
+                       label=f"selected (ep{best_epoch})")
+        ax.set_title(title, fontsize=10.5, fontweight="bold", color="#00BFFF")
+        ax.set_xlabel("Epoch", fontsize=10.5)
+        ax.set_ylabel("Loss", fontsize=10.5)
+        ax.grid(alpha=0.18, color=MUTED_C)
+        ax.legend(fontsize=8.5, facecolor="#243060", edgecolor=MUTED_C,
+                  labelcolor=FG)
+        ax.tick_params(labelsize=9.5)
+    fig.suptitle("Training vs Validation Loss  -  every arm overfits after epoch 2-3",
+                 fontsize=13, fontweight="bold", color="#00BFFF", y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    out = OUT_DIR / "loss_grid_4arms_2026-08-22.png"
+    fig.savefig(out, dpi=200, facecolor=BG, bbox_inches="tight", pad_inches=0.06)
+    plt.close(fig)
+    return out
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     written = []
@@ -83,7 +136,8 @@ def main():
         if out:
             print(f"  wrote {out}")
             written.append(out)
-    print(f"\n{len(written)}/{len(ARMS)} figures written to {OUT_DIR}")
+    print(f"\n{len(written)}/{len(ARMS)} per-arm figures written to {OUT_DIR}")
+    print(f"  wrote {plot_grid()}")
 
 
 if __name__ == "__main__":
