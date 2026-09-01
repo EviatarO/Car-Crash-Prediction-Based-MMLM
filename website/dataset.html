@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCP-MMLM · Dataset Explorer</title>
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <span class="brand">CCP-MMLM</span>
+  <div class="navlinks">
+    <a href="index.html">Home</a>
+    <a href="dataset.html" class="active">Dataset</a>
+    <a href="experiments.html">Experiments</a>
+  </div>
+</nav>
+
+<!-- ================= HERO ================= -->
+<section class="hero">
+  <canvas id="plexus"></canvas>
+  <div class="hero-inner">
+    <div class="hero-kicker">Collision Anticipation · MSc Thesis</div>
+    <h1 class="hero-title">CCP-MMLM<br><span class="thin">Dataset Explorer</span></h1>
+    <p class="hero-sub">Browse every dashcam clip in the Nexar train and test sets.
+       Press a frame to replay the seconds around the event — with a live
+       time-to-event readout, the alert window indicator, and slow-motion review.</p>
+  </div>
+  <div class="hero-cards" id="heroCards"></div>
+  <div class="scroll-hint">SCROLL ↓ EXPLORE</div>
+</section>
+
+<!-- ================= TOP BAR ================= -->
+<div class="topbar" id="topbar">
+  <span class="brand">CCP-MMLM</span>
+  <div class="tabs">
+    <button class="tab active" data-split="train">Train</button>
+    <button class="tab" data-split="test">Test</button>
+  </div>
+  <div class="searchwrap">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+    <input id="search" type="text" placeholder="jump to clip id — e.g. 72 or 00072 (Enter)" autocomplete="off">
+  </div>
+  <button class="pill clearbtn" id="clearFilters">Clear filters</button>
+  <span class="rowcount" id="rowcount"></span>
+</div>
+
+<!-- ================= TABLE ================= -->
+<div class="table-wrap">
+  <table>
+    <thead id="thead"></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL DATASET EXPLORER</footer>
+
+<!-- ================= PLAYER ================= -->
+<div class="overlay" id="overlay">
+  <div class="player">
+    <div class="player-head">
+      <span class="pid" id="pTitle"></span>
+      <span class="meta" id="pMeta"></span>
+      <button class="close" id="pClose" title="close (Esc)">×</button>
+    </div>
+    <div class="stage">
+      <video id="pVideo" preload="auto" playsinline></video>
+      <div class="tte">
+        <div class="lbl" id="tteLbl">TIME TO EVENT</div>
+        <div class="val" id="tteVal">–</div>
+        <div class="sub" id="tteSub"></div>
+      </div>
+      <div class="alight"><div class="dot" id="aDot"></div><span>ALERT</span></div>
+      <div class="endcard" id="endcard">
+        <div class="msg">SEGMENT ENDED</div>
+        <button class="ctl big" id="replayBtn">↻ replay</button>
+      </div>
+    </div>
+    <div class="scrubwrap">
+      <span class="t" id="scrubElapsed">0.0s</span>
+      <input type="range" id="scrub" min="0" max="1" step="0.001" value="0">
+      <span class="t" id="scrubTotal">0.0s</span>
+    </div>
+    <div class="player-controls">
+      <button class="ctl big" id="pauseBtn">⏸ pause</button>
+      <span class="speed-lbl">SPEED</span>
+      <button class="ctl spd" data-rate="0.5">0.5×</button>
+      <button class="ctl spd" data-rate="0.75">0.75×</button>
+      <button class="ctl spd active" data-rate="1">1×</button>
+      <span class="seg-info" id="segInfo"></span>
+    </div>
+  </div>
+</div>
+
+<script src="site_data.js"></script>
+<script src="assets/plexus.js"></script>
+<script>
+"use strict";
+/* ============================================================= state */
+const DATA = window.SITE_DATA.splits;
+let split = "train";
+let searchTerm = "";
+let rate = 1;
+let sortCol = null, sortDir = 1;
+let filters = {};   // { [colKey]: string | {min,max} }
+
+/* ============================================================= hero stats + tilt */
+(function heroCards(){
+  const host = document.getElementById("heroCards");
+  const mk = (k, v, sub) => {
+    const d = document.createElement("div");
+    d.className = "stat-card";
+    d.innerHTML = `<div class="k">${k}</div><div class="v">${v}<small>${sub}</small></div>`;
+    return d;
+  };
+  const tr = DATA.train, te = DATA.test;
+  const pos = a => a.filter(c => c.target === 1).length;
+  host.append(
+    mk("Train clips", tr.length, `${pos(tr)} pos / ${tr.length - pos(tr)} neg`),
+    mk("Test clips", te.length, `${pos(te)} pos / ${te.length - pos(te)} neg`),
+    mk("Playable videos", tr.length + te.length, "full mp4, local"),
+  );
+  host.querySelectorAll(".stat-card").forEach(card => {
+    card.addEventListener("mousemove", e => {
+      const r = card.getBoundingClientRect();
+      const rx = ((e.clientY - r.top) / r.height - .5) * -10;
+      const ry = ((e.clientX - r.left) / r.width - .5) * 12;
+      card.style.transform = `perspective(600px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+    });
+    card.addEventListener("mouseleave", () => card.style.transform = "");
+  });
+})();
+
+initPlexus(document.getElementById("plexus"));
+
+/* ============================================================= column config
+   Every column except the thumbnail ("Clip") is sortable, and every column
+   except "Clip" gets a filter control in the row under the headers. The ID
+   column deliberately has NO separate filter box here - the top search bar
+   already filters+jumps by id (search box owns that job so there is not a
+   second, redundant id textbox two rows below it); ID sorting still works via
+   its header. */
+const GROUP_OPTS = [...new Set(DATA.test.map(c => c.group))].sort((a, b) => a - b);
+const LABEL_OPTS = [["", "All"], ["1", "Positive"], ["0", "Negative"]];
+
+const COLS = {
+  train: [
+    { key: "thumb", label: "Clip" },
+    { key: "raw_id", label: "ID", type: "num", get: c => c.raw_id },
+    { key: "time_of_event", label: "Time of event", type: "num", get: c => c.time_of_event },
+    { key: "time_of_alert", label: "Time of alert", type: "num", get: c => c.time_of_alert },
+    { key: "response_time", label: "Response time", type: "num", get: c => c.response_time },
+    { key: "target", label: "Label", type: "select", get: c => c.target, opts: LABEL_OPTS },
+  ],
+  test: [
+    { key: "thumb", label: "Clip" },
+    { key: "raw_id", label: "ID", type: "num", get: c => c.raw_id },
+    { key: "usage", label: "Usage", type: "select", get: c => c.usage,
+      opts: [["", "All"], ["Private", "Private"], ["Public", "Public"]] },
+    { key: "group", label: "Group", type: "select", get: c => c.group,
+      opts: [["", "All"], ...GROUP_OPTS.map(g => [String(g), String(g)])] },
+    { key: "time_of_event", label: "Event time", type: "num", get: c => c.time_of_event },
+    { key: "target", label: "Label", type: "select", get: c => c.target, opts: LABEL_OPTS },
+  ],
+};
+
+function fmt(v){ return v === null || v === undefined ? "–" : v.toFixed(3); }
+
+function rowHTML(c){
+  const chip = c.target === 1
+    ? `<span class="chip pos">POSITIVE</span>` : `<span class="chip neg">NEGATIVE</span>`;
+  const thumb = `
+    <a class="thumb" data-id="${c.id}" title="play segment">
+      ${c.thumb ? `<img loading="lazy" src="${c.thumb}" alt="">` : ""}
+      <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+    </a>`;
+  if (split === "train")
+    return `<tr data-id="${c.id}"><td>${thumb}</td>
+      <td class="num">${c.id}</td>
+      <td class="num">${fmt(c.time_of_event)}</td>
+      <td class="num">${fmt(c.time_of_alert)}</td>
+      <td class="num">${fmt(c.response_time)}</td>
+      <td>${chip}</td></tr>`;
+  const evt = c.target === 1
+    ? (c.time_of_event !== null ? fmt(c.time_of_event)
+       : `–<span class="badge">no event time</span>`)
+    : "–";
+  return `<tr data-id="${c.id}"><td>${thumb}</td>
+    <td class="num">${c.id}</td>
+    <td class="num dim">${c.usage}</td>
+    <td class="num dim">${c.group ?? "–"}</td>
+    <td class="num">${evt}</td>
+    <td>${chip}</td></tr>`;
+}
+
+/* ============================================================= filter + sort */
+function passesFilters(c){
+  for (const col of COLS[split]){
+    if (col.key === "thumb") continue;
+    const f = filters[col.key];
+    if (f === undefined || f === "" || f === null) continue;
+    const v = col.get(c);
+    if (col.type === "select"){
+      if (String(v) !== f) return false;
+    } else if (col.type === "num"){
+      if (f.min !== "" && f.min !== undefined){
+        if (v === null || v < parseFloat(f.min)) return false;
+      }
+      if (f.max !== "" && f.max !== undefined){
+        if (v === null || v > parseFloat(f.max)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function visibleClips(){
+  const q = searchTerm.replace(/^0+(?=\d)/, "");   // "00072" == "72"
+  let rows = DATA[split].filter(c => {
+    if (q && !String(c.raw_id).includes(q)) return false;
+    return passesFilters(c);
+  });
+  if (sortCol){
+    const col = COLS[split].find(c => c.key === sortCol);
+    rows = rows.slice().sort((a, b) => {
+      const av = col.get(a), bv = col.get(b);
+      const aNull = av === null || av === undefined;
+      const bNull = bv === null || bv === undefined;
+      if (aNull && bNull) return 0;
+      if (aNull) return 1;              // nulls always last, regardless of direction
+      if (bNull) return -1;
+      if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+  }
+  return rows;
+}
+
+/* thead (headers + filter row) is rebuilt ONLY on split change - rebuilding it on
+   every keystroke would recreate the filter <input> elements and drop focus/cursor
+   position while typing. Sorting also avoids a full rebuild: it toggles classes on
+   the existing header cells in place. */
+function renderHead(){
+  filters = {};
+  sortCol = null; sortDir = 1;
+  const cols = COLS[split];
+  const headRow = "<tr>" + cols.map(c =>
+    c.key === "thumb" ? `<th>${c.label}</th>`
+      : `<th class="sortable" data-key="${c.key}">${c.label}<span class="caret">▲</span></th>`
+  ).join("") + "</tr>";
+  const filterRow = "<tr class=\"filter-row\">" + cols.map(c => {
+    if (c.key === "thumb") return "<th></th>";
+    if (c.type === "select")
+      return `<th><select data-key="${c.key}"><option value="">${c.opts[0][1]}</option>${
+        c.opts.slice(1).map(([v, l]) => `<option value="${v}">${l}</option>`).join("")
+      }</select></th>`;
+    return `<th><div class="range">
+      <input type="number" step="any" placeholder="min" data-key="${c.key}" data-bound="min">
+      <input type="number" step="any" placeholder="max" data-key="${c.key}" data-bound="max">
+    </div></th>`;
+  }).join("") + "</tr>";
+  document.getElementById("thead").innerHTML = headRow + filterRow;
+
+  document.getElementById("thead").querySelectorAll("th.sortable").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (sortCol === key){
+        sortDir = sortDir === 1 ? -1 : 0;
+        if (sortDir === 0){ sortCol = null; sortDir = 1; }
+      } else { sortCol = key; sortDir = 1; }
+      document.getElementById("thead").querySelectorAll("th.sortable").forEach(x => {
+        x.classList.remove("sort-asc", "sort-desc");
+        x.querySelector(".caret").textContent = "▲";
+      });
+      if (sortCol){
+        th.classList.add(sortDir === 1 ? "sort-asc" : "sort-desc");
+        th.querySelector(".caret").textContent = sortDir === 1 ? "▲" : "▼";
+      }
+      renderBody();
+    });
+  });
+
+  document.getElementById("thead").querySelectorAll(".filter-row select").forEach(sel => {
+    sel.addEventListener("change", () => {
+      filters[sel.dataset.key] = sel.value;
+      renderBody();
+    });
+  });
+  document.getElementById("thead").querySelectorAll(".filter-row input").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const key = inp.dataset.key, bound = inp.dataset.bound;
+      filters[key] = filters[key] || { min: "", max: "" };
+      filters[key][bound] = inp.value;
+      renderBody();
+    });
+  });
+}
+
+function renderBody(){
+  const clips = visibleClips();
+  document.getElementById("tbody").innerHTML = clips.map(rowHTML).join("");
+  document.getElementById("rowcount").textContent =
+    `${clips.length} / ${DATA[split].length} clips`;
+}
+
+renderHead(); renderBody();
+
+/* tabs / search / clear */
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active"); split = t.dataset.split;
+  searchTerm = ""; document.getElementById("search").value = "";
+  renderHead(); renderBody();
+}));
+const searchBox = document.getElementById("search");
+searchBox.addEventListener("input", () => { searchTerm = searchBox.value.trim(); renderBody(); });
+searchBox.addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const q = searchTerm.replace(/^0+(?=\d)/, "");
+  const hit = DATA[split].find(c => String(c.raw_id) === q);
+  if (!hit) return;
+  const tr = document.querySelector(`tr[data-id="${hit.id}"]`);
+  if (tr){ tr.scrollIntoView({block:"center"}); tr.classList.remove("hit");
+           void tr.offsetWidth; tr.classList.add("hit"); }
+});
+document.getElementById("clearFilters").addEventListener("click", () => {
+  searchTerm = ""; searchBox.value = "";
+  renderHead(); renderBody();
+});
+
+/* ============================================================= player */
+const overlay = document.getElementById("overlay");
+const video   = document.getElementById("pVideo");
+const tteVal  = document.getElementById("tteVal");
+const tteLbl  = document.getElementById("tteLbl");
+const tteSub  = document.getElementById("tteSub");
+const aDot    = document.getElementById("aDot");
+const endcard = document.getElementById("endcard");
+const pauseBtn= document.getElementById("pauseBtn");
+const scrub   = document.getElementById("scrub");
+const scrubElapsed = document.getElementById("scrubElapsed");
+const scrubTotal   = document.getElementById("scrubTotal");
+let cur = null;              // {clip, segStart, segEnd}
+let rafId = null;
+let scrubbing = false;       // true while the user is dragging the range input
+
+function safePlay(){
+  const p = video.play();
+  if (p) p.then(() => { pauseBtn.textContent = "⏸ pause"; })
+          .catch(() => { pauseBtn.textContent = "▶ resume"; });
+}
+
+function openClip(id){
+  const clip = DATA[split].find(c => c.id === id);
+  if (!clip || clip.video_missing) return;
+  cur = { clip, segStart: 0, segEnd: null };
+  document.getElementById("pTitle").textContent = `#${clip.id}`;
+  const bits = [split.toUpperCase(), clip.target === 1 ? "POSITIVE" : "NEGATIVE"];
+  if (clip.usage) bits.push(clip.usage);
+  if (clip.time_of_event !== null) bits.push(`event @ ${clip.time_of_event.toFixed(2)}s`);
+  if (clip.time_of_alert !== null && clip.time_of_alert !== undefined)
+    bits.push(`alert @ ${clip.time_of_alert.toFixed(2)}s`);
+  document.getElementById("pMeta").textContent = bits.join("  ·  ");
+  endcard.classList.remove("show");
+  pauseBtn.textContent = "⏸ pause";
+  overlay.classList.add("open");
+  video.src = clip.video;
+  video.load();
+}
+
+video.addEventListener("loadedmetadata", () => {
+  if (!cur) return;
+  const c = cur.clip, dur = video.duration;
+  if (c.time_of_event !== null){
+    cur.segStart = Math.max(0, c.time_of_event - 5);
+    cur.segEnd   = Math.min(dur, c.time_of_event + 2);
+  } else {
+    cur.segStart = 0;
+    cur.segEnd   = Math.min(dur, dur / 2 + 2);
+  }
+  document.getElementById("segInfo").textContent =
+    `segment ${cur.segStart.toFixed(2)}s → ${cur.segEnd.toFixed(2)}s of ${dur.toFixed(2)}s`;
+  scrubTotal.textContent = (cur.segEnd - cur.segStart).toFixed(1) + "s";
+  video.currentTime = cur.segStart;
+  video.playbackRate = rate;
+  safePlay();
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(tick);
+});
+
+function checkEnd(){
+  if (!cur || cur.segEnd === null) return;
+  if (video.currentTime >= cur.segEnd && !video.paused){
+    video.pause();
+    video.currentTime = cur.segEnd;
+    endcard.classList.add("show");
+    pauseBtn.textContent = "▶ resume";
+  }
+}
+video.addEventListener("timeupdate", checkEnd);
+
+function updateScrubUI(t){
+  if (!cur) return;
+  const span = cur.segEnd - cur.segStart;
+  if (!scrubbing) scrub.value = span > 0 ? (t - cur.segStart) / span : 0;
+  scrubElapsed.textContent = Math.max(0, t - cur.segStart).toFixed(1) + "s";
+}
+
+function tick(){
+  if (!cur) return;
+  const t = video.currentTime, c = cur.clip;
+  checkEnd();
+  if (c.time_of_event !== null){
+    const tte = c.time_of_event - t;
+    tteLbl.textContent = "TIME TO EVENT";
+    if (tte >= 0){
+      tteVal.textContent = tte.toFixed(2) + "s";
+      tteVal.className = "val" + (tte < 1 ? " warn" : "");
+      tteSub.textContent = "";
+    } else {
+      tteVal.textContent = "+" + (-tte).toFixed(2) + "s";
+      tteVal.className = "val after";
+      tteSub.textContent = "after event";
+    }
+  } else {
+    tteLbl.textContent = c.target === 1 ? "NO EVENT TIME" : "TN — NO EVENT";
+    tteVal.textContent = t.toFixed(2) + "s";
+    tteVal.className = "val";
+    tteSub.textContent = `of ${cur.segEnd !== null ? cur.segEnd.toFixed(2) : "–"}s segment`;
+  }
+  const inWin = c.time_of_alert !== null && c.time_of_alert !== undefined &&
+                c.time_of_event !== null &&
+                t > c.time_of_alert && t < c.time_of_event;
+  aDot.classList.toggle("on", inWin);
+  updateScrubUI(t);
+  rafId = requestAnimationFrame(tick);
+}
+
+function closePlayer(){
+  overlay.classList.remove("open");
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  cur = null;
+}
+
+function togglePause(){
+  if (!cur) return;
+  if (video.paused){
+    if (endcard.classList.contains("show")) return;
+    safePlay();
+  } else {
+    video.pause(); pauseBtn.textContent = "▶ resume";
+  }
+}
+
+function replay(){
+  if (!cur) return;
+  endcard.classList.remove("show");
+  video.currentTime = cur.segStart;
+  safePlay();
+}
+
+/* seek to a fraction [0,1] of the reviewed segment - shared by the scrubber and
+   the arrow-key nudges. Backing out of the ended state (dragging left, or
+   pressing Left) clears the end-card so playback can resume without a full
+   replay, per spec. */
+function seekToFraction(frac){
+  if (!cur) return;
+  frac = Math.min(1, Math.max(0, frac));
+  const t = cur.segStart + frac * (cur.segEnd - cur.segStart);
+  video.currentTime = t;
+  updateScrubUI(t);
+  if (t < cur.segEnd) endcard.classList.remove("show");
+}
+function nudge(deltaS){
+  if (!cur) return;
+  const span = cur.segEnd - cur.segStart;
+  seekToFraction(span > 0 ? (video.currentTime - cur.segStart + deltaS) / span : 0);
+}
+
+/* wiring */
+document.getElementById("tbody").addEventListener("click", e => {
+  const th = e.target.closest(".thumb");
+  if (th) openClip(th.dataset.id);
+});
+document.getElementById("pClose").addEventListener("click", closePlayer);
+overlay.addEventListener("click", e => { if (e.target === overlay) closePlayer(); });
+video.addEventListener("click", togglePause);
+pauseBtn.addEventListener("click", togglePause);
+document.getElementById("replayBtn").addEventListener("click", replay);
+document.querySelectorAll(".spd").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".spd").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  rate = parseFloat(b.dataset.rate);
+  video.playbackRate = rate;
+}));
+scrub.addEventListener("mousedown", () => scrubbing = true);
+scrub.addEventListener("touchstart", () => scrubbing = true);
+scrub.addEventListener("input", () => seekToFraction(parseFloat(scrub.value)));
+scrub.addEventListener("change", () => { scrubbing = false; });
+document.addEventListener("keydown", e => {
+  if (!overlay.classList.contains("open")) return;
+  if (e.key === "Escape") closePlayer();
+  if (e.key === " "){ e.preventDefault(); togglePause(); }
+  if (e.key === "ArrowLeft"){ e.preventDefault(); nudge(-0.25); }
+  if (e.key === "ArrowRight"){ e.preventDefault(); nudge(0.25); }
+});
+</script>
+</body>
+</html>
