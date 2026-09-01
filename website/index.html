@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCP-MMLM · Dataset Explorer</title>
+<style>
+  /* ============ palette: matches the project's deck identity ============ */
+  :root{
+    --bg:#0D1226; --panel:#1C2340; --panel2:#243060; --panel-dk:#161d36;
+    --cyan:#00BFFF; --cyan-dk:#0096CC; --red:#FF6B6B; --green:#00E676;
+    --amber:#FFA726; --muted:#A0B4CC; --white:#FFFFFF;
+    --mono:Consolas,'Cascadia Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--white);
+       font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+       -webkit-font-smoothing:antialiased;overflow-x:hidden}
+
+  /* ============ hero ============ */
+  .hero{position:relative;height:88vh;min-height:520px;display:flex;
+        flex-direction:column;justify-content:center;overflow:hidden;
+        border-bottom:1px solid #2a3560}
+  #plexus{position:absolute;inset:0;width:100%;height:100%}
+  .hero-inner{position:relative;z-index:2;padding:0 6vw;pointer-events:none}
+  .hero-kicker{font-family:var(--mono);font-size:13px;letter-spacing:.35em;
+               color:var(--cyan);text-transform:uppercase;margin-bottom:18px}
+  .hero-title{font-size:clamp(42px,7.5vw,104px);font-weight:800;line-height:.95;
+              letter-spacing:-.02em}
+  .hero-title .thin{color:var(--muted);font-weight:300}
+  .hero-sub{margin-top:22px;max-width:560px;color:var(--muted);font-size:15px;
+            line-height:1.6}
+  .hero-cards{position:relative;z-index:2;display:flex;gap:18px;padding:34px 6vw 0;
+              flex-wrap:wrap}
+  .stat-card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel-dk) 100%);
+             border:1px solid #2a3560;border-radius:10px;padding:16px 22px;
+             min-width:170px;transform-style:preserve-3d;transition:transform .15s ease,
+             border-color .2s;will-change:transform;cursor:default}
+  .stat-card:hover{border-color:var(--cyan-dk)}
+  .stat-card .k{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+                color:var(--muted);text-transform:uppercase}
+  .stat-card .v{font-size:30px;font-weight:700;margin-top:5px}
+  .stat-card .v small{font-size:13px;color:var(--muted);font-weight:400;margin-left:7px}
+  .scroll-hint{position:absolute;bottom:22px;left:6vw;z-index:2;color:var(--muted);
+               font-family:var(--mono);font-size:11px;letter-spacing:.25em;
+               animation:bob 2.4s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(7px)}}
+  @media (prefers-reduced-motion:reduce){
+    .scroll-hint{animation:none}
+    #plexus{display:none}
+    .hero{background:radial-gradient(ellipse at 30% 40%,#1a2450 0%,var(--bg) 70%)}
+  }
+
+  /* ============ sticky top bar ============ */
+  .topbar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:14px;
+          padding:12px 6vw;background:rgba(13,18,38,.88);backdrop-filter:blur(10px);
+          border-bottom:1px solid #2a3560;flex-wrap:wrap}
+  .brand{font-family:var(--mono);font-size:13px;color:var(--cyan);letter-spacing:.2em;
+         white-space:nowrap}
+  .tabs{display:flex;gap:4px;background:var(--panel-dk);border-radius:8px;padding:4px}
+  .tab{border:0;background:transparent;color:var(--muted);font:600 13px/1 inherit;
+       font-family:inherit;padding:8px 20px;border-radius:6px;cursor:pointer;
+       transition:.15s}
+  .tab.active{background:var(--cyan);color:#04182b}
+  .tab:not(.active):hover{color:var(--white)}
+  .searchwrap{flex:1;min-width:180px;max-width:420px;position:relative}
+  .searchwrap input{width:100%;background:var(--panel-dk);border:1px solid #2a3560;
+       border-radius:8px;color:var(--white);font-family:var(--mono);font-size:13px;
+       padding:10px 14px 10px 36px;outline:none;transition:border-color .15s}
+  .searchwrap input:focus{border-color:var(--cyan)}
+  .searchwrap svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
+       width:15px;height:15px;stroke:var(--muted);fill:none;stroke-width:2}
+  .filters{display:flex;gap:4px}
+  .pill{border:1px solid #2a3560;background:transparent;color:var(--muted);
+        font:600 12px/1 inherit;font-family:inherit;padding:8px 14px;border-radius:99px;
+        cursor:pointer;transition:.15s}
+  .pill.active{border-color:var(--cyan);color:var(--cyan)}
+  .rowcount{font-family:var(--mono);font-size:12px;color:var(--muted);margin-left:auto;
+            white-space:nowrap}
+
+  /* ============ table ============ */
+  .table-wrap{padding:26px 6vw 80px}
+  table{width:100%;border-collapse:collapse}
+  thead th{position:sticky;top:61px;z-index:10;background:var(--panel-dk);
+           font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+           text-transform:uppercase;color:var(--muted);text-align:left;
+           padding:12px 14px;border-bottom:1px solid #2a3560}
+  tbody td{padding:10px 14px;border-bottom:1px solid #1d2748;font-size:14px;
+           vertical-align:middle}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:rgba(0,191,255,.05)}
+  tbody tr.hit{animation:hitflash 1.6s ease-out}
+  @keyframes hitflash{0%,60%{background:rgba(0,191,255,.22)}100%{background:transparent}}
+  .num{font-family:var(--mono);font-size:13px}
+  .dim{color:var(--muted)}
+  .thumb{position:relative;width:150px;height:84px;border-radius:6px;overflow:hidden;
+         cursor:pointer;background:var(--panel-dk);border:1px solid #2a3560;
+         transition:border-color .15s,transform .15s;display:block}
+  .thumb:hover{border-color:var(--cyan);transform:scale(1.03)}
+  .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .thumb .play{position:absolute;inset:0;display:flex;align-items:center;
+       justify-content:center;background:rgba(10,14,30,.35);transition:background .15s}
+  .thumb:hover .play{background:rgba(10,14,30,.15)}
+  .thumb .play svg{width:30px;height:30px;fill:rgba(255,255,255,.92);
+       filter:drop-shadow(0 1px 6px rgba(0,0,0,.6))}
+  .chip{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;
+        letter-spacing:.08em;padding:4px 11px;border-radius:99px}
+  .chip.pos{color:var(--green);background:rgba(0,230,118,.1);
+            border:1px solid rgba(0,230,118,.35)}
+  .chip.neg{color:var(--muted);background:rgba(160,180,204,.08);
+            border:1px solid rgba(160,180,204,.3)}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;color:var(--amber);
+         border:1px solid rgba(255,167,38,.4);border-radius:4px;padding:2px 7px;
+         margin-left:8px;vertical-align:1px}
+
+  /* ============ player (lightbox) ============ */
+  .overlay{position:fixed;inset:0;z-index:100;background:rgba(5,8,20,.82);
+           backdrop-filter:blur(6px);display:none;align-items:center;
+           justify-content:center;padding:3vh 3vw}
+  .overlay.open{display:flex}
+  .player{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;
+          width:min(1100px,96vw);overflow:hidden;
+          box-shadow:0 30px 90px rgba(0,0,0,.6)}
+  .player-head{display:flex;align-items:center;gap:14px;padding:13px 18px;
+               border-bottom:1px solid #2a3560;flex-wrap:wrap}
+  .player-head .pid{font-family:var(--mono);font-size:16px;font-weight:700;
+                    color:var(--cyan)}
+  .player-head .meta{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .player-head .close{margin-left:auto;border:0;background:transparent;
+       color:var(--muted);font-size:26px;line-height:1;cursor:pointer;padding:2px 8px}
+  .player-head .close:hover{color:var(--white)}
+  .stage{position:relative;background:#000}
+  .stage video{display:block;width:100%;max-height:62vh;cursor:pointer}
+  /* TTE readout - left side of the clip, per spec */
+  .tte{position:absolute;left:18px;top:50%;transform:translateY(-50%);
+       background:rgba(8,12,26,.72);border:1px solid rgba(0,191,255,.35);
+       border-radius:10px;padding:12px 16px;pointer-events:none;min-width:150px}
+  .tte .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.22em;
+            color:var(--muted);text-transform:uppercase}
+  .tte .val{font-family:var(--mono);font-size:34px;font-weight:700;color:var(--cyan);
+            margin-top:2px;transition:color .1s}
+  .tte .val.warn{color:var(--red)}
+  .tte .val.after{color:var(--amber);font-size:24px}
+  .tte .sub{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:3px}
+  /* alert-window light - small circle, top-right of the clip, per spec */
+  .alight{position:absolute;top:14px;right:16px;display:flex;align-items:center;
+          gap:8px;background:rgba(8,12,26,.72);border-radius:99px;
+          padding:6px 12px 6px 8px;pointer-events:none}
+  .alight .dot{width:14px;height:14px;border-radius:50%;background:var(--red);
+       box-shadow:0 0 10px 2px rgba(255,107,107,.55);transition:background .1s,
+       box-shadow .1s}
+  .alight .dot.on{background:var(--green);
+       box-shadow:0 0 12px 3px rgba(0,230,118,.65)}
+  .alight span{font-family:var(--mono);font-size:10px;letter-spacing:.15em;
+               color:var(--muted)}
+  .endcard{position:absolute;inset:0;display:none;align-items:center;
+           justify-content:center;flex-direction:column;gap:14px;
+           background:rgba(8,12,26,.72)}
+  .endcard.show{display:flex}
+  .endcard .msg{font-family:var(--mono);font-size:14px;color:var(--muted);
+                letter-spacing:.1em}
+  .player-controls{display:flex;align-items:center;gap:10px;padding:13px 18px;
+                   border-top:1px solid #2a3560;flex-wrap:wrap}
+  .ctl{border:1px solid #2a3560;background:var(--panel);color:var(--white);
+       font:600 13px/1 inherit;font-family:var(--mono);padding:9px 16px;
+       border-radius:8px;cursor:pointer;transition:.15s}
+  .ctl:hover{border-color:var(--cyan-dk)}
+  .ctl.active{background:var(--cyan);border-color:var(--cyan);color:#04182b}
+  .ctl.big{padding:9px 22px}
+  .speed-lbl{font-family:var(--mono);font-size:11px;color:var(--muted);
+             letter-spacing:.15em;margin-right:2px}
+  .seg-info{margin-left:auto;font-family:var(--mono);font-size:11px;
+            color:var(--muted)}
+
+  footer{padding:24px 6vw;border-top:1px solid #2a3560;color:var(--muted);
+         font-family:var(--mono);font-size:11px;letter-spacing:.12em}
+</style>
+</head>
+<body>
+
+<!-- ================= HERO ================= -->
+<section class="hero">
+  <canvas id="plexus"></canvas>
+  <div class="hero-inner">
+    <div class="hero-kicker">Collision Anticipation · MSc Thesis</div>
+    <h1 class="hero-title">CCP-MMLM<br><span class="thin">Dataset Explorer</span></h1>
+    <p class="hero-sub">Browse every dashcam clip in the Nexar train and test sets.
+       Press a frame to replay the seconds around the event — with a live
+       time-to-event readout, the alert window indicator, and slow-motion review.</p>
+  </div>
+  <div class="hero-cards" id="heroCards"></div>
+  <div class="scroll-hint">SCROLL ↓ EXPLORE</div>
+</section>
+
+<!-- ================= TOP BAR ================= -->
+<div class="topbar" id="topbar">
+  <span class="brand">CCP-MMLM</span>
+  <div class="tabs">
+    <button class="tab active" data-split="train">Train</button>
+    <button class="tab" data-split="test">Test</button>
+  </div>
+  <div class="searchwrap">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+    <input id="search" type="text" placeholder="search clip id — e.g. 72 or 00072" autocomplete="off">
+  </div>
+  <div class="filters">
+    <button class="pill active" data-f="all">All</button>
+    <button class="pill" data-f="pos">Positive</button>
+    <button class="pill" data-f="neg">Negative</button>
+  </div>
+  <span class="rowcount" id="rowcount"></span>
+</div>
+
+<!-- ================= TABLE ================= -->
+<div class="table-wrap">
+  <table>
+    <thead id="thead"></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL DATASET EXPLORER</footer>
+
+<!-- ================= PLAYER ================= -->
+<div class="overlay" id="overlay">
+  <div class="player">
+    <div class="player-head">
+      <span class="pid" id="pTitle"></span>
+      <span class="meta" id="pMeta"></span>
+      <button class="close" id="pClose" title="close (Esc)">×</button>
+    </div>
+    <div class="stage">
+      <video id="pVideo" preload="auto" playsinline></video>
+      <div class="tte">
+        <div class="lbl" id="tteLbl">TIME TO EVENT</div>
+        <div class="val" id="tteVal">–</div>
+        <div class="sub" id="tteSub"></div>
+      </div>
+      <div class="alight"><div class="dot" id="aDot"></div><span>ALERT</span></div>
+      <div class="endcard" id="endcard">
+        <div class="msg">SEGMENT ENDED</div>
+        <button class="ctl big" id="replayBtn">↻ replay</button>
+      </div>
+    </div>
+    <div class="player-controls">
+      <button class="ctl big" id="pauseBtn">⏸ pause</button>
+      <span class="speed-lbl">SPEED</span>
+      <button class="ctl spd" data-rate="0.5">0.5×</button>
+      <button class="ctl spd" data-rate="0.75">0.75×</button>
+      <button class="ctl spd active" data-rate="1">1×</button>
+      <span class="seg-info" id="segInfo"></span>
+    </div>
+  </div>
+</div>
+
+<script src="site_data.js"></script>
+<script>
+"use strict";
+/* ============================================================= state */
+const DATA = window.SITE_DATA.splits;
+let split = "train";
+let labelFilter = "all";
+let searchTerm = "";
+let rate = 1;
+
+/* ============================================================= hero stats + tilt */
+(function heroCards(){
+  const host = document.getElementById("heroCards");
+  const mk = (k, v, sub) => {
+    const d = document.createElement("div");
+    d.className = "stat-card";
+    d.innerHTML = `<div class="k">${k}</div><div class="v">${v}<small>${sub}</small></div>`;
+    return d;
+  };
+  const tr = DATA.train, te = DATA.test;
+  const pos = a => a.filter(c => c.target === 1).length;
+  host.append(
+    mk("Train clips", tr.length, `${pos(tr)} pos / ${tr.length - pos(tr)} neg`),
+    mk("Test clips", te.length, `${pos(te)} pos / ${te.length - pos(te)} neg`),
+    mk("Playable videos", tr.length + te.length, "full mp4, local"),
+  );
+  /* light 3D tilt on hover (no WebGL, dependency-free) */
+  host.querySelectorAll(".stat-card").forEach(card => {
+    card.addEventListener("mousemove", e => {
+      const r = card.getBoundingClientRect();
+      const rx = ((e.clientY - r.top) / r.height - .5) * -10;
+      const ry = ((e.clientX - r.left) / r.width - .5) * 12;
+      card.style.transform = `perspective(600px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+    });
+    card.addEventListener("mouseleave", () => card.style.transform = "");
+  });
+})();
+
+/* ============================================================= plexus canvas
+   Connected-dots field where two particle streams drift toward the centre;
+   when opposing particles meet, a red collision pulse ripples out - an abstract
+   nod to the task (crash anticipation), not a starfield. */
+(function plexus(){
+  const cv = document.getElementById("plexus");
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const ctx = cv.getContext("2d");
+  let W, H, parts = [], pulses = [];
+  const N = 70;
+
+  function resize(){
+    W = cv.width = cv.offsetWidth * devicePixelRatio;
+    H = cv.height = cv.offsetHeight * devicePixelRatio;
+  }
+  addEventListener("resize", resize); resize();
+
+  function spawn(side){
+    const fromLeft = side !== undefined ? side : Math.random() < .5;
+    return {
+      x: fromLeft ? Math.random() * W * .25 : W - Math.random() * W * .25,
+      y: Math.random() * H,
+      vx: (fromLeft ? 1 : -1) * (0.25 + Math.random() * 0.5) * devicePixelRatio,
+      vy: (Math.random() - .5) * 0.35 * devicePixelRatio,
+      left: fromLeft,
+    };
+  }
+  for (let i = 0; i < N; i++){
+    const p = spawn();
+    p.x = Math.random() * W;              // initial fill across the whole width
+    parts.push(p);
+  }
+
+  function step(){
+    ctx.clearRect(0, 0, W, H);
+    const linkD = 130 * devicePixelRatio, crashD = 14 * devicePixelRatio;
+
+    for (const p of parts){
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20)
+        Object.assign(p, spawn(p.left));
+    }
+    /* links */
+    for (let i = 0; i < parts.length; i++){
+      for (let j = i + 1; j < parts.length; j++){
+        const a = parts[i], b = parts[j];
+        const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy);
+        if (d < linkD){
+          ctx.strokeStyle = `rgba(0,191,255,${(1 - d / linkD) * .28})`;
+          ctx.lineWidth = devicePixelRatio;
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
+        /* opposing streams colliding -> red pulse + respawn. Restricted to the
+           central band: near the edges one stream is freshly spawned on top of
+           arriving opposite-stream particles, which piled rings up at the border. */
+        if (d < crashD && a.left !== b.left && Math.abs(a.x - W / 2) < W * 0.3){
+          pulses.push({x:(a.x+b.x)/2, y:(a.y+b.y)/2, r:0});
+          Object.assign(a, spawn(a.left)); Object.assign(b, spawn(b.left));
+        }
+      }
+    }
+    /* dots */
+    for (const p of parts){
+      ctx.fillStyle = "rgba(0,191,255,.85)";
+      ctx.beginPath(); ctx.arc(p.x, p.y, 1.8 * devicePixelRatio, 0, 7); ctx.fill();
+    }
+    /* collision pulses */
+    for (let i = pulses.length - 1; i >= 0; i--){
+      const u = pulses[i];
+      u.r += 2.2 * devicePixelRatio;
+      const alpha = Math.max(0, 1 - u.r / (90 * devicePixelRatio));
+      if (alpha <= 0){ pulses.splice(i, 1); continue; }
+      ctx.strokeStyle = `rgba(255,107,107,${alpha * .8})`;
+      ctx.lineWidth = 2 * devicePixelRatio;
+      ctx.beginPath(); ctx.arc(u.x, u.y, u.r, 0, 7); ctx.stroke();
+    }
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+})();
+
+/* ============================================================= table */
+const fmt = v => v === null || v === undefined ? "–" : v.toFixed(3);
+
+const HEADS = {
+  train: ["Clip", "ID", "Time of event", "Time of alert", "Response time", "Label"],
+  test:  ["Clip", "ID", "Usage", "Group", "Event time", "Label"],
+};
+
+function rowHTML(c){
+  const chip = c.target === 1
+    ? `<span class="chip pos">POSITIVE</span>` : `<span class="chip neg">NEGATIVE</span>`;
+  const thumb = `
+    <a class="thumb" data-id="${c.id}" title="play segment">
+      ${c.thumb ? `<img loading="lazy" src="${c.thumb}" alt="">` : ""}
+      <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+    </a>`;
+  if (split === "train")
+    return `<tr data-id="${c.id}"><td>${thumb}</td>
+      <td class="num">${c.id}</td>
+      <td class="num">${fmt(c.time_of_event)}</td>
+      <td class="num">${fmt(c.time_of_alert)}</td>
+      <td class="num">${fmt(c.response_time)}</td>
+      <td>${chip}</td></tr>`;
+  const evt = c.target === 1
+    ? (c.time_of_event !== null ? fmt(c.time_of_event)
+       : `–<span class="badge">no event time</span>`)
+    : "–";
+  return `<tr data-id="${c.id}"><td>${thumb}</td>
+    <td class="num">${c.id}</td>
+    <td class="num dim">${c.usage}</td>
+    <td class="num dim">${c.group ?? "–"}</td>
+    <td class="num">${evt}</td>
+    <td>${chip}</td></tr>`;
+}
+
+function visibleClips(){
+  const q = searchTerm.replace(/^0+(?=\d)/, "");   // "00072" == "72"
+  return DATA[split].filter(c => {
+    if (labelFilter === "pos" && c.target !== 1) return false;
+    if (labelFilter === "neg" && c.target !== 0) return false;
+    if (q && !String(c.raw_id).includes(q)) return false;
+    return true;
+  });
+}
+
+function render(){
+  document.getElementById("thead").innerHTML =
+    "<tr>" + HEADS[split].map(h => `<th>${h}</th>`).join("") + "</tr>";
+  const clips = visibleClips();
+  document.getElementById("tbody").innerHTML = clips.map(rowHTML).join("");
+  document.getElementById("rowcount").textContent =
+    `${clips.length} / ${DATA[split].length} clips`;
+}
+render();
+
+/* tabs / filters / search */
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active"); split = t.dataset.split; render();
+}));
+document.querySelectorAll(".pill").forEach(p => p.addEventListener("click", () => {
+  document.querySelectorAll(".pill").forEach(x => x.classList.remove("active"));
+  p.classList.add("active"); labelFilter = p.dataset.f; render();
+}));
+const searchBox = document.getElementById("search");
+searchBox.addEventListener("input", () => { searchTerm = searchBox.value.trim(); render(); });
+searchBox.addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const q = searchTerm.replace(/^0+(?=\d)/, "");
+  const hit = DATA[split].find(c => String(c.raw_id) === q);
+  if (!hit) return;
+  const tr = document.querySelector(`tr[data-id="${hit.id}"]`);
+  if (tr){ tr.scrollIntoView({block:"center"}); tr.classList.remove("hit");
+           void tr.offsetWidth; tr.classList.add("hit"); }
+});
+
+/* ============================================================= player */
+const overlay = document.getElementById("overlay");
+const video   = document.getElementById("pVideo");
+const tteVal  = document.getElementById("tteVal");
+const tteLbl  = document.getElementById("tteLbl");
+const tteSub  = document.getElementById("tteSub");
+const aDot    = document.getElementById("aDot");
+const endcard = document.getElementById("endcard");
+const pauseBtn= document.getElementById("pauseBtn");
+let cur = null;              // {clip, segStart, segEnd}
+let rafId = null;
+
+/* play() returns a promise that rejects when the browser blocks/aborts playback
+   (autoplay policy, or power-saving pause in a background tab). Unhandled, that
+   spams the console; handled, we just reflect the paused state in the button. */
+function safePlay(){
+  const p = video.play();
+  if (p) p.then(() => { pauseBtn.textContent = "⏸ pause"; })
+          .catch(() => { pauseBtn.textContent = "▶ resume"; });
+}
+
+function openClip(id){
+  const clip = DATA[split].find(c => c.id === id);
+  if (!clip || clip.video_missing) return;
+  cur = { clip, segStart: 0, segEnd: null };
+  document.getElementById("pTitle").textContent = `#${clip.id}`;
+  const bits = [split.toUpperCase(), clip.target === 1 ? "POSITIVE" : "NEGATIVE"];
+  if (clip.usage) bits.push(clip.usage);
+  if (clip.time_of_event !== null) bits.push(`event @ ${clip.time_of_event.toFixed(2)}s`);
+  if (clip.time_of_alert !== null && clip.time_of_alert !== undefined)
+    bits.push(`alert @ ${clip.time_of_alert.toFixed(2)}s`);
+  document.getElementById("pMeta").textContent = bits.join("  ·  ");
+  endcard.classList.remove("show");
+  pauseBtn.textContent = "⏸ pause";
+  overlay.classList.add("open");
+  video.src = clip.video;                  // seek happens on loadedmetadata
+  video.load();
+}
+
+video.addEventListener("loadedmetadata", () => {
+  if (!cur) return;
+  const c = cur.clip, dur = video.duration;
+  if (c.time_of_event !== null){
+    /* positive with a known event: [event-5, event+2], clamped */
+    cur.segStart = Math.max(0, c.time_of_event - 5);
+    cur.segEnd   = Math.min(dur, c.time_of_event + 2);
+  } else {
+    /* TN rule (also positives lacking an event time): [0, mid + 2] */
+    cur.segStart = 0;
+    cur.segEnd   = Math.min(dur, dur / 2 + 2);
+  }
+  document.getElementById("segInfo").textContent =
+    `segment ${cur.segStart.toFixed(2)}s → ${cur.segEnd.toFixed(2)}s of ${dur.toFixed(2)}s`;
+  video.currentTime = cur.segStart;
+  video.playbackRate = rate;
+  safePlay();
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(tick);
+});
+
+/* End-of-segment stop. Called from BOTH the rAF loop and the video's native
+   'timeupdate' event: rAF freezes entirely while the tab is backgrounded, so with
+   rAF alone the video overshoots the segment end whenever the page loses focus
+   mid-playback (observed: stopped at +7s instead of +2s). timeupdate keeps firing
+   (throttled) in background tabs. On trigger we also snap currentTime back to the
+   exact segment end so the frozen frame and TTE readout show the true endpoint. */
+function checkEnd(){
+  if (!cur || cur.segEnd === null) return;
+  if (video.currentTime >= cur.segEnd && !video.paused){
+    video.pause();
+    video.currentTime = cur.segEnd;
+    endcard.classList.add("show");
+    pauseBtn.textContent = "▶ resume";
+  }
+}
+video.addEventListener("timeupdate", checkEnd);
+
+function tick(){
+  if (!cur) return;
+  const t = video.currentTime, c = cur.clip;
+  checkEnd();
+  /* TTE readout (left side) */
+  if (c.time_of_event !== null){
+    const tte = c.time_of_event - t;
+    tteLbl.textContent = "TIME TO EVENT";
+    if (tte >= 0){
+      tteVal.textContent = tte.toFixed(2) + "s";
+      tteVal.className = "val" + (tte < 1 ? " warn" : "");
+      tteSub.textContent = "";
+    } else {
+      tteVal.textContent = "+" + (-tte).toFixed(2) + "s";
+      tteVal.className = "val after";
+      tteSub.textContent = "after event";
+    }
+  } else {
+    tteLbl.textContent = c.target === 1 ? "NO EVENT TIME" : "TN — NO EVENT";
+    tteVal.textContent = t.toFixed(2) + "s";
+    tteVal.className = "val";
+    tteSub.textContent = `of ${cur.segEnd !== null ? cur.segEnd.toFixed(2) : "–"}s segment`;
+  }
+  /* alert-window light (top-right): green iff alert < t < event, else red */
+  const inWin = c.time_of_alert !== null && c.time_of_alert !== undefined &&
+                c.time_of_event !== null &&
+                t > c.time_of_alert && t < c.time_of_event;
+  aDot.classList.toggle("on", inWin);
+  rafId = requestAnimationFrame(tick);
+}
+
+function closePlayer(){
+  overlay.classList.remove("open");
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  cur = null;
+}
+
+function togglePause(){
+  if (!cur) return;
+  if (video.paused){
+    if (endcard.classList.contains("show")) return;   // ended: use replay
+    safePlay();
+  } else {
+    video.pause(); pauseBtn.textContent = "▶ resume";
+  }
+}
+
+function replay(){
+  if (!cur) return;
+  endcard.classList.remove("show");
+  video.currentTime = cur.segStart;
+  safePlay();
+}
+
+/* wiring */
+document.getElementById("tbody").addEventListener("click", e => {
+  const th = e.target.closest(".thumb");
+  if (th) openClip(th.dataset.id);
+});
+document.getElementById("pClose").addEventListener("click", closePlayer);
+overlay.addEventListener("click", e => { if (e.target === overlay) closePlayer(); });
+video.addEventListener("click", togglePause);
+pauseBtn.addEventListener("click", togglePause);
+document.getElementById("replayBtn").addEventListener("click", replay);
+document.querySelectorAll(".spd").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".spd").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  rate = parseFloat(b.dataset.rate);
+  video.playbackRate = rate;
+}));
+document.addEventListener("keydown", e => {
+  if (!overlay.classList.contains("open")) return;
+  if (e.key === "Escape") closePlayer();
+  if (e.key === " "){ e.preventDefault(); togglePause(); }
+});
+</script>
+</body>
+</html>
