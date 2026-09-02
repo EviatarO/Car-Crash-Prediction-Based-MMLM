@@ -153,6 +153,214 @@ match" which describes cosine, not the current InfoNCE default).
   reorg fallout - `semsup_caption_promptbakeoff.py` and `semsup_v6_control_rerun.py` both do
   this already.
 
+## Crash-head unfreezing (`--unfreeze-head`, 2026-08-26) — new capability, confounded so far
+
+Added specifically to test whether the frozen crash head is what stops any arm from
+recalibrating after LoRA moves the trunk's features (see PROJECT_STATE.md's calibration
+finding: every 1,761-pool arm's AP/AUC/class-separation is flat, but each arm's *optimal
+decision threshold* drifts wildly — 0.812 for A1, 0.173 for B-v3 — consistent with a frozen
+head unable to follow a shifted feature distribution, per Kumar et al. ICLR 2022).
+`TrainableBadasWrapper.__init__` gains `unfreeze_module_substrings: list|None` — after LoRA
+wrapping, sets `requires_grad_(True)` on every param whose name contains `temporal_processor`
+or `classifier` (substring match survives peft's `base_model.model.` name prefixing). Exposes
+`head_params`/`head_param_names`, and two new methods: `head_state_dict()` (returns just the
+unfrozen head tensors, keyed by their peft-prefixed names — needed because peft's
+`save_pretrained()` only ever persists the LoRA delta) and `load_head_state(path)` (loads them
+back with `strict=False`). `semsup_train.py` wires this through `--unfreeze-head` +
+`--head-lr-mult` (default 0.1): head params get their OWN optimizer param group at
+`lr * head_lr_mult` (single flat `AdamW(trainable, lr=...)` became `AdamW(param_groups)`),
+`_clip_grads()` gained a third clip budget for the head when `--clip-grad-per-group` is set,
+and every epoch's checkpoint dir now also writes `head_state.pt` alongside `lora_adapter/`.
+
+**⚠️ Confirmed NOT sufficient as configured**: at `--head-lr-mult 0.1` with the trunk's cosine
+LR schedule applied to every param group uniformly (`LambdaLR`'s single `lr_lambda` scales all
+groups by the same factor, so the head's already-10×-smaller LR also decays toward 0 by the
+final epoch), 200 optimizer steps move the head's own weights by <0.05% relative magnitude —
+see PROJECT_STATE.md's SemTest-200 section. A future run testing this hypothesis for real
+needs a materially higher `--head-lr-mult` and/or a head-specific (non-cosine-decayed) schedule.
+
+Two more additions for the SemTest-200 experiment, both in `semsup_train.py`:
+- `--val-video-ids <file>`: newline-separated video_ids, overrides `clip_level_split` entirely
+  with an explicit train/val partition. Needed because `clip_level_split` is neither
+  label-stratified nor TTE-uniform, and SemTest-200's val set is deliberately stratified.
+- `--dump-val-scores`: writes `val_scores_ep{NN}.jsonl` every epoch (per-window
+  `{video_id, frames_dir, tte, label, score}`) inside `evaluate_val()`, which previously
+  discarded per-window scores immediately after computing the clip-level AP. This is what makes
+  per-epoch score-distribution/PR-curve analysis possible; off by default (extra I/O).
+
+New script `score_semtest.py` (copied from `score_arms_on_pool1761.py`, generalized): scores an
+arbitrary checkpoint on an arbitrary-size pool (drops the hardcoded 1,761-row expectation), and
+adds `--head-state <path>` to load an `--unfreeze-head` run's head weights before scoring — a
+checkpoint trained with `--unfreeze-head` is **not reproducible** without this, since the
+crash-relevant weights live outside the LoRA adapter peft saves.
+
+## SemTest-200 clip selection (`select_semtest200_recovery.py`, new)
+
+Builds a small (200-window), one-window-per-video, deliberately-adversarial-to-A0 pool via a
+**3-tier priority fill**, computed from a fresh A0 re-score of the full 4,446-window manifest
+(`score_arms_on_pool1761.py`, reused unchanged — it only warns, not fails, when the pool isn't
+1,761 rows) plus `dataset/train.xlsx`'s response-time column (col E = `time_of_event −
+time_of_alert`, seconds; **null for every negative row**, so the RT-eligibility filter only
+applies to positives: `response_time > TTE`).
+
+Positive side (3 tiers, filled **tier-globally** across all 3 TTE buckets at once — filling
+bucket-by-bucket starved TTE_1.5 because a single video can supply windows to more than one
+TTE bucket and a naive per-bucket loop lets an earlier bucket consume shared videos):
+1. **FN near-boundary** — GT=YES, RT-eligible, score∈[0.3,0.5) — take ALL of them.
+2. **TP fill** — GT=YES, RT-eligible, score∈[0.5, `--tp-fill-max`) — lowest-score-first. The
+   cap (default 0.85) is load-bearing: without it, the 639/491/290-clip mass at score≥0.85 per
+   bucket absorbs every remaining slot and tier 3 can never fire.
+3. **FN wide** — GT=YES, RT-eligible, score<0.3 — highest-score-first (closest to the tier-2
+   boundary), only if tiers 1+2 together still can't fill quota.
+
+Negative side (2 tiers, **100% FP by design, zero TN ever selected** — this is deliberate, per
+the user's spec, not a bug): FP near-boundary [0.5,0.7) (all of them), then FP fill [0.7,1.0)
+lowest-first.
+
+`--exclude-frames-dir <file>`: excludes specific windows entirely (e.g. clips that failed a
+caption-QC pass) and re-runs the same tier logic to backfill — used iteratively during
+SemTest-200's caption-QC rounds. Val split: a fixed, deterministic 40-clip (20 TP-side/20
+FP-side, evenly-strided by score-rank within each bucket) stratified split, written as `split`
+in the output and as `val_vids.txt` for `--val-video-ids`.
+
+`make_semtest200_shuffled.py` (new, small): the content-vs-presence control — permutes a
+caption corpus's `caption` field WITHIN class (YES↔YES, NO↔NO) via a derangement (no row keeps
+its own caption), seeded, so class label is preserved but content is fully scrambled.
+
+## `PROMPT_SEMSUP_V13_CAUSAL.py` (new prompt, 2026-08-27) — causal-cue captioning
+
+Same anti-leak machinery as V12 (`build_prompt()` takes no args, no GT/blind branch, closed
+gap_trend vocabulary, symmetric outcome/alarm/reassurance/time bans) plus 5 new closed-vocab
+fields targeting information NOT trivially recoverable from raw pixels: `lead_vehicle_lighting`
+(brake_lights_on/indicator_left/indicator_right/**flashers_on**/none_visible — NOT
+`hazards_on`: "hazard" is itself a banned outcome word, so an enum value the caption is
+forbidden to say would silently never reach the SigLIP target), `ego_maneuver`, `road_geometry`,
+`signal_state`, `occluded_or_peripheral`. Colour is banned from `caption_neutral`.
+`caption_neutral` must be **42–52 words** (a floor as well as a ceiling — see PROJECT_STATE.md
+for why a ceiling-only rule under-filled) and verbalize every populated field, not just
+mention one. `validate_parsed()`'s new `v13` branch checks (all soft NOTEs, not hard failures):
+closed-vocab membership per field, gap_trend word present verbatim, colour-word absence
+(word-boundary regex — a naive substring scan false-positives on "tan" inside "dis**tan**ce"),
+word-count against the 42–52 band, and per-field verbalization via a `_COVERAGE` keyword dict.
+
+**⚠️ Known failure mode, not yet fixed**: this prompt's one worked example caused 96.9% of the
+full 4,446-window run's captions to open with one of 3 near-identical phrases — see
+PROJECT_STATE.md/EXPERIMENTS.md. A future prompt like this needs either no single canonical
+worked example, or several structurally different ones, plus an explicit instruction against
+copying the example's literal opening.
+
+`semsup_caption_promptbakeoff.py` additions supporting this: `--provider-order <slug,...>`
+(passes `extra_body={"provider": {"order": [...], "allow_fallbacks": False}}` to
+`client.chat.completions.create` — pins a specific OpenRouter provider, since different
+providers serving the identical model slug can be priced 2×+ apart, e.g. Vertex's 75%-off vs
+AI Studio's 50%-off on `gemini-3.7-flash`; `allow_fallbacks=False` turns a routing fallback
+into a loud failure instead of a silent overpay), `--token-cap <N>` (tokenizes
+`caption_neutral` with the SigLIP tokenizer post-parse, stamps `caption_token_len`, reports —
+does not enforce — rows exceeding the cap), and `DEFAULT_MODEL` fixed to
+`"google/gemini-3.7-flash"` (was a stale `"google/gemini-3.1-pro-preview"` that got silently
+hit for real this session — always pass `--model` explicitly and verify it printed correctly).
+
+## Head-LR schedule fix + caption-bank widening (`semsup_train.py`, 2026-08-29)
+
+`--head-lr-schedule {cosine,constant}` (default `cosine` = old behavior; `constant` keeps the
+head's LR flat after warmup instead of decaying it alongside the trunk's shared cosine
+schedule) — fixes the SemTest-200-v1 confound where `--unfreeze-head`'s already-small head LR
+(0.1× the trunk's) was ALSO decayed by the trunk's cosine schedule, netting <0.05% relative
+head movement over 200 steps. `head_lr` is now logged per epoch in `epoch_metrics.jsonl` as an
+audit trail for this.
+
+`--bank-captions <corpus>` widens the InfoNCE **train** negative bank with extra distractors
+from a wider corpus while preserving each anchor's own `_bank_idx` position — must append after
+the anchor's own-caption block, never replace it (replacing would break the anchor's own
+positive-pair index). Used in the A1-failure-recovery run (below) to bank each arm against its
+own full 1,761-row corpus; the shuffled arm banks against a freshly-shuffled 1,761 corpus, not
+the unshuffled one — banking against the wrong corpus would silently break the
+content-vs-presence control.
+
+Also fixed (pre-existing, not introduced this session, found while running these tools):
+unescaped `%` in `semsup_train.py`'s argparse help strings — adjacent string-literal
+concatenation produced runtime content like `"...0.53%" + "of..."`, which argparse's own
+`%`-style formatting then crashed on, breaking `--help` entirely. All now `%%`-escaped.
+
+## A1-failure-recovery — 4-arm fine-tune starting from A1's own failures (2026-08-29)
+
+Tests whether semantic supervision can recover the specific clips A1 (the current champion,
+crash-only LoRA) gets wrong, and whether trying damages A1's 0.900 test AP. Design point
+deliberately different from SemTest-200-v2 (above/below): starts from A1's own converged
+weights and a **frozen** head (isolates "does semantic supervision damage an already-correct,
+calibrated head" from SemTest-200-v2's "does an open head change the calibration story").
+
+**Pool**: all 321 windows (240 unique videos) A1 scores wrong at threshold 0.5, mined from the
+1,761-pool. A1's own AUC on this pool is exactly 0.0 **by construction** (every row starts on
+the wrong side of the boundary) — expected, not a bug, and must be stated whenever this pool's
+in-pool numbers are read. Split 260 train / 61 val by `video_id` (seed 0). Selection script:
+`select_a1fail321.py`, writes `outputs/a1fail321/selection_a1fail321.jsonl` + per-arm caption
+files (321 rows each, joined from the existing 1,761-pool V10/V12 corpora plus 72 freshly-
+captioned clips where needed).
+
+**4 arms**, all initialized from A1's own LoRA weights
+(`/workspace/semsup/a1_1761/epoch_04/lora_adapter`, r=16/α=32/dropout=0.05, config verified via
+`adapter_config.json` before loading), head frozen, predictor warm-started from B-v3's B1
+checkpoint (`/workspace/semsup/b1_v2_100pct/predictor_b1.pt`, shared across all 3 semantic arms
+to hold initialization constant and vary only the caption file): `a1cont` (crash-only control,
+`--semantic-weight 0.0`), `v10` (leaky captions), `v12` (clean captions), `v12shuf` (v12
+captions shuffled within class — content-vs-presence control, this project's cleanest B-shuffle
+result to date). Config: `--lr 2e-5` (5× below A1's own 1e-4 — refining, not retraining from
+scratch), `--lr-schedule cosine --warmup-frac 0.1`, `--epochs 10 --keep-top-k 10
+--semantic-weight 0.2` (3 semantic arms), `--bank-captions` = each arm's own full 1,761-row
+corpus. Driver `run_a1fail321_4arms.sh` runs the 4 arms strictly sequentially (concurrent BADAS
+loads can crash each other — pre-existing documented gotcha).
+
+**Results** (see EXPERIMENTS.md for the full numbers/tables):
+1. In-pool val (61 clips): all 4 arms produce **bit-identical** per-clip predictions
+   (fixed_FP=39, fixed_FN=0, still_wrong=22, acc@0.5=0.6393) whether there's no semantic branch,
+   real captions, or scrambled captions. AP/AUC vary only by ~0.02 noise at this n.
+2. Predictor health: v10/v12 retrieval@1 peaks 35-44% vs a 2.1% collapse control; v12shuf sits
+   at ~0% for the entire run — cleanest real-vs-scrambled separation this project has produced,
+   the opposite of the earlier SemTest-200 (pre-A1fail321) result where the predictor was
+   collapsed at chance for every arm including real captions. Attributed to this run's wider
+   InfoNCE bank (`--bank-captions`, full 1,761 rows vs 160 train-split captions before) plus the
+   B-v3-B1 warm start.
+3. Test set (677 clips), via `score_checkpoints_on_test.py` (new — see Files table): A1
+   reproduced at 0.8995/0.9034 (matches its documented 0.900/0.904 to 3 decimals, validating the
+   scorer), v12 epoch-10 at 0.8972/0.9027 — flat within noise. `acc@0.5`'s apparent +2.65pp for
+   v12 is a calibration artifact (v12's mean test score sits at 0.488 vs A1's 0.660 — the whole
+   distribution shifted down, landing near 0.5 by coincidence); at each arm's own optimal
+   threshold the gap collapses to +0.004.
+
+**Mechanism**: `grad_cos_mean` (crash-loss vs semantic-loss gradient cosine on shared LoRA
+params, via the existing `--grad-cosine-every 8`) sits at −0.04 to +0.05, sign-flipping epoch to
+epoch, in all 3 semantic arms — 10-100× above the pure-random-orthogonality floor for a ~2.8M-
+param space (not literally independent) but far below what conflict would look like
+(persistently negative cosine, `frac_neg`→1.0). Reading: the two objectives want mildly
+overlapping but mostly orthogonal features — captions are a lossy function of the same 16 frames
+the student already sees, so semantic supervision was never adding new information, only a
+reorganization pressure the frozen crash head's fixed linear readout is largely blind to.
+
+`score_checkpoints_on_test.py` (new script): loads BADAS once, swaps LoRA adapters between
+checkpoints for speed. Uses `softmax(logits)[0,1]` with **no `/2.0` divisor**, unlike
+`e4_stageA_badas_open_eval.py`'s published-scorer convention — confirmed this does not affect
+AP/AUC or the confusion matrix at threshold 0.5 (dividing logits by a constant is monotone,
+preserving the 0.5 crossing); it would only matter for calibration metrics at other thresholds.
+
+## `select_a1fail321.py` (new) and `build_a1fail321_comparison.py` (new)
+`select_a1fail321.py`: mines A0/A1's own threshold-0.5 failures from the 1,761-pool into the
+321-window pool above, splits by `video_id` (seed 0), writes per-arm caption files joined from
+the existing V10/V12 1,761-pool corpora. `build_a1fail321_comparison.py`: per-clip comparison
+workbook across the 4 arms (`outputs/a1fail321/a1fail321_arm_comparison.xlsx`), modeled on
+`build_pool1761_comparison.py`.
+
+## Presentation deck (2026-08-29)
+`reports/presentations/2026-08_a1-failure-recovery.pptx`, generator
+`build_a1fail_presentation.py` — 6 slides, house style matching the existing `2026-08-22` deck
+(reuses its palette/helper-function conventions, does not modify that file). Has a `verify()`
+gate that re-derives every embedded number from the actual score/result files and asserts
+against known-good values before writing — run it after ANY score-file change, never hand-edit
+numbers into the deck. Also regenerates `make_arch_figures_2026-08-22.py`'s `fig_L3()` (now
+parameterized by `lam`/`out_name` so a different `semantic_weight` can be drawn without
+overwriting the original 0.05-weight figure other decks depend on) — produced
+`reports/figures/arch_L3_training_a1fail_2026-08-29.png` (lambda=0.2 variant).
+
 ## Semantic-supervision design
 
 **Training:**
@@ -301,6 +509,25 @@ aliases added is what actually gets used for training/comparison scripts.
 | `student_training/scripts/make_dataset_figure_2026-08-22.py` | Dataset+captioning pipeline block diagram; counts read live from the caption files. |
 | `student_training/scripts/make_semantic_positive_figure.py` | Retrieval-vs-chance + caption-scaling figure, dark theme. |
 | `docs_agents/ARCHITECTURE_BLOCKS.md` | Block-by-block reference (shapes/equations/frozen-status) for the architecture diagram. Also covers the pooled-tap experiments and the gradient-angle diagnostic (§5b/7c). |
+| `student_training/scripts/score_semtest.py` | Scores a checkpoint on an arbitrary-size pool (generalized from `score_arms_on_pool1761.py`); `--head-state` loads an `--unfreeze-head` run's head weights. |
+| `student_training/scripts/select_semtest200_recovery.py` | 3-tier priority clip selection for SemTest-200 (FN-near/TP-fill/FN-wide positives, 100%-FP negatives), one window per video, `--exclude-frames-dir` for iterative QC rounds. |
+| `student_training/scripts/make_semtest200_shuffled.py` | Content-vs-presence control: permutes a caption corpus within class (derangement, seeded). |
+| `student_training/scripts/build_semtest200_comparison.py` | Per-clip SemTest-200 comparison workbook (per_clip/summary_vs_A0/summary_vs_vision/metrics sheets), modeled on `build_pool1761_comparison.py`. |
+| `student_training/scripts/plot_semtest200_curves.py` | Loss-vs-epoch (2×2 grid, dashed selected-checkpoint line) + val_AP-vs-epoch overlay for the 4 SemTest-200 arms. |
+| `student_training/scripts/add_vs_a1_summary_sheet.py` | Adds `summary_vs_A1` sheet to `pool1761_arm_comparison.xlsx` (A1-baseline block, `broken_FP`/`broken_FN` split, corrected `still_wrong`). |
+| `prompts/PROMPT_SEMSUP_V13_CAUSAL.py` | Causal-cue captioning prompt (brake lights, ego maneuver, road geometry, signal state, occlusion) — see the section above for its known opener-template-collapse issue. |
+| `student_training/scripts/select_a1fail321.py` | Mines A1's own threshold-0.5 failures (321/1,761 windows) into the A1-failure-recovery pool, splits 260/61 by `video_id` (seed 0), writes per-arm caption files. |
+| `student_training/scripts/run_a1fail321_4arms.sh` | Driver: runs the 4 A1-failure-recovery arms strictly sequentially (concurrent BADAS loads can crash each other). |
+| `student_training/scripts/build_a1fail321_comparison.py` | Per-clip comparison workbook across the 4 A1-failure-recovery arms, modeled on `build_pool1761_comparison.py`. |
+| `student_training/scripts/score_checkpoints_on_test.py` | Loads BADAS once, swaps LoRA adapters between checkpoints, scores each on the 677-clip test set. `softmax(logits)[0,1]`, no `/2.0` divisor (see the A1-failure-recovery section for why this doesn't affect AP/AUC/CM@0.5). |
+| `student_training/scripts/build_a1fail_presentation.py` | 6-slide deck for the A1-failure-recovery result, house style matching the `2026-08-22` deck; `verify()` re-derives every number from score files before writing. |
+| `student_training/scripts/make_semtest200_folds.py` | Stratified 5-fold split of the SemTest-200-v2 pool by `video_id` + source tier; self-asserts an exact partition. |
+| `student_training/scripts/aggregate_semtest200_cv.py` | Pools per-fold val_scores from SemTest-200-v2 into a full-pool readout. |
+| `student_training/scripts/select_semtest200_easy.py` | Selects 100 easy A0-correct anchor clips to add to the original 200-clip SemTest-200 pool (addresses its 100%-adversarial/zero-TN composition). |
+| `student_training/scripts/merge_semtest200_v2.py` | Merges the 200-clip pool + 100 easy anchors into the SemTest-200-v2 300-clip pool. |
+| `student_training/scripts/merge_semtest200_v2_captions.py` | Joins caption corpora for the merged SemTest-200-v2 pool. |
+| `student_training/scripts/plot_semtest200_cv_curves.py` | Mean±std-band loss curves across SemTest-200-v2 folds; shared y-axis; right axis color-keyed to its own series; `--mark-epoch`/`--init-note` for annotating a selected checkpoint. |
+| `student_training/scripts/siglip_bottleneck_probe.py` | Measures how much crash-relevant signal survives text→SigLIP-embedding vs raw text; ran on V10/V12/V13 — SigLIP retains 86-96% of the text's own crash-AUC, ruling out the encoder as the bottleneck for prior negative results. |
 
 ## P1 — two-stage (semantic-pretrain → crash-finetune) training
 
@@ -472,6 +699,61 @@ them back to trusting `cwd`.
   `specificity_tnr`, f1, `f1_optimal`, `optimal_threshold`, ap, `auc_roc`, brier, ece,
   `per_tte_ap`. NaN-prone fields emit `None` (JSON-safe).
 - `metrics_core.expected_calibration_error(y_true, y_score, n_bins=10) -> float`
+
+## APIs / functions — SemTest-200 / head-unfreeze / V13 (added 2026-08-26/28, signatures only)
+
+```python
+# semsup_common.py
+TrainableBadasWrapper.__init__(..., unfreeze_module_substrings: list|None = None)
+    # NEW param: requires_grad_(True) on any param whose name contains a listed substring
+    # (e.g. "temporal_processor", "classifier"), post-LoRA-wrap. Exposes .head_params /
+    # .head_param_names.
+TrainableBadasWrapper.head_state_dict() -> dict[str, Tensor]   # NEW: just the unfrozen head
+TrainableBadasWrapper.load_head_state(path)                     # NEW: strict=False reload
+
+# semsup_train.py
+# new CLI args: --unfreeze-head, --head-lr-mult (default 0.1), --val-video-ids <file>,
+#   --dump-val-scores
+# AdamW(trainable, lr=...) -> AdamW(param_groups)  # head gets its own {params, lr} group
+_clip_grads(..., head_params=None)   # third clip-budget group when --clip-grad-per-group
+evaluate_val(..., dump_scores_path=None)   # NEW: writes val_scores_ep{NN}.jsonl per call
+# epoch_XX/ dir now also writes head_state.pt when --unfreeze-head is set
+
+# score_semtest.py (new script, CLI)
+#   --config --captions-path --arm-name --out  [--lora-adapter] [--head-state]
+#   drops score_arms_on_pool1761.py's hardcoded 1761-row expectation
+
+# select_semtest200_recovery.py (new script, CLI)
+#   --a0-scores --manifest --train-xlsx --out-dir  [--exclude-frames-dir] [--tp-fill-max=0.85]
+
+# semsup_caption_promptbakeoff.py
+# new CLI args: --provider-order <slug,...> (extra_body provider pin, allow_fallbacks=False),
+#   --token-cap <N> (SigLIP-tokenize caption_neutral post-parse, stamp caption_token_len)
+_stamp_token_len(out_row, siglip_tok, cap) -> bool          # NEW helper
+validate_parsed(..., prompt_key="v13")                       # NEW branch: word-count band +
+                                                               # per-field coverage + colour scan
+# DEFAULT_MODEL fixed: "google/gemini-3.1-pro-preview" -> "google/gemini-3.7-flash"
+
+# prompts/PROMPT_SEMSUP_V13_CAUSAL.py
+build_prompt() -> str    # no args, same contract as V12
+```
+
+## APIs / functions — head-LR schedule + caption-bank widening (2026-08-29, signatures only)
+
+```python
+# semsup_train.py
+# new CLI args: --head-lr-schedule {cosine,constant} (default cosine), --bank-captions <corpus>
+# epoch_metrics.jsonl now also logs head_lr per epoch
+
+# score_checkpoints_on_test.py (new script, CLI)
+#   --config --test-manifest --test-frames-root --checkpoints <name=path,...> --out-dir
+#   loads BADAS once, swaps LoRA adapters between checkpoints; softmax(logits)[0,1], no /2.0
+#   divisor (see ARCHITECTURE.md's A1-failure-recovery section for why this is safe for AP/AUC/CM@0.5)
+
+# select_a1fail321.py (new script, CLI)
+#   --a1-scores <pool1761 A1 scores> --manifest --train-xlsx --out-dir
+#   mines A1's threshold-0.5 failures (321/1761), splits 260/61 by video_id seed 0
+```
 
 **Required workaround inside `semsup_train.py`** (do not remove):
 ```python

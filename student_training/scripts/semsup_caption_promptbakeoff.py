@@ -83,8 +83,16 @@ from prompts.PROMPT_SEMSUP_V9_MINIMAL import PROMPT_SEMSUP_V9_MINIMAL  # noqa: E
 from prompts.PROMPT_SEMSUP_V10_GT import build_prompt as _build_v10_prompt  # noqa: E402
 from prompts.PROMPT_SEMSUP_V10Q_GT import build_prompt as _build_v10q_prompt  # noqa: E402
 from prompts.PROMPT_SEMSUP_V12_NEUTRAL import build_prompt as _build_v12_prompt  # noqa: E402
+from prompts.PROMPT_SEMSUP_V13_CAUSAL import build_prompt as _build_v13_prompt  # noqa: E402
 
-DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
+DEFAULT_MODEL = "google/gemini-3.7-flash"
+# Fixed 2026-08-27: was a stale "google/gemini-3.1-pro-preview" - already flagged as a known
+# bug in docs_agents/PROJECT_STATE.md ("a re-run that omits the flag silently uses the WRONG
+# teacher"). Confirmed hit live: an omitted --model on 2026-08-27 silently captioned 36 clips
+# with 3.1-pro-preview instead of the project's actual teacher (gemini-3.6-flash, used for the
+# full 1,761-pool corpus). google/gemini-3.7-flash is the newer flash release the user has
+# selected as the current teacher going forward - confirmed to exist on OpenRouter with real
+# pricing (not gemini-3.6-flash) as of this fix.
 DEFAULT_MANIFEST = PROJECT_ROOT / "dataset" / "manifests" / "semsup_promptbakeoff.jsonl"
 DEFAULT_FRAMES_ROOT = PROJECT_ROOT / "dataset" / "train"
 DEFAULT_OUT = PROJECT_ROOT / "outputs" / "semantic_captions" / "promptbakeoff" / "raw_captions.jsonl"
@@ -119,13 +127,45 @@ def _v12_builder(gt_mode=None, is_positive=None):
     return _build_v12_prompt()
 
 
-TEMPLATE_BUILDERS = {"v10": _build_v10_prompt, "v10q": _build_v10q_prompt, "v12": _v12_builder}
+def _v13_builder(gt_mode=None, is_positive=None):
+    """Same no-argument, no-per-class-branch contract as _v12_builder - see
+    that function's docstring. --gt-mode has no effect on v13 either."""
+    return _build_v13_prompt()
+
+
+TEMPLATE_BUILDERS = {"v10": _build_v10_prompt, "v10q": _build_v10q_prompt,
+                     "v12": _v12_builder, "v13": _v13_builder}
 # V12_REQUIRED: no verdict/risk_score/confidence/risk_clause in ANY mode - V12
 # never asks the model to judge the scene, only describe it (see the prompt's
 # module docstring for why removing the decision layer is the point).
 V12_REQUIRED = ("caption_neutral", "primary_agent", "agent_motion", "agent_position",
                  "gap_trend", "evidence_frames", "agent_visible")
 V12_GAP_TREND_VALUES = ("decreasing", "increasing", "constant", "none_visible")
+
+# V13_REQUIRED: V12's fields plus the 5 new closed-vocabulary causal-cue fields
+# (see PROMPT_SEMSUP_V13_CAUSAL.py's module docstring for why these target
+# non-inferable cues rather than restating what the vision encoder already sees).
+V13_REQUIRED = V12_REQUIRED + ("lead_vehicle_lighting", "ego_maneuver",
+                                "road_geometry", "signal_state",
+                                "occluded_or_peripheral")
+# 'flashers_on', not 'hazards_on': the caption is required to verbalize this field
+# and 'hazard' is on the banned outcome-word list - an enum the caption may not utter
+# is an enum whose information silently never reaches the SigLIP target.
+V13_LIGHTING_VALUES = ("brake_lights_on", "indicator_left", "indicator_right",
+                        "flashers_on", "none_visible")
+V13_MANEUVER_VALUES = ("straight", "braking", "accelerating", "turning_left",
+                        "turning_right", "lane_change", "stopped")
+V13_GEOMETRY_VALUES = ("straight_road", "intersection", "merge", "curve",
+                        "roundabout", "parking_area")
+V13_SIGNAL_VALUES = ("green", "amber", "red", "stop_sign", "uncontrolled",
+                      "none_visible")
+# "red"/"green" deliberately excluded: both are legitimate signal_state vocabulary
+# ("green signal", "red light") the prompt explicitly asks for - banning them here
+# would flag correct traffic-light reporting as a false leak. Vehicle-colour leakage
+# via literal "red"/"green" car mentions is covered by the PROMPT's own instruction;
+# this python-side list is a soft diagnostic NOTE, not the enforcement mechanism.
+V13_COLOR_WORDS = ("blue", "white", "black", "silver", "grey", "gray",
+                    "yellow", "orange", "brown", "purple", "tan", "beige")
 REQUIRED_KEYS = ("caption_neutral", "risk_clause", "verdict", "confidence")
 # v10/v10q common keys, required in BOTH gt and blind modes - these are what let
 # the scorer compute a "rationalization rate" (agents the GT arm names that the
@@ -227,7 +267,7 @@ def _extract_json_object(raw: str) -> Optional[Dict]:
 def _call_model(
     client: OpenAI, model: str, messages: List[Dict], timeout: float,
     max_retries: int, retry_delay: float, temperature: float = 0.1,
-    max_tokens: Optional[int] = None,
+    max_tokens: Optional[int] = None, provider_order: Optional[List[str]] = None,
 ) -> Tuple[str, Dict]:
     """Call the chat completions endpoint with robust retry logic (timeout /
     rate-limit / connection-error / generic, each with exponential back-off;
@@ -238,7 +278,14 @@ def _call_model(
     exhaust a small budget on internal reasoning before emitting the JSON
     output - if that happens (empty/truncated response), pass an explicit,
     generous --max-tokens (e.g. 20000, see semsup_v6_control_rerun.py's
-    Qwen3.7 Flash experience)."""
+    Qwen3.7 Flash experience).
+
+    provider_order: OpenRouter provider slug(s) to pin (e.g. ["google-vertex"]),
+    sent as extra_body={"provider": {"order": [...], "allow_fallbacks": False}}.
+    allow_fallbacks=False is deliberate - see --provider-order's CLI help for why
+    a silent fallback to a differently-priced provider is worse than a loud
+    failure here (measured 2026-08-27: Vertex 75%-off vs AI Studio 50%-off on
+    the SAME model, gemini-3.7-flash)."""
     last_exc: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -246,6 +293,9 @@ def _call_model(
                       "timeout": timeout}
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
+            if provider_order:
+                kwargs["extra_body"] = {"provider": {"order": provider_order,
+                                                       "allow_fallbacks": False}}
             response = client.chat.completions.create(**kwargs)
             text = response.choices[0].message.content if response.choices else ""
             usage = (response.usage.model_dump()
@@ -353,6 +403,17 @@ def load_done_ids(out_path: Path) -> set:
 V6_SUBSCORE_KEYS = ("closing_risk", "lateral_risk", "intrusion_risk", "unreacted_risk")
 
 
+def _stamp_token_len(out_row: dict, siglip_tok, cap: int) -> bool:
+    """Tokenizes out_row['caption_neutral'] with the SigLIP tokenizer (WITHOUT
+    truncation, so the true length is measured, not clamped to 64 by padding
+    options) and stamps caption_token_len onto the row in place. Returns True
+    if the true length exceeds `cap`. Reported by the caller, not enforced
+    here - a rejected row would waste a paid API call; see --token-cap's help."""
+    n = len(siglip_tok(out_row["caption_neutral"], truncation=False)["input_ids"])
+    out_row["caption_token_len"] = n
+    return n > cap
+
+
 def validate_parsed(parsed: dict, prompt_key: str = "v2", gt_mode: str = "blind") -> tuple:
     """Returns (ok, error_message_or_None). Enforces the schema PROMPT_SEMSUP_V2
     asks for - a response missing a required key is a hard failure, not a
@@ -411,6 +472,80 @@ def validate_parsed(parsed: dict, prompt_key: str = "v2", gt_mode: str = "blind"
         if gt_word != "none_visible" and gt_word not in str(parsed["caption_neutral"]).lower():
             return True, f"NOTE: gap_trend {gt_word!r} not found verbatim in caption_neutral"
         return True, None
+
+    if prompt_key == "v13":
+        missing = [k for k in V13_REQUIRED if k not in parsed]
+        if missing:
+            return False, f"missing keys: {missing}"
+        if parsed["agent_visible"] not in (True, False, "true", "false", "True", "False"):
+            return False, f"agent_visible not boolean: {parsed['agent_visible']!r}"
+        if parsed["gap_trend"] not in V12_GAP_TREND_VALUES:
+            return False, (f"gap_trend not one of {V12_GAP_TREND_VALUES}: "
+                            f"{parsed['gap_trend']!r}")
+        notes = []
+        # Closed-vocab membership: soft NOTEs (same rationale as v12's gap_trend-
+        # in-caption check and v7's conflict_source check) - an off-enum value is
+        # a real instruction-following finding, not grounds to discard a paid call.
+        for field, allowed in [("lead_vehicle_lighting", V13_LIGHTING_VALUES),
+                                ("ego_maneuver", V13_MANEUVER_VALUES),
+                                ("road_geometry", V13_GEOMETRY_VALUES),
+                                ("signal_state", V13_SIGNAL_VALUES)]:
+            val = str(parsed[field]).strip().lower()
+            if val not in allowed:
+                notes.append(f"{field} not in {allowed}: {parsed[field]!r}")
+        gt_word = parsed["gap_trend"]
+        cap_lower = str(parsed["caption_neutral"]).lower()
+        if gt_word != "none_visible" and gt_word not in cap_lower:
+            notes.append(f"gap_trend {gt_word!r} not found verbatim in caption_neutral")
+        # word-boundary match, not raw substring - a naive `in` scan wrongly flagged
+        # "tan" inside "distance"/"constant" on 15/15 gate-run captions with zero
+        # real colour leaks (verified by inspection 2026-08-27).
+        color_hits = [w for w in V13_COLOR_WORDS if re.search(rf"\b{w}\b", cap_lower)]
+        if color_hits:
+            notes.append(f"caption_neutral contains banned colour word(s): {color_hits}")
+
+        # Word FLOOR (2026-08-27): the first gate run averaged 26.7 words against a
+        # ceiling-only "<=45 words" rule - barely half the encoder budget. The floor
+        # is now the operative constraint, so an under-length caption is a real
+        # finding, not silently accepted.
+        n_words = len(str(parsed["caption_neutral"]).split())
+        if n_words < 42:
+            notes.append(f"caption_neutral is {n_words} words, below the 42-word floor")
+        elif n_words > 52:
+            notes.append(f"caption_neutral is {n_words} words, above the 52-word ceiling")
+
+        # Field-coverage: every POPULATED field must actually reach the caption, since
+        # the caption is the only thing the SigLIP target consumes. Checked by a
+        # representative keyword per field rather than the raw enum token (the prompt
+        # asks for natural prose - "brake lights", not "brake_lights_on").
+        _COVERAGE = {
+            "lead_vehicle_lighting": {"brake_lights_on": ("brake light",),
+                                       "indicator_left": ("indicator", "signal"),
+                                       "indicator_right": ("indicator", "signal"),
+                                       "flashers_on": ("flasher",)},
+            "signal_state": {"green": ("green",), "amber": ("amber",), "red": ("red",),
+                              "stop_sign": ("stop sign",),
+                              "uncontrolled": ("uncontrolled",)},
+            "road_geometry": {"straight_road": ("straight",), "intersection": ("intersection",),
+                               "merge": ("merg",), "curve": ("curve", "curving"),
+                               "roundabout": ("roundabout",), "parking_area": ("parking",)},
+            "ego_maneuver": {"straight": ("straight",), "braking": ("brak",),
+                              "accelerating": ("accelerat",), "turning_left": ("turn",),
+                              "turning_right": ("turn",), "lane_change": ("lane change",),
+                              "stopped": ("stop",)},
+        }
+        for field, vocab in _COVERAGE.items():
+            val = str(parsed[field]).strip().lower()
+            expected = vocab.get(val)
+            if expected and not any(kw in cap_lower for kw in expected):
+                notes.append(f"{field}={val!r} not verbalized in caption_neutral "
+                              f"(expected one of {expected})")
+        occ = str(parsed["occluded_or_peripheral"]).strip()
+        if occ and not any(kw in cap_lower for kw in
+                            ("occlud", "peripher", "partly hidden", "behind", "edge")):
+            notes.append("occluded_or_peripheral is populated but not verbalized "
+                          "in caption_neutral")
+        return (True, "NOTE: " + "; ".join(notes)) if notes else (True, None)
 
     missing = [k for k in REQUIRED_KEYS if k not in parsed]
     if prompt_key in ("v5", "v9"):
@@ -493,7 +628,13 @@ def main():
                           "v12 = PROMPT_SEMSUP_V12_NEUTRAL (register-neutral: no GT block, no "
                           "verdict, closed-vocabulary gap_trend instead of free-text "
                           "closing_dynamic - fixes the register leak V10 has between classes; "
-                          "--gt-mode is accepted but has no effect)")
+                          "--gt-mode is accepted but has no effect), "
+                          "v13 = PROMPT_SEMSUP_V13_CAUSAL (V12's anti-leak machinery + 5 new "
+                          "closed-vocab causal-cue fields - lead vehicle lighting, ego "
+                          "maneuver, road geometry, signal state, occlusion note - targeting "
+                          "information NOT trivially inferable from raw pixels, <=45-word "
+                          "caption budget, colour banned; --gt-mode accepted but has no "
+                          "effect)")
     ap.add_argument("--gt-mode", default="blind", choices=["gt", "blind"],
                      help="v10/v10q only. 'gt' injects the manifest row's ground-truth label "
                           "(from 'target' or 'event_occurs') into the prompt and asks the "
@@ -537,6 +678,21 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="debug: caption only the first N pending rows")
     ap.add_argument("--dry-run", action="store_true",
                      help="print the plan (n pending, estimated tokens) without calling the API")
+    ap.add_argument("--provider-order", default=None,
+                     help="comma-separated OpenRouter provider slug(s) to pin, e.g. "
+                          "'google-vertex' (passed as extra_body={'provider': {'order': [...], "
+                          "'allow_fallbacks': False}}). allow_fallbacks=False is deliberate: "
+                          "without it OpenRouter may silently route to a different provider at "
+                          "a different price (e.g. Google AI Studio's 50%-off vs Vertex's "
+                          "75%-off launch pricing on gemini-3.7-flash, measured 2026-08-27) - "
+                          "a routing fallback would silently overpay, not fail loudly. Default "
+                          "None = OpenRouter's normal auto-routing, unchanged behavior.")
+    ap.add_argument("--token-cap", type=int, default=None,
+                     help="if set, tokenize caption_neutral with the SigLIP tokenizer "
+                          "(google/siglip-base-patch16-224) after parsing and stamp "
+                          "caption_token_len onto the output row. Reported, not a hard "
+                          "failure - a rejected row wastes a paid call; over-cap rows are "
+                          "counted in the run summary for a targeted second pass instead.")
     args = ap.parse_args()
 
     load_dotenv()
@@ -562,7 +718,7 @@ def main():
         per_image = 258 if args.detail == "low" else 1750
         prompt_tokens = {"v2": 650, "v3": 950, "v4": 1100, "v5": 1300, "v6": 1900, "v7": 2400,
                           "v8": 2300, "v9": 800, "v10": 1200, "v10q": 1900,
-                          "v12": 1050}[args.prompt]  # ~V10 minus the GT/decision block
+                          "v12": 1050, "v13": 1350}[args.prompt]  # v12 + the 5 causal-cue fields
         est_tokens = len(pending) * (16 * per_image + prompt_tokens)
         effective_gt_mode = args.gt_mode
         gt_note = f" gt-mode={effective_gt_mode!r}" if args.prompt in TEMPLATE_BUILDERS else ""
@@ -620,6 +776,25 @@ def main():
     is_template = args.prompt in TEMPLATE_BUILDERS
     prompt_text = None if is_template else PROMPTS[args.prompt]
 
+    provider_order = ([s.strip() for s in args.provider_order.split(",") if s.strip()]
+                       if args.provider_order else None)
+    if provider_order:
+        print(f"[cfg] pinned OpenRouter provider order: {provider_order} "
+              f"(allow_fallbacks=False - a routing fallback would silently bill at a "
+              f"different rate rather than fail loudly)")
+
+    # Lazy: only load the SigLIP tokenizer (a real HF download/cache hit) when
+    # --token-cap is actually requested - most invocations of this script don't
+    # need it and shouldn't pay the import/load cost.
+    siglip_tok = None
+    n_over_cap = 0
+    if args.token_cap:
+        from transformers import AutoTokenizer
+        siglip_tok = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")
+        print(f"[cfg] --token-cap {args.token_cap}: caption_neutral will be tokenized "
+              f"with the SigLIP tokenizer and stamped as caption_token_len (reported, "
+              f"not a hard failure)")
+
     n_ok = n_failed = 0
     t0 = time.time()
 
@@ -671,7 +846,7 @@ def main():
                 client, args.model, messages,
                 timeout=args.timeout, max_retries=args.max_retries,
                 retry_delay=args.retry_delay, temperature=args.temperature,
-                max_tokens=args.max_tokens,
+                max_tokens=args.max_tokens, provider_order=provider_order,
             )
         except RuntimeError as e:
             return row, None, str(e), None
@@ -802,6 +977,53 @@ def main():
                 for k in OPTIONAL_COT_KEYS:  # scene_context/dynamic_objects/temporal_analysis
                     if k in parsed:
                         out_row[k] = parsed[k]
+                if siglip_tok is not None:
+                    if _stamp_token_len(out_row, siglip_tok, args.token_cap):
+                        n_over_cap += 1
+                        print(f"  [{idx:4d}/{len(pending)}] [OVER-CAP] {vid}: "
+                              f"caption_token_len={out_row['caption_token_len']} > {args.token_cap}")
+                out_f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+                out_f.flush()
+                n_ok += 1
+                if idx % 25 == 0 or idx == len(pending):
+                    print(f"  [{idx:4d}/{len(pending)}] ok={n_ok} failed={n_failed} "
+                          f"{_cost_str()} ({time.time()-t0:.0f}s)")
+                if args.inter_clip_delay:
+                    time.sleep(args.inter_clip_delay)
+                continue
+
+            if is_template and args.prompt == "v13":
+                # Separate branch from v12 above: adds the 5 closed-vocab causal-cue
+                # fields (see PROMPT_SEMSUP_V13_CAUSAL.py's docstring) - falling
+                # through to v12's branch would silently drop them.
+                out_row = {
+                    "video_id": vid,
+                    "frames_dir": row.get("frames_dir"),  # see row_resume_key()
+                    "horizon_label": row.get("horizon_label"),
+                    "event_occurs": row.get("event_occurs"),
+                    "t_seconds": row.get("t_seconds"),
+                    "requested_time_to_event": row.get("requested_time_to_event"),
+                    "caption_neutral": parsed["caption_neutral"],
+                    "primary_agent": parsed["primary_agent"],
+                    "agent_motion": parsed["agent_motion"],
+                    "agent_position": parsed["agent_position"],
+                    "gap_trend": parsed["gap_trend"],
+                    "lead_vehicle_lighting": parsed["lead_vehicle_lighting"],
+                    "ego_maneuver": parsed["ego_maneuver"],
+                    "road_geometry": parsed["road_geometry"],
+                    "signal_state": parsed["signal_state"],
+                    "occluded_or_peripheral": parsed["occluded_or_peripheral"],
+                    "evidence_frames": parsed["evidence_frames"],
+                    "agent_visible": parsed["agent_visible"],
+                }
+                for k in OPTIONAL_COT_KEYS:  # scene_context/dynamic_objects/temporal_analysis
+                    if k in parsed:
+                        out_row[k] = parsed[k]
+                if siglip_tok is not None:
+                    if _stamp_token_len(out_row, siglip_tok, args.token_cap):
+                        n_over_cap += 1
+                        print(f"  [{idx:4d}/{len(pending)}] [OVER-CAP] {vid}: "
+                              f"caption_token_len={out_row['caption_token_len']} > {args.token_cap}")
                 out_f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
                 out_f.flush()
                 n_ok += 1
@@ -882,6 +1104,10 @@ def main():
     print()
     print("=" * 70)
     print(f"DONE. ok={n_ok} failed={n_failed} wall={time.time()-t0:.0f}s")
+    if siglip_tok is not None:
+        print(f"Token-cap ({args.token_cap}): {n_over_cap}/{n_ok} rows exceed cap "
+              f"(reported only - not auto-regenerated; re-run the specific "
+              f"frames_dir values against a fresh --out if a targeted fix is needed)")
     print(f"Output: {out_path}")
     print(f"Usage this run: {_cost_str()}  ->  {usage_path}")
     if have_cost_field and n_ok:

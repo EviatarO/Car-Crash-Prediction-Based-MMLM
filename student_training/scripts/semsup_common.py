@@ -179,7 +179,8 @@ class TrainableBadasWrapper:
     """
 
     def __init__(self, stagea_cfg: dict, lora_target_modules: list | None = None,
-                 lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05):
+                 lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
+                 unfreeze_module_substrings: list | None = None):
         from e4_stageA_badas_open_eval import load_badas, preprocess_clip
         self._preprocess_clip = preprocess_clip
         self.vjepa, self.nn_model, self.device = load_badas(stagea_cfg)
@@ -273,6 +274,45 @@ class TrainableBadasWrapper:
             for p in self.nn_model.parameters():
                 p.requires_grad = False
             self.nn_model.eval()
+
+        # SemTest-200 (2026-08-26): the crash head (temporal_processor + classifier) has
+        # been frozen in EVERY prior arm (A0/A1/B-v1..v3/P1) - LoRA structurally cannot
+        # reach it (no q/k/v substring match on those module names). Diagnostics (P3,
+        # pooled-tap probe) show semantic gradient reaches the head's INPUT but nothing
+        # downstream can exploit it. This opens that bottleneck for a controlled test.
+        # Matched by substring against nn_model.named_parameters() (not module names),
+        # since peft's get_peft_model() prefixes every name with "base_model.model." -
+        # substring matching is robust to that prefix without hardcoding it.
+        self.head_params = []
+        self.head_param_names = []
+        if unfreeze_module_substrings:
+            for name, p in self.nn_model.named_parameters():
+                if any(sub in name for sub in unfreeze_module_substrings):
+                    p.requires_grad = True
+                    self.head_params.append(p)
+                    self.head_param_names.append(name)
+            if not self.head_params:
+                raise RuntimeError(
+                    f"unfreeze_module_substrings={unfreeze_module_substrings} matched ZERO "
+                    "parameters - check real names via --dry-run-modules before retrying."
+                )
+            n_head = sum(p.numel() for p in self.head_params)
+            print(f"  [wrapper] unfroze {len(self.head_params)} head params ({n_head:,} numel) "
+                  f"matching {unfreeze_module_substrings}")
+
+    def head_state_dict(self):
+        """State dict of ONLY the unfrozen head params (e.g. temporal_processor +
+        classifier), keyed by their names inside self.nn_model (peft-prefixed).
+        Saved/loaded separately from the LoRA adapter because peft's save_pretrained()
+        persists only the LoRA delta, never the rest of the model."""
+        sd = self.nn_model.state_dict()
+        return {name: sd[name].detach().cpu().clone() for name in self.head_param_names}
+
+    def load_head_state(self, path):
+        import torch
+        sd = torch.load(path, map_location=self.device)
+        self.nn_model.load_state_dict(sd, strict=False)
+        print(f"  [wrapper] loaded head state: {len(sd)} params from {path}")
 
     def forward(self, frame_paths: list):
         clip = self._preprocess_clip(self.vjepa, frame_paths).to(self.device)

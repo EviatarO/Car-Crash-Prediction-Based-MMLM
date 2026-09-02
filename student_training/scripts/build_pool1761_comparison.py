@@ -183,7 +183,10 @@ def main():
             ffp = sum(1 for r in a0_fp if is_ok(r, arm))
             ffn = sum(1 for r in a0_fn if is_ok(r, arm))
             broke = sum(1 for r in a0_ok if not is_ok(r, arm))
-            still = len(a0_fp) + len(a0_fn) - ffp - ffn
+            # still_wrong = TOTAL wrong under this arm, not just "A0's original errors that
+            # remain wrong" - broken (newly-wrong, previously A0-correct) clips are wrong too
+            # and were missing from this count before (2026-08-26 fix).
+            still = (len(a0_fp) + len(a0_fn)) - ffp - ffn + broke
             ws2.append([arm, subset_name, len(subset), ffp, ffn, broke, still, ffp + ffn - broke])
     for col, w in {"A": 8, "B": 8}.items():
         ws2.column_dimensions[col].width = w

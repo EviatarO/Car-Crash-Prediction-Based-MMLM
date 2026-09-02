@@ -134,22 +134,26 @@ def infonce_from_bank(pred, anchor_idx, bank, vids, log_tau):
     return F.cross_entropy(logits.unsqueeze(0), label)
 
 
-def _clip_grads(args, lora_params, aux_params, trainable):
+def _clip_grads(args, lora_params, aux_params, trainable, head_params=None):
     """Gradient clipping, matching A1's budget for the LoRA trunk when requested.
 
     Default (--clip-grad-per-group not set): ONE clip_grad_norm_(trainable, 1.0) over
     every trainable param combined - the original behavior, kept as default so existing
     runs (A1, B_1761-parallel, B-v2) remain reproducible byte-for-byte.
 
-    --clip-grad-per-group: clip lora_params and aux_params (Predictor+log_tau) against
-    SEPARATE budgets of 1.0 each. See the CLI help for --clip-grad-per-group for why this
-    matters: without it, a large early Predictor gradient can inflate the shared global
+    --clip-grad-per-group: clip lora_params, aux_params (Predictor+log_tau), and
+    head_params (temporal_processor+classifier, --unfreeze-head only) against SEPARATE
+    budgets of 1.0 each. See the CLI help for --clip-grad-per-group for why this matters:
+    without it, a large early Predictor (or head) gradient can inflate the shared global
     norm and shrink the LoRA trunk's effective update below what A1 (LoRA-only, nothing
     else in its `trainable` to share the budget with) receives for an identical crash loss.
     """
-    if args.clip_grad_per_group and aux_params:
+    if args.clip_grad_per_group and (aux_params or head_params):
         torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
-        torch.nn.utils.clip_grad_norm_(aux_params, 1.0)
+        if aux_params:
+            torch.nn.utils.clip_grad_norm_(aux_params, 1.0)
+        if head_params:
+            torch.nn.utils.clip_grad_norm_(head_params, 1.0)
     else:
         torch.nn.utils.clip_grad_norm_(trainable, 1.0)
 
@@ -157,7 +161,7 @@ def _clip_grads(args, lora_params, aux_params, trainable):
 def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                  siglip_tok=None, semantic_loss="cosine", val_bank=None,
                  val_vids=None, log_tau=None, full_bank=None,
-                 retrieval_tolerance=0.92):
+                 retrieval_tolerance=0.92, dump_scores_path=None):
     """ONE pass over the val set ->
     (val_ap, val_crash_loss, val_sem_loss, n_failed, retrieval_stats).
 
@@ -231,6 +235,11 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                                    solution that made the original cosine loss null
                                    (see B1's collapse control in EXPERIMENTS.md).
       n_retrieval_clips         - denominator for retrieval_clip (~221 on val).
+
+    dump_scores_path (SemTest-200, 2026-08-26): when given, writes every per-window
+    {video_id, frames_dir, tte, label, score} to this path - the raw scores are computed
+    every epoch regardless but were previously discarded right after by_clip aggregation,
+    which is why no per-epoch per-TTE score-distribution analysis was possible before.
     """
     badas.nn_model.eval()
     if predictor is not None:
@@ -240,6 +249,7 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
     total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
     # Only populated when predictor+val_bank both exist - see retrieval_stats above.
     pred_list, tgt_list, vid_list, bank_idx_list = [], [], [], []
+    dump_rows = [] if dump_scores_path else None
     with torch.no_grad():
         # Same prefetch pipeline as the training loop - see
         # TrainableBadasWrapper.prefetch_clips()'s docstring. `i` is the
@@ -257,6 +267,10 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
             # --- ranking signal (per clip) ---
             score = float(torch.softmax(logits, dim=1)[0, 1].item())
             by_clip[ex["video_id"]].append((score, ex["label"]))
+            if dump_rows is not None:
+                dump_rows.append({"video_id": ex["video_id"], "frames_dir": ex.get("frames_dir"),
+                                   "tte": ex.get("tte"), "label": ex["label"],
+                                   "score": round(score, 4)})
 
             # --- loss signal (per row) ---
             label = torch.tensor([ex["label"]], device=device)
@@ -371,6 +385,11 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
 
         retrieval_stats["embed_std_p"] = P.std(dim=0).mean().item()
 
+    if dump_rows is not None:
+        with open(dump_scores_path, "w", encoding="utf-8") as f:
+            for row in dump_rows:
+                f.write(json.dumps(row) + "\n")
+
     return val_ap, total_crash / n, total_sem / n, n_failed, retrieval_stats
 
 
@@ -403,7 +422,7 @@ def main():
                           "1-cos(pred, SigLIP(caption)). It has a DEGENERATE optimum: a "
                           "predictor that ignores the video and emits the mean caption "
                           "embedding scores 1-||E[t]||, and on this caption set that mean has "
-                          "norm 0.865 - B1's real trained run beat that baseline by only 0.53% "
+                          "norm 0.865 - B1's real trained run beat that baseline by only 0.53%% "
                           "of the available range, with retrieval at exactly chance. "
                           "'infonce' contrasts each anchor against a bank of frozen SigLIP "
                           "caption embeddings (see build_caption_bank/infonce_from_bank); the "
@@ -431,7 +450,7 @@ def main():
                           "grad_cos_mean / grad_cos_frac_neg. cos<0 means the two objectives "
                           "pull the trunk in opposing directions (destructive interference); "
                           "cos>0 means they agree. Costs 2 extra partial backward passes on "
-                          "the sampled steps (~15% epoch time at N=8) and does NOT touch the "
+                          "the sampled steps (~15%% epoch time at N=8) and does NOT touch the "
                           "optimizer - autograd.grad() returns gradients without accumulating "
                           "into .grad, so training is bit-identical with this on or off.")
     ap.add_argument("--lora-init", default=None,
@@ -469,7 +488,7 @@ def main():
     ap.add_argument("--prefetch-workers", type=int, default=8,
                      help="threads concurrently reading+decoding frames ahead of the GPU. "
                           "Measured 2026-08-11: preprocessing (file read+decode/resize) is "
-                          "~100% of per-window wall time on a slow network volume, GPU "
+                          "~100%% of per-window wall time on a slow network volume, GPU "
                           "compute is unmeasurable by comparison - so this is the actual "
                           "speed knob, not batch size or LR. 0 disables prefetch (old "
                           "serial behavior, for debugging).")
@@ -484,6 +503,18 @@ def main():
                           "at - e.g. for a matched A1_587-vs-B_587 comparison, both runs must "
                           "pass the SAME --captions-path so the only difference is "
                           "--semantic-weight.")
+    ap.add_argument("--bank-captions", default=None,
+                     help="build the InfoNCE TRAIN bank from this corpus instead of the "
+                          "training split's own captions (default: bank = train_ex, "
+                          "the original SemTest-200 behavior - only 160 captions, measured "
+                          "to leave the predictor collapsed: final-epoch retrieval@1 == the "
+                          "collapse control, embed_margin negative). Point this at the SAME "
+                          "corpus family as --captions-path but at its full 1,761-row scale "
+                          "(e.g. Caption_V12_Neutral_1761_fortrain.jsonl for a V12 run) so the "
+                          "contrastive task has a realistic number of negatives. Any bank row "
+                          "whose video_id is in the VAL split is dropped automatically - a val "
+                          "clip's own caption must never appear as a train-time negative. "
+                          "No-op without --semantic-loss infonce.")
     ap.add_argument("--keep-top-k", type=int, default=3,
                      help="how many epoch checkpoints to keep, ranked by val_ap (default 3, "
                           "matching the original A1/B behavior). Set >= --epochs to keep every "
@@ -512,6 +543,39 @@ def main():
                           "p99 cross-video caption similarity (0.870, see "
                           "docs_agents/ARCHITECTURE_BLOCKS.md), so it should not credit "
                           "genuinely-different captions as tolerant hits.")
+    ap.add_argument("--unfreeze-head", action="store_true",
+                     help="also unfreeze temporal_processor + classifier (the crash head, "
+                          "frozen in every prior arm - LoRA structurally cannot reach it, "
+                          "no q/k/v substring match on those module names). Trained in a "
+                          "SEPARATE optimizer param group at --lr * --head-lr-mult. Adds "
+                          "head_state.pt next to lora_adapter/ in every epoch dir - a "
+                          "checkpoint saved with this flag is unusable without it.")
+    ap.add_argument("--head-lr-mult", type=float, default=0.1,
+                     help="head param group's LR as a fraction of --lr (default 0.1). "
+                          "No-op without --unfreeze-head.")
+    ap.add_argument("--head-lr-schedule", default="cosine", choices=["cosine", "constant"],
+                     help="LR schedule for the HEAD param group only, independent of the "
+                          "trunk's --lr-schedule. 'cosine' (default) preserves the original "
+                          "behavior: one shared lr_lambda decays every group together, so a "
+                          "head at 0.1x already-modest LR decays to ~0 and cannot move (measured "
+                          "in SemTest-200: total head movement <0.05%% relative, final classifier "
+                          "bias moved ~1e-6 - the head was unfrozen in name only). 'constant' "
+                          "holds the head at its full --lr * --head-lr-mult for the whole run "
+                          "(warmup still applies), which is what actually tests the open-head "
+                          "hypothesis. No-op without --unfreeze-head.")
+    ap.add_argument("--val-video-ids", default=None,
+                     help="path to a newline-separated file of video_ids to use as the "
+                          "val split, OVERRIDING clip_level_split(--val-frac, --seed). "
+                          "For a pre-registered/stratified split (e.g. SemTest-200's fixed "
+                          "40-clip stratified val set) built outside this trainer - "
+                          "clip_level_split is video_id-shuffle-based only, not label- or "
+                          "TTE-stratified.")
+    ap.add_argument("--dump-val-scores", action="store_true",
+                     help="write out-dir/val_scores_ep{NN}.jsonl every epoch: per-window "
+                          "{video_id, frames_dir, tte, label, score}. Off by default (extra "
+                          "I/O + files) - needed for per-TTE score-distribution-vs-epoch "
+                          "analysis, which evaluate_val() otherwise discards after computing "
+                          "the clip-level AP.")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--test-manifest", default=None, help="e.g. test_manifest_hires.jsonl (677 Private)")
     ap.add_argument("--test-frames-root", default=None, help="e.g. dataset/test")
@@ -570,6 +634,7 @@ def main():
     badas = TrainableBadasWrapper(
         stagea_cfg, lora_target_modules=target_modules,
         lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+        unfreeze_module_substrings=["temporal_processor", "classifier"] if args.unfreeze_head else None,
     )
     # peft's save_pretrained() auto-generates a model card BEFORE writing any
     # adapter weights, and assumes base_model.config supports `in` (a HF
@@ -593,7 +658,14 @@ def main():
         _set_peft_sd(badas.nn_model, _load_sft(str(sft)))
         print(f"[load] initialized LoRA from {sft}")
 
-    trainable = [p for p in badas.nn_model.parameters() if p.requires_grad]
+    # head_params (temporal_processor + classifier, --unfreeze-head only) are excluded
+    # from lora_params here and given their own optimizer param group + LR below - they
+    # are not the LoRA trunk the grad-cosine probe measures, and they need a much
+    # smaller LR (0.1x by default) since they were never touched by any prior arm.
+    head_params = list(badas.head_params) if args.unfreeze_head else []
+    head_param_ids = {id(p) for p in head_params}
+    trainable = [p for p in badas.nn_model.parameters()
+                 if p.requires_grad and id(p) not in head_param_ids]
     # Captured BEFORE the Predictor is appended below: the LoRA trunk params only.
     # The crash-vs-semantic gradient angle is only meaningful on the parameters the
     # two objectives actually SHARE - the Predictor is semantic-only (its crash
@@ -634,7 +706,17 @@ def main():
     # in `trainable` after `lora_params` was captured above, in construction order.
     aux_params = trainable[len(lora_params):]
 
-    opt = torch.optim.AdamW(trainable, lr=args.lr)
+    param_groups = [{"params": trainable, "lr": args.lr}]
+    if head_params:
+        head_lr = args.lr * args.head_lr_mult
+        param_groups.append({"params": head_params, "lr": head_lr})
+        print(f"[cfg] head unfrozen: {sum(p.numel() for p in head_params):,} params "
+              f"@ lr={head_lr:.2e} ({args.head_lr_mult}x)")
+    opt = torch.optim.AdamW(param_groups)
+    # `trainable` now covers only the shared default-clip-budget path (_clip_grads'
+    # `else` branch) - append head_params so --clip-grad-per-group's absence still
+    # clips everything together, matching every non-head arm's original behavior.
+    trainable = trainable + head_params
     if args.optimizer_init:
         opt.load_state_dict(torch.load(args.optimizer_init, map_location=device))
         print(f"[load] restored optimizer state from {args.optimizer_init}")
@@ -666,8 +748,21 @@ def main():
                   f"({100*n_uniq/len(examples):.0f}%) - duplicate captions weaken InfoNCE "
                   f"negatives (near-duplicates get punished as if they were wrong).")
 
-    train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
-    print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
+    if args.val_video_ids:
+        with open(args.val_video_ids, encoding="utf-8") as f:
+            val_vids = {line.strip() for line in f if line.strip()}
+        all_vids = {ex["video_id"] for ex in examples}
+        missing = val_vids - all_vids
+        if missing:
+            print(f"[warn] --val-video-ids: {len(missing)} ids not present in the loaded "
+                  f"pool, e.g. {sorted(missing)[:5]}")
+        train_ex = [e for e in examples if e["video_id"] not in val_vids]
+        val_ex = [e for e in examples if e["video_id"] in val_vids]
+        print(f"[data] train={len(train_ex)}  val={len(val_ex)} "
+              f"(fixed split from --val-video-ids, {len(val_vids)} ids)")
+    else:
+        train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
+        print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
 
     # Built here, not at optimizer construction, because total_steps needs
     # len(train_ex) - only known after the pool is loaded and split. If resuming
@@ -689,7 +784,26 @@ def main():
             prog = (step - warmup_steps) / max(1, total_steps - warmup_steps)
             return 0.5 * (1.0 + math.cos(math.pi * min(prog, 1.0)))
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_lr_lambda)
+        # LambdaLR multiplies each param group's OWN initial_lr by its lambda. Passing a
+        # single callable applies the same curve to every group - which is exactly what
+        # made the head immobile in SemTest-200 (head initial_lr was already 0.1x, then
+        # decayed to 0 on the trunk's schedule). Pass a LIST, one lambda per group, in
+        # opt.param_groups order: group 0 = LoRA trunk (+predictor), group 1 = head.
+        def _head_lr_lambda(step):
+            # Warmup is kept even when constant - a cold head taking full-LR steps from
+            # step 0 destabilizes the crash loss that the trunk is simultaneously fitting.
+            if step < warmup_steps:
+                return step / warmup_steps
+            return 1.0
+
+        if len(opt.param_groups) > 1 and args.head_lr_schedule == "constant":
+            lambdas = [_lr_lambda] * len(opt.param_groups)
+            lambdas[-1] = _head_lr_lambda          # head is appended last (see param_groups)
+            print(f"[sched] head param group held CONSTANT at "
+                  f"{opt.param_groups[-1]['lr']:.2e} after warmup (decoupled from trunk cosine)")
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambdas)
+        else:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_lr_lambda)
 
     # Frozen caption banks for InfoNCE negatives - built ONCE (SigLIP never trains,
     # so these are constants). Train anchors contrast against the train bank, val
@@ -698,8 +812,29 @@ def main():
     train_bank = val_bank = None
     train_bank_vids = val_bank_vids = None
     if args.semantic_weight > 0 and args.semantic_loss == "infonce":
+        # train_bank[i] MUST be train_ex[i]'s own caption - infonce_from_bank uses the
+        # anchor's _bank_idx directly as the positive label (bank[anchor_idx] = the
+        # correct target), so train_ex's own captions define the first len(train_ex)
+        # bank slots and that ordering cannot be disturbed.
         train_bank, train_bank_vids = build_caption_bank(train_ex, siglip_model, siglip_tok, device)
         val_bank, val_bank_vids = build_caption_bank(val_ex, siglip_model, siglip_tok, device)
+        if args.bank_captions:
+            # Widen the NEGATIVE pool only, by appending extra distractor embeddings
+            # after the own-caption block above - never inserted before/into it, so
+            # every existing _bank_idx still points at the right positive. Mirrors the
+            # already-established full_bank pattern used for retrieval_clip_full1761
+            # (see evaluate_val): extra distractor ROWS are added, not clips replaced.
+            wide = load_training_examples(captions_path=args.bank_captions)
+            val_vid_set = {e["video_id"] for e in val_ex}
+            n_before = len(wide)
+            distractors = [e for e in wide if e["video_id"] not in val_vid_set]
+            print(f"[data] --bank-captions {args.bank_captions}: {n_before} rows -> "
+                  f"{len(distractors)} extra train-bank distractors after dropping "
+                  f"{n_before - len(distractors)} rows whose video_id is in the val split "
+                  f"(a val clip's own caption must never be a train-time negative)")
+            extra_bank, extra_vids = build_caption_bank(distractors, siglip_model, siglip_tok, device)
+            train_bank = torch.cat([train_bank, extra_bank], dim=0)
+            train_bank_vids = train_bank_vids + extra_vids
         # CRITICAL: the training loop does random.shuffle(train_ex) in place every
         # epoch, so a row's position in the shuffled list no longer matches its row
         # in the bank. Stamp each example with its permanent bank index now, and use
@@ -818,14 +953,14 @@ def main():
             n += 1
             pending += 1
             if pending == args.grad_accum:
-                _clip_grads(args, lora_params, aux_params, trainable)
+                _clip_grads(args, lora_params, aux_params, trainable, head_params)
                 opt.step()
                 if scheduler is not None:
                     scheduler.step()
                 opt.zero_grad()
                 pending = 0
         if pending:                     # tail window - same counter, so never dropped
-            _clip_grads(args, lora_params, aux_params, trainable)
+            _clip_grads(args, lora_params, aux_params, trainable, head_params)
             opt.step()
             if scheduler is not None:
                 scheduler.step()
@@ -841,7 +976,9 @@ def main():
             badas, val_ex, device, predictor, siglip_model, siglip_tok,
             semantic_loss=args.semantic_loss, val_bank=val_bank,
             val_vids=val_bank_vids, log_tau=log_tau, full_bank=train_bank,
-            retrieval_tolerance=args.retrieval_tolerance)
+            retrieval_tolerance=args.retrieval_tolerance,
+            dump_scores_path=(out_dir / f"val_scores_ep{epoch:02d}.jsonl")
+                if args.dump_val_scores else None)
         now = time.time()
         epoch_s = now - epoch_t0
         elapsed = now - t0
@@ -854,6 +991,9 @@ def main():
         val_total_loss = args.crash_weight * val_crash_loss + args.semantic_weight * val_sem_loss
         train_val_gap = val_total_loss - train_total_loss  # >0 and growing = overfitting
         cur_lr = opt.param_groups[0]["lr"]
+        # Logged separately so a run can be AUDITED for the SemTest-200 failure mode:
+        # if head_lr decays alongside cur_lr, the head is not really being trained.
+        head_lr = opt.param_groups[-1]["lr"] if len(opt.param_groups) > 1 else None
         # Checkpoint-ranking/early-stop metric (P1 plan, change #4). Both val_ap and
         # retrieval_clip are "higher is better", so no direction flip is needed
         # between the two --select-by modes (unlike semsup_b1_probe.py's val_loss
@@ -869,7 +1009,9 @@ def main():
         print(f"  epoch {epoch}/{args.epochs}  crash_loss={avg_crash:.4f}  "
               f"sem_loss={avg_sem:.4f}  val_crash_loss={val_crash_loss:.4f}  "
               f"val_sem_loss={val_sem_loss:.4f}  val_ap={val_ap:.4f}  "
-              f"train_val_gap={train_val_gap:.4f}  lr={cur_lr:.2e}  ({elapsed:.1f}s)")
+              f"train_val_gap={train_val_gap:.4f}  lr={cur_lr:.2e}"
+              + (f"  head_lr={head_lr:.2e}" if head_lr is not None else "")
+              + f"  ({elapsed:.1f}s)")
         if retrieval_stats:
             print(f"      [retrieval] clip={retrieval_stats.get('retrieval_clip', float('nan')):.4f}  "
                   f"vs_control={retrieval_stats.get('collapse_control_clip', float('nan')):.4f}  "
@@ -938,6 +1080,7 @@ def main():
                 # wrong by a growing factor.
                 "epoch_s": round(epoch_s, 1), "elapsed_s": round(elapsed, 1),
                 "lr": cur_lr,
+                "head_lr": head_lr,
             }) + "\n")
 
         ep_dir = out_dir / f"epoch_{epoch:02d}"
@@ -945,6 +1088,8 @@ def main():
         badas.nn_model.save_pretrained(str(ep_dir / "lora_adapter"))
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
+        if head_params:
+            torch.save(badas.head_state_dict(), ep_dir / "head_state.pt")
         # Optimizer state per epoch, so an interrupted run can resume on the SAME
         # trajectory (--optimizer-init) rather than restarting Adam momentum.
         torch.save(opt.state_dict(), ep_dir / "optimizer.pt")

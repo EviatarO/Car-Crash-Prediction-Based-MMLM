@@ -953,3 +953,313 @@ Measured per caption on the V12 run: **18,756 input tokens** (image-dominated) +
 output**. At `gemini-3.7-flash` batch rates ($0.1875/M in, $0.9375/M out) that is **$0.0046
 per caption → $20.43 for all 4,446 windows**, versus the $0.0365/caption the V12 run actually
 paid (= $162 for 4,446).
+
+## Calibration re-analysis of the 1,761-pool arms (2026-08-27) -- corrects the leading hypothesis
+Prompted by the "broken" columns showing near-100% TP-to-FN breakage vs A1. Measured on val
+(n=348, 170 YES/178 NO):
+
+| arm | AP | AUC | Cohen's d | mean YES | mean NO | own optimal threshold | acc@0.5 | acc@own-threshold |
+|---|---|---|---|---|---|---|---|---|
+| A0 | 0.8579 | 0.8372 | -- | 0.727 | 0.332 | 0.979 | 0.664 | 0.767 |
+| A1 | 0.8770 | 0.8621 | 1.505 | 0.801 | 0.353 | 0.812 | 0.730 | 0.782 |
+| B-v1 | 0.8751 | 0.8622 | 1.530 | 0.792 | 0.348 | 0.749 | 0.739 | 0.779 |
+| B-v2 | 0.8670 | 0.8544 | 1.564 | 0.684 | 0.246 | 0.541 | 0.764 | 0.782 |
+| B-v3 | 0.8741 | 0.8602 | 1.352 | 0.644 | 0.143 | 0.173 | 0.759 | 0.779 |
+| P1 | 0.8575 | 0.8443 | 1.476 | 0.676 | 0.218 | 0.368 | 0.753 | 0.773 |
+
+AP/AUC/Cohen's-d spread is inside CI width at this n for every arm -- ranking quality is
+unchanged. What moves is the optimal threshold (0.812 to 0.173 across arms) -- a pure monotone
+rescaling, invisible to AP/AUC (Guo et al., ICML 2017), fully visible at any fixed cut like 0.5.
+Re-deriving fixed/broken at each arm's OWN threshold instead of 0.5 (vs A1 at 0.812):
+
+| arm | thr* | brokenFN@thr* | brokenFP@thr* | fixedFN@thr* | fixedFP@thr* | net@thr* |
+|---|---|---|---|---|---|---|
+| B-v1 | 0.749 | 4 | 4 | 5 | 2 | -1 |
+| B-v2 | 0.541 | 9 | 5 | 7 | 7 | 0 |
+| B-v3 | 0.173 | 6 | 18 | 17 | 6 | -1 |
+| P1 | 0.368 | 5 | 21 | 20 | 3 | -3 |
+
+B-v3's "31 broken crashes" (at shared 0.5) becomes 6 at its own threshold, and net collapses to
+about 0 for every arm. Conclusion: the semantic arms did not un-learn crash detections -- the
+frozen crash head just never recalibrated to LoRA's shifted feature distribution. See
+DECISIONS.md for the corrected/refuted mechanism entry and PROJECT_STATE.md for the full
+write-up. This is the direct motivation for --unfreeze-head (below).
+
+## SemTest-200 -- 4-arm controlled experiment with an unfrozen crash head (2026-08-26/27)
+Setup: 200 windows (160 train/40 val, one window per video), selected via
+select_semtest200_recovery.py's 3-tier priority fill from a fresh A0 re-score of the full
+4,446-window pool (outputs/semtest200/A0_full4446.jsonl, integrity-verified: reproduces the
+known 587 mined failures exactly). Positive tiers: FN near-boundary [0.3,0.5) RT-eligible (all
+of them), then TP fill [0.5,--tp-fill-max=0.85) lowest-score-first, then FN wide (<0.3)
+highest-score-first, filled tier-globally across all 3 TTE buckets at once (a per-bucket loop
+starved TTE_1.5 by video-sharing across buckets -- fixed). Negative tiers: FP near-boundary
+[0.5,0.7) (all of them) then FP fill [0.7,1.0) lowest-first -- 100% FP by design, zero TN.
+Captions: V10 (leaky), V12 (clean), V12-shuffled (make_semtest200_shuffled.py -- derangement
+within class, seed 0). 164/200 captions reused from the 1,761-pool corpus; 36 newly generated
+(discovered mid-flight: 22 of those 36 were accidentally captioned with the WRONG teacher --
+gemini-3.1-pro-preview via the DEFAULT_MODEL bug -- regenerated on gemini-3.7-flash before
+training; see PROJECT_STATE.md).
+
+Training: all 4 arms identical except --captions-path/--semantic-weight:
+--lora-target-modules query,key,value --lora-r 16 --lora-alpha 32 --lora-dropout 0.05
+--unfreeze-head --head-lr-mult 0.1 --clip-grad-per-group --lr 1e-4 --lr-schedule cosine
+--warmup-frac 0.05 --epochs 10 --keep-top-k 10 --seed 0 --val-video-ids <fixed 40-clip val>
+--grad-cosine-every 8 --dump-val-scores; semantic arms add --semantic-loss infonce
+--semantic-weight 0.2 --infonce-tau-init 0.07. Dry-run gate (--epochs 1, vision + semantic
+paths) passed before the real batch; ran sequentially on one pod (concurrent BADAS loads risk
+crashing each other, documented gotcha).
+
+Results (val, n=40, threshold 0.5 unless noted):
+
+| arm | selected epoch | val AP | val AUC | acc@0.5 |
+|---|---|---|---|---|
+| vision | 8 | 0.5424 | 0.5025 | 0.525 |
+| v10 | 8 | 0.5204 | 0.4975 | 0.450 |
+| v12 | 10 | 0.5154 | 0.4900 | 0.475 |
+| v12shuf | 10 | 0.5172 | 0.4900 | 0.475 |
+
+Full val_ap trajectories (all 10 epochs, monotonic-ish rise to a plateau, no earlier peak --
+epoch selection is not masking a better checkpoint):
+```
+vision   0.4644 0.4545 0.5045 0.4826 0.5155 0.5201 0.5345 0.5424 0.5416 0.5416
+v10      0.4823 0.4105 0.4599 0.4687 0.4887 0.4956 0.5117 0.5204 0.5193 0.5193
+v12      0.4823 0.4088 0.4589 0.4699 0.4892 0.5017 0.5089 0.5086 0.5154 0.5154
+v12shuf  0.4812 0.4105 0.4580 0.4717 0.4955 0.5047 0.5150 0.5170 0.5172 0.5172
+```
+Train AUC 0.85-0.87 for every arm (pure memorization). Mean score by source-tier, val (A0 vs
+vision vs v12) shows every arm regressing scores toward 0.4-0.55 regardless of true label
+(TP_fill correct-highs drop toward 0.5; FN_wide confident-lows barely rise past 0.35-0.40) --
+the regression-to-mean signature, not class-conditional learning.
+
+Primary endpoint -- paired per-clip delta (delta_arm minus delta_vision, signed toward truth) on val:
+
+| arm vs vision | mean signed delta | sign test | Wilcoxon p |
+|---|---|---|---|
+| v10 | -0.0043 | 17 vs 23, p=0.43 | 0.52 |
+| v12 | -0.0046 | 20 vs 20, p=1.00 | 0.49 |
+| v12shuf | -0.0041 | 20 vs 20, p=1.00 | 0.51 |
+
+No arm beats vision-only; v10/v12/v12shuf are statistically indistinguishable from each other
+-- v12 approx v12shuf is the cleanest available evidence that caption content isn't reaching
+the score at this scale, confirmed structurally in the summary_vs_vision sheet (fixed/broken/net
+numerically identical between v12 and v12shuf on val).
+
+Confound found post-hoc (code review, 2026-08-27) -- the run doesn't cleanly test an open
+head: head_state.pt's total L2 norm agrees to 4 decimal places across all 4 differently-
+trained arms (70.3568 vision vs 70.3566 for the other three); the final classifier bias moved
+by about 1e-6. LoRA moved fine for comparison (144/144 lora_B tensors nonzero, zero-init to
+mean-norm 0.114-0.118 -- real signal). Mechanism: head LR=1e-5, cosine-decayed alongside the
+trunk toward 0, clip-grad-per-group budget 1.0/step -- Adam's per-step movement at this LR over
+200 steps is bounded to about 1e-4 to 2e-3 in each parameter's own units, matching the
+measurement exactly. The head was unfrozen in name, not in practice.
+
+Outputs: outputs/semtest200/ -- selection.jsonl, Caption_semtest200_{V10,V12,
+V12_shuffled}.jsonl, per-arm results/{arm}/{epoch_metrics.jsonl,val_scores_ep*.jsonl,
+train_metrics.json}, scores/{A0,vision,v10,v12,v12shuf}.jsonl,
+semtest200_arm_comparison.xlsx (per_clip/summary_vs_A0/summary_vs_vision/metrics sheets),
+figures/{loss_curves_2x2,val_ap_vs_epoch}.png, code_review_findings_2026-08-27.md (full
+correctness audit + ML-design critique + literature review).
+
+## Architecture literature review (2026-08-27)
+Full report + reference list in outputs/semtest200/code_review_findings_2026-08-27.md (Part
+C). Verdict: abandon trunk-level SigLIP-InfoNCE alignment as an accuracy-lift mechanism;
+retarget language supervision to post-hoc explanation. Key evidence: (1) Nexar's own BADAS/
+BADAS-2.0 fully fine-tune V-JEPA2 end-to-end at 178,500 labeled videos for their accuracy
+gains -- LoRA-on-frozen-trunk is a reasonable small-data compromise, not the bottleneck; (2)
+CLIP-style contrastive alignment (LiT, SLIP) is only validated at hundreds-of-millions-of-pairs
+scale, 5-6 orders of magnitude above this thesis's corpus; (3) SigLIP-family text encoders are
+documented (ARO, Winoground) to behave close to bag-of-words, missing exactly the relational/
+motion semantics ("closing distance") this task needs; (4) the shuffled-caption control
+empirically confirms no signal is being extracted, not merely a mis-weighted one -- there is
+nothing for gradient-conflict mitigation (PCGrad/GradNorm) to rescue.
+
+## V13 causal-caption redesign -- full 4,446-window pool (2026-08-27/28)
+Motivation, measured before writing the prompt: SigLIP's real limit is 64 tokens (not the
+about-40-word V12 rule); across all 2,161 existing V10/V12 captions, max is 43 tokens, 0%
+truncated -- about 3x headroom unused. Caption-length-vs-SigLIP-distinctiveness correlation on
+the existing V12 corpus: -0.0017 (zero) -- more words of the same KIND of content don't
+separate better.
+
+Prompt (prompts/PROMPT_SEMSUP_V13_CAUSAL.py): V12's anti-leak machinery (blind, closed
+vocab, symmetric bans) plus 5 new closed-vocabulary causal-cue fields (lead_vehicle_lighting,
+ego_maneuver, road_geometry, signal_state, occluded_or_peripheral), colour banned.
+First iteration used a word CEILING only (<=45) and "at least 1 causal cue" -- a 15-clip gate
+measured mean 26.7 words/30.4 tokens, half the intended budget, fields recorded but not
+verbalized. Fixed to a 42-52 word FLOOR+ceiling band and mandatory verbalization of every
+populated field (validate_parsed's v13 branch: word-count check + per-field keyword-coverage
+check via a _COVERAGE dict) before the full-pool spend.
+
+Also hit for real: semsup_caption_promptbakeoff.py:87's stale DEFAULT_MODEL =
+"google/gemini-3.1-pro-preview" silently captioned 36 SemTest-200 clips with the wrong teacher
+when --model was omitted. Fixed: default changed to google/gemini-3.7-flash.
+
+Full run: 4,446/4,446 windows, gemini-3.7-flash, pinned to the Google Vertex provider
+(--provider-order google-vertex, allow_fallbacks=False) for a 75%-off launch discount
+confirmed live via real per-call billing ($0.375/M in / $1.875/M out, vs the base
+$1.50/M/$7.50/M). Concurrency 16. Wall time 3,921s (about 65 min), cost $24.85 ($0.0056/
+clip real, stable across the whole run, no jump at the midnight boundary into 28/08). Zero
+failures. 4,446 unique frames_dir, 2,223/2,223 class balance. 28/4,446 (0.6%) rows exceed the
+58-token cap (reported by --token-cap 58, not auto-regenerated).
+
+QC:
+- Leakage gate: AUC=0.7774 (up from V12's 0.7640 -- expected: top predictive n-grams are
+  "brake lights"/"distance decreasing"/"lead sedan", genuine causal signal, not register leak).
+- Mean words 45.9, mean SigLIP tokens 51.5 (target band hit).
+- Decisive check FAILED its pre-registered go/no-go: mean cross-caption SigLIP cosine
+  0.7974 (worse than V12's 0.7010); mean distinctiveness 0.2026 (vs V12's 0.3003,
+  -32.5%).
+- Root cause diagnosed: 73.5% of all 4,446 captions open with the literal phrase "Ego moves
+  straight...", 16.8% with "Ego travels straight...", 6.6% with "Ego remains stopped..." --
+  96.9% total share one of 3 near-identical 3-word openers. Top-20 words account for 47.8%
+  of all tokens in the corpus. Template collapse from the prompt's one worked example plus
+  "always verbalize ego_maneuver" instruction, not genuine content homogeneity -- SigLIP's
+  bag-of-words sensitivity (per the literature review above) means this dominates the
+  embedding regardless of what differs afterward in each sentence.
+
+Outputs: outputs/semantic_captions/v13/{raw_v13_4446.jsonl, Caption_V13_Causal_4446_fortrain
+.jsonl, Caption_V13_Causal_4446.xlsx, leakage_gate_v13.json, raw_v13_gate15.jsonl,
+v13_gate15_review.xlsx}.
+
+Not yet done (open decision, see DECISIONS.md/PROJECT_STATE.md): fix the opener-template-
+collapse and re-gate before any full re-run, or stop here and report the failed distinctiveness
+check as a completed negative result.
+
+## `--head-lr-schedule` fix + SemTest-200-v2 (2026-08-29) -- secondary data point
+
+`semsup_train.py` gains `--head-lr-schedule {cosine,constant}` (default `cosine` = old
+behavior; `constant` keeps the head's LR flat after warmup instead of decaying it alongside the
+trunk's shared cosine schedule) -- fixes SemTest-200-v1's bug where `--unfreeze-head` moved the
+head <0.05% relative magnitude over 200 steps because its already-small LR (0.1x the trunk's)
+was ALSO decayed by the trunk's shared schedule. `head_lr` now logged per epoch in
+`epoch_metrics.jsonl` as an audit trail. Also `--bank-captions <corpus>` (widens the InfoNCE
+train bank with extra distractors from a wider corpus while preserving each anchor's own
+`_bank_idx` position -- must append after the anchor's own-caption block, never replace it).
+
+SemTest-200-v2 (4 arms, 300-clip pool = the original 200-clip pool + 100 easy A0-correct anchor
+clips added via `select_semtest200_easy.py`/`merge_semtest200_v2.py`/
+`merge_semtest200_v2_captions.py`, addressing SemTest-200-v1's 100%-adversarial/zero-true-
+negative composition) fold-1 was run with the head-LR fix applied. Result: same qualitative
+finding as SemTest-200-v1 -- v12approxv12shuf, no transfer. This result is **superseded in
+relevance by the A1-failure-recovery run below**, which answers the same underlying question
+(does semantic supervision transfer once the confounds are removed?) via a different, cleaner,
+mechanism-explained route -- kept here as a secondary/earlier data point, not the headline.
+Also fixed this session: `aggregate_semtest200_cv.py`'s `metrics()` read a `gt_verdict` key
+that doesn't exist in `--dump-val-scores` output (which actually uses `label`, int 0/1) --
+fixed. Also fixed (pre-existing, unrelated): unescaped `%` in `semsup_train.py`'s argparse help
+strings crashed `--help` entirely (adjacent string-literal concatenation produced runtime
+content like `"...0.53%" + "of..."`) -- now `%%`-escaped throughout.
+
+New CV infrastructure: `make_semtest200_folds.py` (stratified 5-fold split by `video_id` +
+source tier, self-asserts exact partition), `aggregate_semtest200_cv.py` (pools per-fold
+val_scores into a full-pool readout), `plot_semtest200_cv_curves.py` (mean+-std-band loss
+curves across folds, shared y-axis, right axis color-keyed to its own series, `--mark-epoch`/
+`--init-note` for annotating a selected checkpoint), `siglip_bottleneck_probe.py` (measures how
+much crash-relevant signal survives text->SigLIP-embedding vs raw text; ran on V10/V12/V13
+corpora -- SigLIP retains 86-96% of the text's own crash-AUC, ruling out the encoder as the
+bottleneck for prior negative results).
+
+## A1-failure-recovery -- starting from A1's own 321 test-pool-style failures (2026-08-29)
+
+**Question**: starting from A1 (crash-only LoRA, current champion, test AP=0.900/AUC=0.904 on
+677 clips), can semantic supervision recover the specific clips A1 gets wrong, and does trying
+damage the headline test score?
+
+**Pool**: all 321 windows (240 unique videos) A1 scores wrong at threshold 0.5, from the
+1,761-pool. A1's own AUC on this pool is **exactly 0.0 by construction** (every row is on the
+wrong side of the boundary -- expected, not a bug, and must be stated whenever this pool's
+in-pool numbers are read). Split 260 train / 61 val by `video_id` (seed 0). Selection script:
+`select_a1fail321.py`, writes `outputs/a1fail321/selection_a1fail321.jsonl` + per-arm caption
+files (`Caption_a1fail321_{V10,V12,V12_shuffled}.jsonl`, 321 rows each, joined from the existing
+1,761-pool V10/V12 corpora plus 72 freshly-captioned clips where needed). Real captioning cost
+for this specific 321-pool was **$0** -- every needed caption already existed in the 1,761 corpus.
+
+**4 arms**, all initialized from A1's own LoRA weights
+(`/workspace/semsup/a1_1761/epoch_04/lora_adapter`, r=16/alpha=32/dropout=0.05, config verified
+against `adapter_config.json` before loading), head **frozen** (deliberate -- not unfrozen; see
+DECISIONS.md), predictor warm-started from B-v3's B1 checkpoint
+(`/workspace/semsup/b1_v2_100pct/predictor_b1.pt`, the same one B-v3 used, shared across all 3
+semantic arms to hold initialization constant and vary only the caption file): `a1cont`
+(crash-only control, `--semantic-weight 0.0`), `v10` (leaky captions), `v12` (clean captions),
+`v12shuf` (v12 captions shuffled within class -- content-vs-presence control). Config: `--lr
+2e-5` (5x below A1's own 1e-4 -- refining, not retraining from scratch), `--lr-schedule cosine
+--warmup-frac 0.1 --epochs 10 --keep-top-k 10 --semantic-weight 0.2` (3 semantic arms),
+`--bank-captions` = each arm's own full 1,761-row corpus (v12shuf banks against a
+freshly-shuffled 1,761 corpus, NOT the unshuffled one -- banking against the wrong corpus would
+silently break the content-vs-presence control). Driver `run_a1fail321_4arms.sh` runs the 4
+arms strictly sequentially (concurrent BADAS loads can crash each other -- known gotcha). Ran on
+RunPod, 1 fold only (fold_01), all 4 arms, results in `outputs/a1fail321/results/<arm>/fold_01/`.
+
+### RESULT 1 (in-pool, val split, 61 clips) -- ALL FOUR ARMS BIT-IDENTICAL
+
+fixed_FP=39, fixed_FN=0, still_wrong=22, acc@0.5=0.6393 -- literally the same per-clip
+predictions whether there's no semantic branch at all, real captions, or scrambled captions.
+AP/AUC vary by ~0.02 (noise at n=61): a1cont AP=0.1941/AUC=0.1190, v10 AP=0.1920/AUC=0.1040,
+v12 AP=0.1914/AUC=0.0990, v12shuf AP=0.1937/AUC=0.1159. Workbook:
+`outputs/a1fail321/a1fail321_arm_comparison.xlsx` (built by `build_a1fail321_comparison.py`).
+Read the in-pool AP/AUC values with the pool's AUC=0.0-by-construction caveat always attached.
+
+### RESULT 2 (predictor health -- the semantic branch demonstrably WORKS, mechanistically)
+
+v10/v12 retrieval@1 reaches 35-44% (peak across the run) vs a 2.1% collapse control (same
+magnitude ballpark both arms). v12shuf sits at ~0.0% (at or below its own collapse control) for
+the ENTIRE run -- the cleanest real-vs-scrambled separation this project has produced. This is
+the opposite of the earlier SemTest-200 (pre-A1fail321) result where the predictor was
+collapsed at chance for ALL arms including real captions -- the difference is this run's wider
+InfoNCE bank (full 1,761 rows via `--bank-captions`, vs only 160 train-split captions in the
+earlier run) plus the warm start from B-v3's B1 checkpoint.
+
+### RESULT 3 (test set, 677 clips, the number that actually matters)
+
+Via new script `score_checkpoints_on_test.py` (loads BADAS once, swaps LoRA adapters between
+checkpoints; uses `softmax(logits)[0,1]` with NO `/2.0` divisor, unlike
+`e4_stageA_badas_open_eval.py`'s published-scorer convention -- confirmed this does NOT affect
+AP/AUC or the confusion matrix at threshold 0.5, since dividing logits by a constant is a
+monotone transform that preserves the 0.5 crossing point; it would only matter for calibration
+metrics at other thresholds). Scored A1 itself through this same scorer as a validation check
+(reproduced 0.8995/0.9034, matching its documented 0.900/0.904 to 3 decimals -- confirms the
+scorer is trustworthy) and v12's epoch-10 checkpoint:
+
+| arm | n | AP | AUC | acc@0.5 | acc@own-best-threshold |
+|---|---|---|---|---|---|
+| A0 | 677 | 0.8530 | 0.8642 | 0.7637 | 0.8287 (thr 0.68) |
+| A1 | 677 | 0.8995 | 0.9034 | 0.7903 | 0.8287 (thr 0.68) |
+| v12 | 677 | 0.8972 | 0.9027 | 0.8168 | 0.8331 (thr 0.43) |
+
+v12 vs A1: AP -0.0023, AUC -0.0007 -- flat, within noise. acc@0.5 looks like +2.65pp for v12
+but this is **calibration, not discrimination**: v12's mean test score is 0.488 vs A1's 0.660
+(training shifted the whole distribution down, landing it near 0.5 by coincidence); at each
+arm's own optimal threshold the gap collapses to +0.004. Score files:
+`outputs/a1fail321/test_scores/{A1,v12_ep10}.jsonl`.
+
+### Mechanism -- why semantic supervision doesn't transfer, despite genuinely working
+
+`grad_cos_mean` (cosine between crash-loss and semantic-loss gradients on the shared LoRA
+params, logged via the existing `--grad-cosine-every 8`) sits at -0.04 to +0.05 across the whole
+run, sign-flipping epoch to epoch, in ALL THREE semantic arms. This is 10-100x above the
+pure-random-orthogonality floor for a ~2.8M-param space (so not literally independent) but far
+below what conflict would look like (persistently negative cosine, `frac_neg` -> 1.0).
+Interpretation: the two objectives want mildly overlapping but mostly orthogonal features --
+captions are a lossy function of the same 16 frames the student sees, so semantic supervision
+was never adding NEW information, only a reorganization pressure, and that pressure happens to
+point in a direction the frozen crash head's fixed linear readout is largely blind to.
+
+### Conclusion
+
+A1's 0.900 test benchmark survives training on its own failures intact -- no catastrophic
+forgetting (the real risk this run tested for). Semantic supervision neither helps nor hurts it.
+The semantic branch is now proven to work end-to-end (retrieval, real-vs-shuffled separation)
+for the first time this project -- so the null is a clean, mechanistically-explained
+non-transfer, not an artifact of a broken predictor (which is what earlier runs in this project
+could not rule out).
+
+### Presentation deck
+
+`reports/presentations/2026-08_a1-failure-recovery.pptx`, generator
+`build_a1fail_presentation.py` -- 6 slides, house style matching the existing `2026-08-22` deck
+(reuses its palette/helper-function conventions, does not modify that file). Has a `verify()`
+gate that re-derives every embedded number from the actual score/result files and asserts
+against known-good values before writing -- run it after ANY score-file change, never hand-edit
+numbers into the deck. Also regenerates `make_arch_figures_2026-08-22.py`'s `fig_L3()` (now
+parameterized by `lam`/`out_name` so a different `semantic_weight` can be drawn without
+overwriting the original 0.05-weight figure other decks depend on) -- produced
+`reports/figures/arch_L3_training_a1fail_2026-08-29.png` (lambda=0.2 variant).

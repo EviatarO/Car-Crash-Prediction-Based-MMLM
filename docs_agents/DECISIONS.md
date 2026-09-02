@@ -228,6 +228,8 @@
   after the user pushed back. Several levers remain genuinely untested: B-rev (reverse
   projection direction), structured-field targets, the λ sweep, SigLIP's sigmoid loss, corpus
   scale-up, unfreezing the crash head. P1 was one candidate among several, not a final one.
+  (Unfreezing the crash head was since attempted — SemTest-200, 2026-08-26/27 — but confounded
+  by too-small a head LR; still not genuinely tested, see PROJECT_STATE.md.)
 - **P1 two-stage training, reusing A1_1761's LR unchanged for Stage B** → this IS what was run,
   and it lost by the widest margin in the thread (+0.0716 AP). Not rejected as a design in
   principle — the specific choice to reuse the from-scratch LR on a warm-started checkpoint is
@@ -270,20 +272,100 @@
   adopted: the hypothesis is testable inside the current data (drop the 45 teacher-flagged
   windows, re-run, see whether the train/val gap shrinks). Switching datasets confounds
   everything and is expensive.
-- **Caption the 4,446 pool with Qwen3-VL to save money** → superseded: `gemini-3.7-flash`
-  (batch) does it for ~$20 based on the real measured token usage, so the stronger teacher no
-  longer costs meaningfully more.
+- **Caption the 4,446 pool with Qwen3-VL to save money** → superseded: `gemini-3.7-flash` does
+  it for real cost **$24.85** (V13, measured, not the earlier $20 estimate — captions are
+  denser than that estimate assumed), so the stronger teacher no longer costs meaningfully more.
+  Note: this used OpenRouter's interactive API pinned to the Vertex provider, not a batch
+  endpoint — "batch" in the earlier estimate was aspirational, not what actually ran.
+
+### SemTest-200, code review, architecture literature review, V13 captions (2026-08-26/28)
+- **Trust the "leading mechanism hypothesis" that de-leaked captions pull YES/NO classes
+  together** (recorded 2026-07/08 as the top unresolved question below) → **REFUTED by
+  measurement 2026-08-27**, not just superseded. Rigorous calibration analysis shows AP/AUC and
+  Cohen's-*d* class separation are flat-to-*higher* for B-v3 vs A1, not narrower; what actually
+  moves is each arm's optimal decision threshold (A1: 0.812, B-v3: 0.173). The apparent
+  "negative bias" was a threshold artifact of reading every arm at a shared 0.5 cut, not a real
+  class-collapse. Root cause instead: the frozen crash head can't recalibrate to LoRA's shifted
+  feature distribution (Kumar et al., ICLR 2022) — this is why `--unfreeze-head` exists now.
+- **Run the B-shuffle control at 1,761 scale before trying anything else** → superseded by
+  running it at SemTest-200's smaller, cleaner scale instead (`v12shuf` arm) given the
+  head-unfreeze work was already being built there. **Result: v12 ≈ v12shuf** (paired-delta
+  sign test both ~p=0.5, `summary_vs_vision` sheet numerically identical for the two arms) —
+  the control question **B-shuffle control (captions permuted within class) — still not run**
+  above is now answered: caption content is not reaching the score at this scale, confounded
+  by the head-LR issue below.
+- **Trust OpenRouter's static `/models` pricing endpoint as the final word on any discount** →
+  rejected: it reflects a base/list price. A live, time-limited provider discount (e.g. Vertex's
+  75%-off launch pricing on `gemini-3.7-flash`, confirmed live 2026-08-27/28) only shows up in
+  the actual per-call `cost` field or the provider's own pricing-comparison UI, not the general
+  models list. Always verify via a small real paid call before estimating a large run's cost.
+- **Treat a Claude subagent's frame-sampled (4/16) visual QC verdict on teacher-generated
+  captions as ground truth** → rejected mid-session: the agent used a different prompt and far
+  fewer frames than the teacher (which saw all 16 at higher resolution), so some of its
+  "fabrication" calls are plausibly the *verifier's* error, not the teacher's. The resulting
+  exclude-and-reselect loop was abandoned in favor of fixing the caption prompt itself and
+  regenerating on the correct model — QC-driven resampling was treated as a noisy signal, not
+  an oracle.
+- **Ship V13's first-draft caption-length rule ("≤45 words", "≥1 causal cue")** → rejected after
+  a 15-clip gate measured a mean of only 26.7 words / 30.4 tokens, half the intended budget,
+  with structured fields recorded but never reaching the caption text. Replaced with a 42–52
+  word floor+ceiling and a hard per-field verbalization requirement before the full 4,446-window
+  spend.
+- **Accept V13's full-pool result as-is (leakage AUC 0.7774)** → the leakage rise itself was
+  NOT rejected (expected and judged acceptable — genuine causal signal, not register leak,
+  confirmed by inspecting the top n-grams). What WAS rejected is treating the run as validated:
+  the pre-registered SigLIP-distinctiveness go/no-go check **failed** (0.2026 vs V12's 0.3003,
+  −32.5%), traced to 96.9% of captions sharing one of 3 near-identical openers (template
+  collapse from the prompt's single worked example). Not yet fixed or re-run — see
+  PROJECT_STATE.md's "Next step".
+
+### A1-failure-recovery (2026-08-29)
+- **Give crash and semantic objectives separate/non-shared LoRA weight zones** → rejected,
+  already empirically tested this session, no need to re-litigate. `grad_cos` shows
+  near-orthogonal (not conflicting) gradients, and the crash-only control arm (`a1cont`) already
+  gets a fully-dedicated, zero-semantic-contamination LoRA budget — it produced results
+  BIT-IDENTICAL to the shared-weight semantic arms (see EXPERIMENTS.md's RESULT 1). Separating
+  weights would only reproduce `a1cont`'s own result while removing the only channel through
+  which semantics could possibly help. `a1cont` **is** the limiting case of full weight
+  separation.
 
 ## Unresolved design questions
 
-- **Do the captions still carry class-discriminating information, and is that why the semantic
-  arms lose on positives?** Leading hypothesis, not yet tested. V12 de-leaking dropped
-  text→label AUC 0.964→0.764; cross-caption cosine averages 0.701; observed examples include a
-  YES clip captioned "increasing distance" and a NO clip captioned "decreasing the following
-  distance". If both classes receive near-identical caption embeddings, aligning vision
-  features to them pulls the classes together, opposing the crash objective — which predicts
-  the observed TTE_1.5 collapse (41% vs A1's 66%). **Direct test:** measure pooled-feature
-  class separation for A1 vs B-v3. No training required. Not run.
+- ~~Do the captions still carry class-discriminating information, and is that why the semantic
+  arms lose on positives?~~ **REFUTED 2026-08-27** — see DECISIONS.md's new rejected-options
+  entry above and PROJECT_STATE.md's correction. Class separation is flat-to-higher for B-v3,
+  not narrower; the real mechanism is threshold/calibration drift from the frozen crash head,
+  now being tested directly via `--unfreeze-head` (SemTest-200).
+- ~~Does SemTest-200's null hold once the head can actually move?~~ **RESOLVED 2026-08-29,
+  still a null.** `--head-lr-schedule constant` fix landed; SemTest-200-v2 (real head LR) and
+  the A1-failure-recovery run (a different design point — head deliberately frozen, warm-started
+  from A1, 321-clip pool) both confirm: yes, the null holds. A1-failure-recovery additionally
+  supplies the mechanism (near-orthogonal gradients) that SemTest-200 alone couldn't. See
+  EXPERIMENTS.md.
+- ~~Does mixing easy/A0-correct anchor clips into SemTest-200 fix the score-collapse-to-mean
+  failure?~~ **Addressed 2026-08-29** via SemTest-200-v2's +100-easy-anchor 300-clip pool —
+  same qualitative null as v1. Not independently isolated from the head-LR fix (both landed in
+  the same v2 run), but superseded in priority by A1-failure-recovery's cleaner result anyway.
+- **Should the semantic-alignment direction be abandoned entirely in favor of post-hoc
+  explanation?** The architecture literature review's recommendation (2026-08-27,
+  `outputs/semtest200/code_review_findings_2026-08-27.md`) — now reinforced by a **third**
+  independent negative result (A1-failure-recovery, 2026-08-29, mechanistically explained via
+  near-orthogonal gradients on top of a proven-working semantic branch). **Still not formally
+  decided**, but a concrete, pre-registered compromise/next-test now exists: **concept-head
+  supervision** — predict V13's closed-vocab causal-cue fields directly (small classification
+  heads on the pooled embedding) instead of whole-caption InfoNCE retrieval, on the theory that
+  those targets demand the same visual evidence collision prediction needs and so should show
+  higher `grad_cos` than whole-caption retrieval's scene-identity fingerprinting. Falsifiable
+  bar (pre-registered, uses the already-instrumented `grad_cos` probe): persistently above
+  +0.15, vs the ±0.05 sign-flip measured for InfoNCE this session. If it fails that bar,
+  trunk-level language-alignment-for-accuracy is closed with three independent negatives
+  (1,761-pool history, literature review, A1-failure-recovery) and language supervision
+  redirects to post-hoc explanation. Not yet run.
+- **Fix V13's opener-template-collapse and re-run, or stop the V13 line here?** Open, explicitly
+  left to the user (see PROJECT_STATE.md's "Next step") — 96.9% of the 4,446-caption corpus
+  shares one of 3 near-identical sentence openers, causing the SigLIP-distinctiveness go/no-go
+  check to fail (−32.5% vs V12). The cause is diagnosed and plausibly fixable (vary phrasing,
+  don't rely on one worked example), but not yet attempted.
 - **Is label noise inflating B-v3's memorisation?** 36/269 mined positives have
   `mechanism_visible=false` (teacher told GT=crash, saw no mechanism) vs 20/587 among easy
   positives — a ~4× enrichment. B-v3 sits at train AP 0.9990. Untested: drop the 45
@@ -399,9 +481,13 @@
   pairing Stage B's LoRA weights with Stage A's (frozen, discarded-at-inference) Predictor to
   measure retrieval@1 post-Stage-B. Would distinguish "semantics got erased" from "semantics
   survived but are irrelevant to crash prediction" as P1's failure mode.
-- **B-shuffle control (captions permuted within class) — still not run**, despite being on the
-  plan since W3. This is the cleanest available test of whether caption *content* (vs. caption
-  *class*) does any work at all, and would strengthen any write-up of the negative result.
+- ~~B-shuffle control (captions permuted within class) — still not run, despite being on the
+  plan since W3.~~ **RUN 2026-08-29**, at the A1-failure-recovery scale (321 clips) rather than
+  the full 1,761 pool — the `v12shuf` arm. Result: the cleanest real-vs-scrambled separation
+  this project has produced (v10/v12 retrieval@1 35-44% vs a 2.1% collapse control; v12shuf
+  sits at ~0% for the entire run) combined with bit-identical test-AP outcomes across all 4
+  arms — content demonstrably reaches the predictor but not the crash score. Running it at the
+  full 1,761 scale remains untested but is now lower priority given this cleaner result.
 - **`semsup_b1_probe.py`'s checkpoint-selection bug (selected on cosine loss even under
   `--loss infonce`)** → **Fixed 2026-08-13**: now selects on `val_retrieval_top1_acc_clip`
   under InfoNCE, `val_loss` under cosine. The two retrieval helpers (`clip_level_retrieval_

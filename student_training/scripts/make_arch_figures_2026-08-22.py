@@ -184,7 +184,15 @@ def fig_L2():
 
 
 # ------------------------------------------------------------------------------- L3
-def fig_L3():
+def fig_L3(lam="0.05", out_name="arch_L3_training_2026-08-22.png"):
+    """Training-architecture diagram.
+
+    lam / out_name are parameterized because the semantic weight is NOT a constant of
+    the architecture - it differs per experiment (0.05 in the six-arm study, 0.2 in the
+    A1-failure-recovery run). Defaults reproduce the original 2026-08-22 figure exactly,
+    so existing decks that embed it are unaffected; pass both to emit a variant under a
+    different filename rather than overwriting a figure another deck depends on.
+    """
     fig, ax = new_ax(12.2, 5.4)
 
     # train-only region behind everything
@@ -248,14 +256,14 @@ def fig_L3():
                                 boxstyle="round,pad=0.008,rounding_size=0.012",
                                 facecolor=PANEL_DK, edgecolor=ORANGE, linewidth=1.5,
                                 zorder=Z_BOX))
-    ax.text(0.186, 0.257, "L  =  L_crash  +  0.05 . L_sem", ha="center", va="center",
+    ax.text(0.186, 0.257, f"L  =  L_crash  +  {lam} . L_sem", ha="center", va="center",
             fontsize=11, fontweight="bold", color=ORANGE, family="monospace", zorder=Z_TEXT)
     ax.text(0.186, 0.203, "the control arm sets the second term to zero", ha="center",
             va="center", fontsize=8, color=MUTED, style="italic", zorder=Z_TEXT)
 
     legend(ax, [(MUTED, "input"), (CYAN_DK, "frozen"), (GREEN, "trainable"),
                 (ORANGE, "loss term")], y=0.012)
-    return save(fig, "arch_L3_training_2026-08-22.png")
+    return save(fig, out_name)
 
 
 def main():
