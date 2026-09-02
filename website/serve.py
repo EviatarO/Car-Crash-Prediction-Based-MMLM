@@ -30,6 +30,19 @@ RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 class RangeHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def end_headers(self):
+        """Never let the browser cache anything from this server.
+
+        This is a local authoring server: the pages, the CSS and the generated
+        *_data.js files are edited and rebuilt constantly, and a cached copy shows
+        stale results that look exactly like a bug in the site. Without this, the
+        only fix is a hard refresh, and it is not obvious that one is needed - the
+        page renders fine, just with yesterday's numbers or last week's stylesheet.
+        Bandwidth is irrelevant over loopback, so correctness wins outright.
+        """
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
+
     def send_head(self):
         """SimpleHTTPRequestHandler.send_head, plus single-range 206 responses."""
         range_header = self.headers.get("Range")

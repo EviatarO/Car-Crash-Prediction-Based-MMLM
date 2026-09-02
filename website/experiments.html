@@ -5,14 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCP-MMLM · Experiments</title>
 <link rel="stylesheet" href="assets/site.css">
-<style>
-  .stub{min-height:calc(100vh - var(--navh));display:flex;align-items:center;
-        justify-content:center;text-align:center;padding:0 6vw}
-  .stub .kicker{font-family:var(--mono);font-size:13.2px;letter-spacing:.3em;
-     color:var(--cyan);text-transform:uppercase;margin-bottom:16px}
-  .stub h1{font-size:clamp(30.8px,4.4vw,52.8px);font-weight:800;margin-bottom:14px}
-  .stub p{color:var(--muted);max-width:520px;margin:0 auto 28px;line-height:1.6}
-</style>
 </head>
 <body>
 
@@ -25,17 +17,827 @@
   </div>
 </nav>
 
-<div class="stub">
-  <div>
-    <div class="kicker">Coming next</div>
-    <h1>Per-experiment detail</h1>
-    <p>This page will hold the full arm-by-arm breakdown — training curves, per-clip
-       scores, and side-by-side comparisons across A0, A1, and the semantic arms. The
-       headline comparison table is already live on the <a href="index.html"
-       style="color:var(--cyan)">home page</a>.</p>
-    <a class="ctl big" href="index.html">← back to results</a>
+<!-- ================= HERO ================= -->
+<section class="hero hero-short">
+  <canvas id="plexus"></canvas>
+  <div class="hero-inner">
+    <div class="hero-kicker">Collision Anticipation · MSc Thesis</div>
+    <h1 class="hero-title">Experiments</h1>
+    <p class="hero-sub">Every arm of the semantic-supervision study, end to end: what it
+       tried, what it trained on, what it changed in the network, and what came out —
+       plus a head-to-head view over any dataset two or three arms share.</p>
+  </div>
+</section>
+
+<!-- ================= SUB-NAV ================= -->
+<div class="topbar" id="topbar">
+  <span class="brand">CCP-MMLM</span>
+  <div class="tabs">
+    <button class="tab active" data-view="detail">Experiment detail</button>
+    <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
+  </div>
+  <span class="rowcount" id="viewHint"></span>
+</div>
+
+<!-- ================= DETAIL VIEW ================= -->
+<div id="viewDetail">
+  <section class="block picker-block">
+    <button class="cta primary big-picker" id="pickBtn">
+      <span id="pickLabel">Choose an experiment</span> <span class="caretdown">▾</span>
+    </button>
+    <p class="picker-hint">8 arms · A0 → V12. Pick one to see its full report.</p>
+  </section>
+  <div id="detailBody"></div>
+</div>
+
+<!-- ================= COMPARE VIEW ================= -->
+<div id="viewCompare" hidden>
+  <section class="block">
+    <div class="kicker">Step 1 · Dataset</div>
+    <h2>Which set are we comparing on?</h2>
+    <p class="lede">Arms are only comparable where they were scored on the same clips.
+       The two training pools share no windows, so they are offered separately.</p>
+    <div class="chiprow" id="dsRow"></div>
+    <p class="note" id="dsNote"></p>
+
+    <div class="kicker" style="margin-top:26px">Step 2 · Experiments</div>
+    <h2>Pick up to three</h2>
+    <div class="chiprow" id="armRow"></div>
+    <p class="note" id="armNote"></p>
+  </section>
+
+  <section class="block" id="cmpResults" hidden>
+    <div class="kicker">Per-clip</div>
+    <h2>Every clip, every selected arm</h2>
+    <p class="lede">Click a frame to replay it. Cells are green when that arm is right at
+       threshold 0.5 and red when it is wrong. Sort and filter feed the charts below.</p>
+    <div class="cmp-toolbar">
+      <button class="pill clearbtn" id="cmpClear">Clear filters</button>
+      <span class="rowcount" id="cmpCount"></span>
+    </div>
+    <div class="table-wrap cmp-scroll">
+      <table class="cmp-table">
+        <thead id="cmpHead"></thead>
+        <tbody id="cmpBody"></tbody>
+      </table>
+    </div>
+
+    <div class="kicker" style="margin-top:32px">Correct predictions</div>
+    <h2>How many each arm gets right, by horizon</h2>
+    <p class="lede">Solid bar = clips this arm predicts correctly at threshold 0.5.
+       Dashed bar behind it = every clip of that kind in the current filter, i.e. the
+       ceiling. Recomputed live from the rows above.</p>
+    <div class="chartscroll"><div id="cmpBars"></div></div>
+    <p class="note" id="cmpBarsNote"></p>
+  </section>
+</div>
+
+<footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL EXPERIMENT BROWSER</footer>
+
+<!-- ================= ARM PICKER ================= -->
+<div class="overlay" id="pickOverlay">
+  <div class="pickcard">
+    <div class="player-head">
+      <span class="pid">Select an experiment</span>
+      <button class="close" id="pickClose" title="close (Esc)">×</button>
+    </div>
+    <div id="pickList"></div>
   </div>
 </div>
 
+<!-- ================= PLAYER ================= -->
+<div class="overlay" id="overlay">
+  <div class="player">
+    <div class="player-head">
+      <span class="pid" id="pTitle"></span>
+      <span class="meta" id="pMeta"></span>
+      <button class="close" id="pClose" title="close (Esc)">×</button>
+    </div>
+    <div class="stage">
+      <video id="pVideo" preload="auto" playsinline></video>
+      <div class="tte">
+        <div class="lbl" id="tteLbl">TIME TO EVENT</div>
+        <div class="val" id="tteVal">–</div>
+        <div class="sub" id="tteSub"></div>
+      </div>
+      <div class="alight"><div class="dot" id="aDot"></div><span>ALERT</span></div>
+      <div class="endcard" id="endcard">
+        <div class="msg">SEGMENT ENDED</div>
+        <button class="ctl big" id="replayBtn">↻ replay</button>
+      </div>
+    </div>
+    <div class="scrubwrap">
+      <span class="t" id="scrubElapsed">0.0s</span>
+      <input type="range" id="scrub" min="0" max="1" step="0.001" value="0">
+      <span class="t" id="scrubTotal">0.0s</span>
+    </div>
+    <div class="player-controls">
+      <button class="ctl big" id="pauseBtn">⏸ pause</button>
+      <span class="speed-lbl">SPEED</span>
+      <button class="ctl spd" data-rate="0.5">0.5×</button>
+      <button class="ctl spd" data-rate="0.75">0.75×</button>
+      <button class="ctl spd active" data-rate="1">1×</button>
+      <span class="seg-info" id="segInfo"></span>
+    </div>
+    <div id="pCaption"></div>
+  </div>
+</div>
+
+<script src="site_data.js"></script>
+<script src="experiments_data.js"></script>
+<script src="compare_data.js"></script>
+<script src="assets/plexus.js"></script>
+<script src="assets/arch.js"></script>
+<script src="assets/charts.js"></script>
+<script src="assets/player.js"></script>
+<script>
+"use strict";
+const EX   = window.EXPERIMENTS_DATA;
+const CMP  = window.COMPARE_DATA;
+const SITE = window.SITE_DATA.splits;
+const player = createPlayer();
+initPlexus(document.getElementById("plexus"));
+
+/* Clips are looked up by video_id against the dataset page's already-resolved
+   video/thumb paths, so this page never re-derives a file path. */
+const CLIP_INDEX = {
+  train: new Map(SITE.train.map(c => [c.id, c])),
+  test:  new Map(SITE.test.map(c => [c.id, c])),
+};
+const ARMS = [...EX.arms].sort((a, b) => a.order - b.order);
+const ARM_BY_KEY = Object.fromEntries(ARMS.map(a => [a.key, a]));
+const esc = s => String(s === null || s === undefined ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const f4 = v => (v === null || v === undefined) ? "–" : Number(v).toFixed(4);
+
+/* ============================================================ view routing
+   The hash carries the view AND the selected arm, so a report can be linked to
+   and survives a reload. */
+function currentRoute(){
+  const h = (location.hash || "").replace(/^#/, "");
+  const [view, arg] = h.split("/");
+  return {view: view === "compare" ? "compare" : "detail", arg: arg || null};
+}
+function applyRoute(){
+  const {view, arg} = currentRoute();
+  document.getElementById("viewDetail").hidden = view !== "detail";
+  document.getElementById("viewCompare").hidden = view !== "compare";
+  document.querySelectorAll(".tab[data-view]").forEach(t =>
+    t.classList.toggle("active", t.dataset.view === view));
+  document.getElementById("viewHint").textContent = view === "detail"
+    ? "one arm, in full" : "up to 3 arms, side by side";
+  if (view === "detail"){
+    if (arg && ARM_BY_KEY[arg]) lastArm = arg;
+    renderDetail(arg && ARM_BY_KEY[arg] ? arg : null);
+  }
+}
+/* Switching to Compare and back must not silently discard the arm being read, so
+   the tab remembers it and puts it back into the hash. */
+let lastArm = null;
+document.querySelectorAll(".tab[data-view]").forEach(t =>
+  t.addEventListener("click", () => {
+    location.hash = t.dataset.view === "detail" && lastArm
+      ? "detail/" + lastArm : t.dataset.view;
+  }));
+window.addEventListener("hashchange", applyRoute);
+
+/* ============================================================== arm picker */
+(function buildPicker(){
+  const list = document.getElementById("pickList");
+  const fams = [
+    ["pool1761", "Pool-1761 · the 1,761-window training pool"],
+    ["a1fail321", "A1-fail-321 · the failure-recovery pool"],
+  ];
+  list.innerHTML = fams.map(([fam, title]) => `
+    <div class="pickgroup">
+      <div class="pickgroup-t">${esc(title)}</div>
+      ${ARMS.filter(a => a.family === fam).map(a => `
+        <button class="pickrow" data-arm="${esc(a.key)}">
+          <span class="pickrow-k">${esc(a.label)}</span>
+          <span class="pickrow-d">${esc(a.tagline)}</span>
+          <span class="pickrow-b">
+            ${a.train.available ? '<i class="ok">training curves</i>' : '<i class="no">no training</i>'}
+            ${a.test.available ? '<i class="ok">test results</i>' : '<i class="no">no test scores</i>'}
+          </span>
+        </button>`).join("")}
+    </div>`).join("");
+  list.addEventListener("click", e => {
+    const b = e.target.closest(".pickrow");
+    if (!b) return;
+    closePicker();
+    location.hash = "detail/" + b.dataset.arm;
+  });
+})();
+const pickOverlay = document.getElementById("pickOverlay");
+function openPicker(){ pickOverlay.classList.add("open"); }
+function closePicker(){ pickOverlay.classList.remove("open"); }
+document.getElementById("pickBtn").addEventListener("click", openPicker);
+document.getElementById("pickClose").addEventListener("click", closePicker);
+pickOverlay.addEventListener("click", e => { if (e.target === pickOverlay) closePicker(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && pickOverlay.classList.contains("open")) closePicker();
+});
+
+/* ======================================================= detail: rendering */
+function noteHTML(text, kind){
+  return text ? `<p class="note ${kind || ""}">${esc(text)}</p>` : "";
+}
+function metricsTable(rows){
+  // rows: [{name, m}] where m is a metrics_core dict
+  return `<div class="table-wrap"><table class="mini">
+    <thead><tr><th>subset</th><th>n</th><th>TP</th><th>FN</th><th>FP</th><th>TN</th>
+      <th>Precision</th><th>Recall</th><th>F1</th><th>Accuracy</th>
+      <th>AP</th><th>ROC-AUC</th></tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td>${esc(r.name)}</td><td class="num">${r.m.n_total}</td>
+      <td class="num">${r.m.tp}</td><td class="num">${r.m.fn}</td>
+      <td class="num">${r.m.fp}</td><td class="num">${r.m.tn}</td>
+      <td class="num">${f4(r.m.precision)}</td><td class="num">${f4(r.m.recall_sensitivity_tpr)}</td>
+      <td class="num">${f4(r.m.f1)}</td><td class="num">${f4(r.m.accuracy)}</td>
+      <td class="num hero-metric">${f4(r.ap !== undefined ? r.ap : r.m.ap)}</td>
+      <td class="num hero-metric">${f4(r.auc !== undefined ? r.auc : r.m.auc_roc)}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+function renderDetail(key){
+  const host = document.getElementById("detailBody");
+  document.getElementById("pickLabel").textContent =
+    key ? ARM_BY_KEY[key].label : "Choose an experiment";
+  if (!key){
+    host.innerHTML = `<section class="block"><p class="lede">
+      Nothing selected yet — press the button above to pick one of the eight arms.</p></section>`;
+    return;
+  }
+  const a = ARM_BY_KEY[key];
+  const pool = a.pool ? EX.pools[a.pool] : null;
+
+  host.innerHTML = `
+  <section class="block">
+    <div class="kicker">1 · Experiment description</div>
+    <h2>${esc(a.label)}</h2>
+    <p class="lede">${esc(a.tagline)}</p>
+    <div class="goal-grid">
+      <div class="goal-card"><h3>Hypothesis</h3><p>${esc(a.description.hypothesis)}</p></div>
+      <div class="goal-card"><h3>What it aims to settle</h3><p>${esc(a.description.aim)}</p></div>
+      <div class="goal-card"><h3>How</h3><p>${esc(a.description.method)}</p></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="kicker">2 · Prompt</div>
+    <h2>Teacher caption prompt</h2>
+    ${a.prompt ? `<p class="lede">${esc(a.prompt.name)} — <code>${esc(a.prompt.file)}</code>.
+        Read straight from the prompt module at build time, so it is the prompt the
+        captions were actually generated with.</p>
+      <pre class="promptbox">${esc(a.prompt.text)}</pre>`
+    : noteHTML(a.prompt_note, "flat")}
+    ${a.prompt ? noteHTML(a.prompt_note, "flat") : ""}
+  </section>
+
+  <section class="block">
+    <div class="kicker">3 · Dataset</div>
+    <h2>${pool ? esc(pool.name) : "No training data"}</h2>
+    ${pool ? `
+      <p class="lede">${esc(pool.blurb)}</p>
+      <div class="statgrid">
+        <div class="stat"><div class="k">windows</div><div class="v">${pool.n_windows}</div></div>
+        <div class="stat"><div class="k">unique clips</div><div class="v">${pool.n_clips}</div></div>
+        <div class="stat"><div class="k">positive</div><div class="v">${pool.n_pos}</div></div>
+        <div class="stat"><div class="k">negative</div><div class="v">${pool.n_neg}</div></div>
+        ${pool.split ? `<div class="stat"><div class="k">train / val</div>
+          <div class="v">${pool.split.train} / ${pool.split.val}</div></div>` : ""}
+      </div>
+      <h3 class="subh">Sampling horizon</h3>
+      <p class="lede small">Positives are cut at a fixed time before the labelled event;
+         negatives at fixed offsets from the clip midpoint.</p>
+      <div class="statgrid">
+        ${Object.entries(pool.buckets).map(([k, v]) => `
+          <div class="stat ${k.startsWith("TTE") ? "pos" : "neg"}">
+            <div class="k">${esc(k.replace("TTE_", "TTE ").replace("MID-", "MID −"))}${k.startsWith("TTE") ? "s" : "s"}</div>
+            <div class="v">${v}</div></div>`).join("")}
+      </div>
+      ${noteHTML(pool.split_note, "flat")}
+      <p class="note flat">In this pool every TTE window is a positive and every MID window
+         a negative, so per-horizon AP or AUC is undefined here — the horizon and the label
+         are the same variable. Per-horizon metrics are offered on the test set below,
+         where both classes appear in every bucket.</p>`
+    : `<p class="lede">A0 is never trained, so it has no training pool. It is evaluated on
+        the held-out test set only.</p>`}
+    <h3 class="subh">Evaluation set — ${esc(EX.pools.test677.name)}</h3>
+    <p class="lede small">${esc(EX.pools.test677.blurb)}</p>
+    <div class="statgrid">
+      <div class="stat"><div class="k">clips</div><div class="v">${EX.pools.test677.n_windows}</div></div>
+      <div class="stat pos"><div class="k">positive</div><div class="v">${EX.pools.test677.n_pos}</div></div>
+      <div class="stat neg"><div class="k">negative</div><div class="v">${EX.pools.test677.n_neg}</div></div>
+      ${Object.entries(EX.pools.test677.tte).map(([k, v]) => `
+        <div class="stat"><div class="k">${esc(k.replace("tte_", "TTE "))}</div>
+          <div class="v">${v.n}<small> ${v.pos}+ / ${v.neg}−</small></div></div>`).join("")}
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="kicker">4 · Architecture</div>
+    <h2>What is frozen, what is trained</h2>
+    <p class="lede">Green = trainable in this arm. Blue = frozen. Grey = data or a
+       derived quantity, not a module with weights.</p>
+    <div class="archwrap" id="armArch"></div>
+    ${noteHTML(a.arch.note ? "This arm: " + a.arch.note + "." : null, "flat")}
+  </section>
+
+  <section class="block">
+    <div class="kicker">5 · Hyperparameters</div>
+    <h2>Run configuration</h2>
+    ${a.hyper ? `<p class="lede small">Source: <code>${esc(a.hyper.source)}</code></p>
+      <div class="table-wrap"><table class="mini kv">
+        <thead><tr><th>argument</th><th>value</th></tr></thead>
+        <tbody>${a.hyper.rows.map(([k, v]) =>
+          `<tr><td><code>--${esc(k.replace(/_/g, "-"))}</code></td>
+               <td class="num">${esc(v)}</td></tr>`).join("")}</tbody>
+      </table></div>` : ""}
+    ${noteHTML(a.hyper_note, a.hyper ? "flat" : "warn")}
+  </section>
+
+  <section class="block">
+    <div class="kicker">6 · Results</div>
+    <h2>Training</h2>
+    <div id="trainBlock"></div>
+    <div class="results-head">
+      <h2>Test set · 677 held-out clips</h2>
+      <div class="gearwrap">
+        <span class="gear">⚙</span>
+        <div class="modes" id="modeRow"></div>
+      </div>
+    </div>
+    <div id="testBlock"></div>
+    <h2 class="subh2">Inference</h2>
+    ${noteHTML(a.inference.note, "flat")}
+  </section>`;
+
+  buildArch(document.getElementById("armArch"), {
+    semantic: a.arch.semantic, loss: a.arch.loss, state: a.arch.state,
+  });
+  renderTrain(a);
+  buildModeRow(a);
+}
+
+/* ------------------------------------------------------------------ train */
+function renderTrain(a){
+  const host = document.getElementById("trainBlock");
+  const t = a.train;
+  if (!t.available){ host.innerHTML = noteHTML(t.note, "warn"); return; }
+
+  const S = t.series, ep = t.epochs;
+  host.innerHTML = `
+    ${noteHTML(t.note, "warn")}
+    <div class="chartgrid">
+      <figure><figcaption>Loss vs epoch</figcaption><div id="cLoss"></div></figure>
+      <figure><figcaption>Validation AP vs epoch — the checkpoint-selection criterion</figcaption>
+        <div id="cAp"></div></figure>
+    </div>
+    ${noteHTML(t.acc_note, "flat")}
+    <div id="valEval"></div>`;
+
+  const series = [];
+  if (S.train_total) series.push({name: "train", x: ep, y: S.train_total, color: CHART_COLORS[0]});
+  if (S.val_total) series.push({name: "val", x: ep, y: S.val_total, color: CHART_COLORS[0], dashed: true});
+  if (S.train_sem) series.push({name: "train semantic", x: ep, y: S.train_sem,
+                                color: CHART_COLORS[1], axis: "right"});
+  if (S.val_sem) series.push({name: "val semantic", x: ep, y: S.val_sem,
+                              color: CHART_COLORS[1], axis: "right", dashed: true});
+  lineChart(document.getElementById("cLoss"), {
+    series, xLabel: "epoch", yLabel: "total loss",
+    yRightLabel: S.train_sem ? "semantic loss" : null,
+    mark: t.selected_epoch ? {x: t.selected_epoch, label: "epoch " + t.selected_epoch} : null,
+  });
+  legendInto("cLoss", series);
+
+  if (S.val_ap){
+    lineChart(document.getElementById("cAp"), {
+      series: [{name: "val AP", x: ep, y: S.val_ap, color: CHART_COLORS[2]}],
+      xLabel: "epoch", yLabel: "val AP",
+      mark: t.selected_epoch ? {x: t.selected_epoch, label: "selected"} : null,
+    });
+  }
+
+  const ve = t.val_eval, vhost = document.getElementById("valEval");
+  if (!ve.available){
+    vhost.innerHTML = noteHTML(ve.note, "flat") + noteHTML(t.train_roc_note, "flat");
+    return;
+  }
+  vhost.innerHTML = `
+    <h3 class="subh">Validation split at the selected checkpoint (epoch ${ve.epoch}, n=${ve.n})</h3>
+    ${noteHTML(ve.note, "flat")}
+    <div class="chartgrid three">
+      <figure><figcaption>Accuracy &amp; ROC-AUC vs epoch</figcaption><div id="cValCurves"></div></figure>
+      <figure><figcaption>ROC — validation split</figcaption><div id="cValRoc"></div></figure>
+      <figure><figcaption>Confusion matrix</figcaption><div id="cValCm"></div></figure>
+    </div>
+    ${metricsTable([{name: "val · all", m: ve.metrics}])}
+    ${noteHTML(t.train_roc_note, "flat")}`;
+
+  const c = ve.curves;
+  const vs = [
+    {name: "val accuracy", x: c.epochs, y: c.val_acc, color: CHART_COLORS[0]},
+    {name: "val ROC-AUC", x: c.epochs, y: c.val_auc, color: CHART_COLORS[1]},
+    {name: "val AP", x: c.epochs, y: c.val_ap, color: CHART_COLORS[2]},
+  ];
+  lineChart(document.getElementById("cValCurves"), {
+    series: vs, xLabel: "epoch", yLabel: "score", width: 420,
+    mark: {x: ve.epoch, label: "epoch " + ve.epoch},
+  });
+  legendInto("cValCurves", vs);
+  rocChart(document.getElementById("cValRoc"),
+           {curves: [{name: "val", fpr: ve.roc.fpr, tpr: ve.roc.tpr, auc: ve.metrics.auc_roc}]});
+  confusionMatrix(document.getElementById("cValCm"),
+                  {...ve.metrics, threshold: ve.threshold});
+}
+
+function legendInto(hostId, series){
+  const host = document.getElementById(hostId);
+  const l = document.createElement("div");
+  l.className = "legend";
+  l.innerHTML = series.map(s =>
+    `<span><i style="background:${s.color}${s.dashed ? ";opacity:.55" : ""}"></i>${esc(s.name)}</span>`
+  ).join("");
+  host.appendChild(l);
+}
+
+/* ------------------------------------------------------------------- test */
+const MODES = [["all", "All"], ["compare", "Compare"],
+               ["tte_0.5s", "TTE 0.5s"], ["tte_1.0s", "TTE 1s"], ["tte_1.5s", "TTE 1.5s"]];
+let testMode = "all";
+
+function buildModeRow(a){
+  const row = document.getElementById("modeRow");
+  row.innerHTML = MODES.map(([k, lab]) =>
+    `<button class="pill ${k === testMode ? "active" : ""}" data-mode="${k}">${lab}</button>`).join("");
+  row.onclick = e => {
+    const b = e.target.closest("[data-mode]");
+    if (!b) return;
+    testMode = b.dataset.mode;
+    row.querySelectorAll(".pill").forEach(p => p.classList.toggle("active", p === b));
+    renderTest(a);
+  };
+  renderTest(a);
+}
+
+function bucketsForMode(){
+  if (testMode === "all") return ["all"];
+  if (testMode === "compare") return EX.tte_order;
+  return [testMode];
+}
+const BUCKET_LABEL = {all: "all 677", "tte_0.5s": "TTE 0.5s", "tte_1.0s": "TTE 1.0s",
+                      "tte_1.5s": "TTE 1.5s"};
+
+function renderTest(a){
+  const host = document.getElementById("testBlock");
+  const t = a.test;
+  if (!t.available){ host.innerHTML = noteHTML(t.note, "warn"); return; }
+
+  const keys = bucketsForMode().filter(k => t.buckets[k]);
+  host.innerHTML = `
+    <p class="lede small">Checkpoint: epoch ${t.epoch === null ? "—" : t.epoch} ·
+       source <code>${esc(t.source)}</code> · threshold ${t.threshold}</p>
+    <div class="chartgrid ${keys.length > 1 ? "wide" : ""}">
+      <figure><figcaption>ROC${keys.length > 1 ? " — one curve per horizon" : ""}</figcaption>
+        <div id="cTestRoc"></div></figure>
+      <figure><figcaption>Confusion matri${keys.length > 1 ? "ces" : "x"}</figcaption>
+        <div class="cmrow" id="cTestCm"></div></figure>
+      ${t.by_epoch.length > 1
+        ? `<figure><figcaption>Test metrics vs checkpoint</figcaption><div id="cTestEp"></div></figure>`
+        : ""}
+    </div>
+    ${metricsTable(keys.map(k => ({
+        name: BUCKET_LABEL[k] || k,
+        m: t.buckets[k].metrics,
+        ap: k === "all" ? t.ap : t.buckets[k].published_ap,
+        auc: k === "all" ? t.auc : undefined,
+      })))}
+    ${noteHTML(t.roc_note, "flat")}
+    ${noteHTML(t.by_epoch.length > 1 ? null : t.by_epoch_note, "flat")}
+    ${keys.length === 1 && keys[0] === "all" ? `<p class="note flat">Per-horizon AP:
+       ${EX.tte_order.map(k => t.buckets[k]
+          ? `${BUCKET_LABEL[k]} ${f4(t.buckets[k].published_ap !== undefined
+               ? t.buckets[k].published_ap : t.buckets[k].metrics.ap)} (n=${t.buckets[k].n})` : "")
+          .filter(Boolean).join(" · ")}</p>` : ""}`;
+
+  rocChart(document.getElementById("cTestRoc"), {
+    width: keys.length > 1 ? 340 : 300, height: keys.length > 1 ? 340 : 300,
+    curves: keys.map((k, i) => ({
+      name: BUCKET_LABEL[k] || k, fpr: t.buckets[k].roc.fpr, tpr: t.buckets[k].roc.tpr,
+      auc: k === "all" ? t.auc : t.buckets[k].metrics.auc_roc, color: CHART_COLORS[i],
+    })),
+  });
+
+  const cmHost = document.getElementById("cTestCm");
+  cmHost.innerHTML = "";
+  keys.forEach(k => {
+    const wrap = document.createElement("div");
+    wrap.className = "cmcell";
+    wrap.innerHTML = `<div class="cmttl">${esc(BUCKET_LABEL[k] || k)}</div><div></div>`;
+    cmHost.appendChild(wrap);
+    confusionMatrix(wrap.lastElementChild, {...t.buckets[k].metrics, threshold: t.threshold});
+  });
+
+  if (t.by_epoch.length > 1){
+    const xs = t.by_epoch.map(r => r.epoch);
+    const s = [
+      {name: "AP", x: xs, y: t.by_epoch.map(r => r.ap), color: CHART_COLORS[0]},
+      {name: "ROC-AUC", x: xs, y: t.by_epoch.map(r => r.auc), color: CHART_COLORS[1]},
+      {name: "accuracy", x: xs, y: t.by_epoch.map(r => r.accuracy), color: CHART_COLORS[2]},
+    ];
+    lineChart(document.getElementById("cTestEp"), {
+      series: s, xLabel: "checkpoint epoch", yLabel: "test metric", width: 380,
+      mark: {x: t.epoch, label: "reported"},
+    });
+    legendInto("cTestEp", s);
+    const n = document.createElement("p");
+    n.className = "note flat";
+    n.textContent = t.by_epoch_note;
+    document.getElementById("cTestEp").parentElement.appendChild(n);
+  }
+}
+
+/* ================================================== compare: state + config */
+let cmpDs = CMP.order[0];
+let cmpArms = [];
+let cmpSort = null, cmpDir = 1;
+let cmpFilters = {};
+
+function dsOf(){ return CMP.datasets[cmpDs]; }
+function armLabel(ds, a){ return (ds.arm_labels && ds.arm_labels[a]) || a; }
+
+/* Column spec per source column name. `get` returns the sortable/filterable value;
+   `cell` returns display HTML when it differs. Mirrors dataset.html's COLS shape so
+   the sort/filter machinery below is the same code path. */
+function colSpec(name, ds){
+  const distinct = key => [...new Set(ds.rows.map(r => r[key]))]
+    .filter(v => v !== null && v !== undefined).sort();
+  switch (name){
+    case "video_id":
+      return {key: name, label: "Clip ID", type: "num",
+              get: r => parseInt(r.video_id, 10), cell: r => esc(r.video_id)};
+    case "window":
+      return {key: name, label: "Horizon", type: "select", get: r => r.window,
+              opts: [["", "All"], ...distinct("window").map(v => [v, v])]};
+    case "split":
+      return {key: name, label: "Split", type: "select", get: r => r.split,
+              opts: [["", "All"], ...distinct("split").map(v => [v, v])]};
+    case "mined_failure":
+      return {key: name, label: "Mined failure", type: "select",
+              get: r => String(r.mined_failure),
+              opts: [["", "All"], ["true", "yes"], ["false", "no"]],
+              cell: r => r.mined_failure ? '<span class="chip neg">yes</span>' : "—"};
+    case "caption_V10":
+    case "caption_V12":
+      return {key: name, label: name.replace("caption_", "Caption "), type: "text",
+              get: r => r[name] || "",
+              cell: r => r[name]
+                ? `<span class="cap" title="${esc(r[name])}">${esc(r[name])}</span>` : "—"};
+    case "gt":
+      return {key: name, label: "Ground truth", type: "select", get: r => r.gt,
+              opts: [["", "All"], ["YES", "YES"], ["NO", "NO"]],
+              cell: r => `<span class="chip ${r.gt === "YES" ? "pos" : "neg"}">${r.gt}</span>`};
+    default:
+      return {key: name, label: name, type: "text", get: r => r[name]};
+  }
+}
+function cmpColumns(){
+  const ds = dsOf();
+  const cols = [{key: "clip", label: "Clip"}];
+  ds.columns.forEach(c => cols.push(colSpec(c, ds)));
+  cmpArms.forEach((a, i) => cols.push({
+    key: "arm:" + a, label: armLabel(ds, a), type: "num", arm: a,
+    get: r => (r.scores[a] === undefined ? null : r.scores[a]),
+    cell: r => {
+      const v = r.scores[a];
+      if (v === undefined || v === null) return '<span class="dim">–</span>';
+      const right = (v >= CMP.threshold) === (r.gt === "YES");
+      return `<span class="score ${right ? "right" : "wrong"}">${v.toFixed(4)}</span>`;
+    },
+  }));
+  return cols;
+}
+
+function cmpPasses(r){
+  for (const c of cmpColumns()){
+    if (c.key === "clip") continue;
+    const f = cmpFilters[c.key];
+    if (f === undefined || f === "" || f === null) continue;
+    const v = c.get(r);
+    if (c.type === "select"){ if (String(v) !== f) return false; }
+    else if (c.type === "text"){
+      if (!String(v || "").toLowerCase().includes(String(f).toLowerCase())) return false;
+    } else {
+      if (f.min !== "" && f.min !== undefined && (v === null || v < parseFloat(f.min))) return false;
+      if (f.max !== "" && f.max !== undefined && (v === null || v > parseFloat(f.max))) return false;
+    }
+  }
+  return true;
+}
+function cmpVisible(){
+  let rows = dsOf().rows.filter(cmpPasses);
+  if (cmpSort){
+    const col = cmpColumns().find(c => c.key === cmpSort);
+    if (col){
+      rows = rows.slice().sort((a, b) => {
+        const av = col.get(a), bv = col.get(b);
+        const an = av === null || av === undefined, bn = bv === null || bv === undefined;
+        if (an && bn) return 0;
+        if (an) return 1;                 // nulls always last, regardless of direction
+        if (bn) return -1;
+        if (typeof av === "string") return av.localeCompare(bv) * cmpDir;
+        return (av - bv) * cmpDir;
+      });
+    }
+  }
+  return rows;
+}
+
+function cmpRowHTML(r){
+  const ds = dsOf();
+  const clip = CLIP_INDEX[ds.clip_split].get(r.video_id);
+  const thumb = clip && !clip.video_missing
+    ? `<a class="thumb" data-id="${esc(r.video_id)}"><img loading="lazy" src="${esc(clip.thumb)}" alt="">
+         <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></a>`
+    : `<span class="dim">no video</span>`;
+  return `<tr><td>${thumb}</td>` +
+    cmpColumns().slice(1).map(c =>
+      `<td class="${c.type === "num" ? "num" : ""}">${c.cell ? c.cell(r) : esc(c.get(r))}</td>`
+    ).join("") + "</tr>";
+}
+
+/* thead is rebuilt only when the column set changes (dataset or arm selection),
+   never on a keystroke - rebuilding it while typing would recreate the filter
+   inputs and drop focus mid-word. */
+function cmpRenderHead(){
+  const cols = cmpColumns();
+  const head = document.getElementById("cmpHead");
+  head.innerHTML =
+    `<tr>${cols.map(c => c.key === "clip"
+      ? `<th>${esc(c.label)}</th>`
+      : `<th class="sortable ${cmpSort === c.key ? (cmpDir === 1 ? "sort-asc" : "sort-desc") : ""}"
+             data-col="${esc(c.key)}">${esc(c.label)}<span class="caret"></span></th>`).join("")}</tr>
+     <tr class="filter-row">${cols.map(c => {
+       if (c.key === "clip") return "<th></th>";
+       if (c.type === "select"){
+         return `<th><select data-col="${esc(c.key)}">${
+           c.opts.map(([v, l]) => `<option value="${esc(v)}"${cmpFilters[c.key] === v ? " selected" : ""}>${esc(l)}</option>`).join("")
+         }</select></th>`;
+       }
+       if (c.type === "text"){
+         return `<th><input type="text" placeholder="contains…" data-col="${esc(c.key)}"
+                        value="${esc(cmpFilters[c.key] || "")}"></th>`;
+       }
+       const f = cmpFilters[c.key] || {};
+       return `<th><span class="range">
+         <input type="text" placeholder="min" data-col="${esc(c.key)}" data-b="min" value="${esc(f.min || "")}">
+         <input type="text" placeholder="max" data-col="${esc(c.key)}" data-b="max" value="${esc(f.max || "")}">
+       </span></th>`;
+     }).join("")}</tr>`;
+
+  head.querySelectorAll("th.sortable").forEach(th => th.addEventListener("click", () => {
+    const key = th.dataset.col;
+    if (cmpSort === key){
+      cmpDir = cmpDir === 1 ? -1 : 0;
+      if (cmpDir === 0){ cmpSort = null; cmpDir = 1; }
+    } else { cmpSort = key; cmpDir = 1; }
+    head.querySelectorAll("th.sortable").forEach(x =>
+      x.classList.remove("sort-asc", "sort-desc"));
+    if (cmpSort === key) th.classList.add(cmpDir === 1 ? "sort-asc" : "sort-desc");
+    cmpRenderBody();
+  }));
+  head.querySelectorAll("select[data-col]").forEach(s => s.addEventListener("change", () => {
+    cmpFilters[s.dataset.col] = s.value;
+    cmpRenderBody();
+  }));
+  head.querySelectorAll("input[data-col]").forEach(inp => inp.addEventListener("input", () => {
+    const key = inp.dataset.col;
+    if (inp.dataset.b){
+      cmpFilters[key] = Object.assign({min: "", max: ""}, cmpFilters[key]);
+      cmpFilters[key][inp.dataset.b] = inp.value.trim();
+    } else {
+      cmpFilters[key] = inp.value.trim();
+    }
+    cmpRenderBody();
+  }));
+}
+
+function cmpRenderBody(){
+  const rows = cmpVisible();
+  document.getElementById("cmpBody").innerHTML = rows.map(cmpRowHTML).join("");
+  document.getElementById("cmpCount").textContent =
+    `${rows.length} of ${dsOf().rows.length} rows`;
+  cmpRenderBars(rows);
+}
+
+/* --------------------------------------------------------------- bar panels
+   Four panels: the three positive horizons, then the negatives as one group.
+   Counting correct predictions per bucket needs no within-bucket class balance,
+   so this stays valid on the training pools even though per-bucket AP does not. */
+const PANEL_DEFS = [
+  {title: "TTE 0.5s", match: r => r.gt === "YES" && /0\.5/.test(r.window || "")},
+  {title: "TTE 1s",   match: r => r.gt === "YES" && /1\.0/.test(r.window || "")},
+  {title: "TTE 1.5s", match: r => r.gt === "YES" && /1\.5/.test(r.window || "")},
+  {title: "Negatives", match: r => r.gt === "NO", sub: "no event in the window"},
+];
+
+function cmpRenderBars(rows){
+  const ds = dsOf();
+  const panels = PANEL_DEFS.map(def => {
+    const sub = rows.filter(def.match);
+    return {
+      title: def.title,
+      sub: def.sub || `${sub.length} clip${sub.length === 1 ? "" : "s"} in filter`,
+      bars: cmpArms.map((a, i) => {
+        const scored = sub.filter(r => r.scores[a] !== undefined && r.scores[a] !== null);
+        const correct = scored.filter(r =>
+          (r.scores[a] >= CMP.threshold) === (r.gt === "YES")).length;
+        return {name: armLabel(ds, a), value: correct, max: scored.length,
+                color: CHART_COLORS[i]};
+      }),
+    };
+  });
+  groupedBars(document.getElementById("cmpBars"), {panels});
+  const total = rows.length;
+  document.getElementById("cmpBarsNote").textContent =
+    `Across all ${total} filtered clip${total === 1 ? "" : "s"}: ` +
+    cmpArms.map(a => {
+      const scored = rows.filter(r => r.scores[a] !== undefined && r.scores[a] !== null);
+      const ok = scored.filter(r => (r.scores[a] >= CMP.threshold) === (r.gt === "YES")).length;
+      return `${armLabel(ds, a)} ${ok}/${scored.length}` +
+             (scored.length ? ` (${(100 * ok / scored.length).toFixed(1)}%)` : "");
+    }).join("  ·  ") + `. Threshold ${CMP.threshold}.`;
+}
+
+/* ------------------------------------------------------------ compare chrome */
+function cmpRenderChips(){
+  const ds = dsOf();
+  document.getElementById("dsRow").innerHTML = CMP.order.map(k =>
+    `<button class="pill ${k === cmpDs ? "active" : ""}" data-ds="${k}">${esc(CMP.datasets[k].name)}</button>`
+  ).join("");
+  document.getElementById("dsNote").textContent = ds.note;
+  document.getElementById("armRow").innerHTML = ds.arms.map(a =>
+    `<button class="pill ${cmpArms.includes(a) ? "active" : ""}" data-arm="${esc(a)}">${esc(armLabel(ds, a))}</button>`
+  ).join("");
+  document.getElementById("armNote").textContent = cmpArms.length
+    ? `${cmpArms.length} of 3 selected — press a selected arm again to drop it.`
+    : "Select at least one arm (up to three).";
+  const ready = cmpArms.length > 0;
+  document.getElementById("cmpResults").hidden = !ready;
+  if (ready){ cmpRenderHead(); cmpRenderBody(); }
+}
+document.getElementById("dsRow").addEventListener("click", e => {
+  const b = e.target.closest("[data-ds]");
+  if (!b || b.dataset.ds === cmpDs) return;
+  cmpDs = b.dataset.ds;
+  cmpArms = [];                       // arm keys differ per dataset
+  cmpFilters = {}; cmpSort = null; cmpDir = 1;
+  cmpRenderChips();
+});
+document.getElementById("armRow").addEventListener("click", e => {
+  const b = e.target.closest("[data-arm]");
+  if (!b) return;
+  const a = b.dataset.arm;
+  if (cmpArms.includes(a)) cmpArms = cmpArms.filter(x => x !== a);
+  else if (cmpArms.length < 3) cmpArms.push(a);
+  else { document.getElementById("armNote").textContent =
+           "Three is the limit — drop one before adding another."; return; }
+  cmpFilters = {}; cmpSort = null; cmpDir = 1;
+  cmpRenderChips();
+});
+document.getElementById("cmpClear").addEventListener("click", () => {
+  cmpFilters = {}; cmpSort = null; cmpDir = 1;
+  cmpRenderHead(); cmpRenderBody();
+});
+
+/* Open the clip lightbox, carrying the caption through when the dataset has one. */
+document.getElementById("cmpBody").addEventListener("click", e => {
+  const th = e.target.closest(".thumb");
+  if (!th) return;
+  const ds = dsOf();
+  const row = ds.rows.find(r => r.video_id === th.dataset.id);
+  const clip = CLIP_INDEX[ds.clip_split].get(th.dataset.id);
+  if (!row || !clip) return;
+  const bits = [ds.clip_split.toUpperCase(), row.gt === "YES" ? "POSITIVE" : "NEGATIVE"];
+  if (row.window) bits.push(row.window);
+  if (clip.time_of_event !== null) bits.push(`event @ ${clip.time_of_event.toFixed(2)}s`);
+  if (clip.time_of_alert !== null && clip.time_of_alert !== undefined)
+    bits.push(`alert @ ${clip.time_of_alert.toFixed(2)}s`);
+  if (clip.response_time !== null && clip.response_time !== undefined)
+    bits.push(`response ${clip.response_time.toFixed(2)}s`);
+  cmpArms.forEach(a => {
+    const v = row.scores[a];
+    if (v !== undefined && v !== null) bits.push(`${armLabel(ds, a)} ${v.toFixed(4)}`);
+  });
+  player.open(clip, {
+    title: `#${row.video_id}`, meta: bits.join("  ·  "),
+    caption: row.caption_V12 || row.caption_V10 || "",
+  });
+});
+
+cmpRenderChips();
+applyRoute();
+</script>
 </body>
 </html>

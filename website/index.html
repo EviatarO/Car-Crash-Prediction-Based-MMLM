@@ -33,42 +33,29 @@
   .shuffle-row{display:flex;align-items:center;gap:12px;margin-top:16px}
   .shuffle-row .ctl{font-family:var(--mono)}
 
-  .goal-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
-  @media (max-width:820px){ .goal-grid{grid-template-columns:1fr} }
-  .goal-card{background:var(--panel);border:1px solid #2a3560;border-radius:12px;
-             padding:22px;border-top:3px solid var(--cyan-dk)}
-  .goal-card:nth-child(2){border-top-color:var(--green)}
-  .goal-card:nth-child(3){border-top-color:var(--amber)}
-  .goal-card h3{font-size:16.5px;letter-spacing:.02em;margin-bottom:10px;color:var(--white)}
-  .goal-card p{font-size:14.9px;line-height:1.65;color:var(--muted)}
 
-  .archwrap{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;
-            padding:26px;overflow-x:auto}
-  .archwrap svg{display:block;margin:0 auto;max-width:100%;height:auto}
   .archnote{font-family:var(--mono);font-size:13.2px;color:var(--muted);
             text-align:center;margin-top:14px}
   .archnote b{color:var(--amber)}
 
   .mtable-wrap{overflow-x:auto;border:1px solid #2a3560;border-radius:12px}
   table.mtable{width:100%;border-collapse:collapse;min-width:720px}
+  table.mtable thead{display:table-header-group}
+  table.mtable tbody{display:table-row-group}
   table.mtable th{font-family:var(--mono);font-size:12.1px;letter-spacing:.1em;
                   text-transform:uppercase;color:var(--muted);text-align:right;
                   padding:12px 16px;background:var(--panel-dk);
-                  border-bottom:1px solid #2a3560;white-space:nowrap}
+                  border-bottom:1px solid #2a3560;white-space:nowrap;
+                  position:static;top:auto}
   table.mtable th:first-child{text-align:left}
   table.mtable td{font-family:var(--mono);font-size:15.4px;text-align:right;
                   padding:13px 16px;border-bottom:1px solid #1d2748}
   table.mtable td:first-child{text-align:left;font-weight:700}
   table.mtable tbody tr:hover{background:rgba(0,191,255,.04)}
   table.mtable td.hero-metric{font-weight:700}
-  table.mtable td.ap-best{color:#8fe8b4;font-weight:800}
+  table.mtable tr.ap-best-row td{color:var(--soft-green);font-weight:800}
 
   .cta-row{display:flex;gap:14px;margin-top:8px;flex-wrap:wrap}
-  .cta{font-family:var(--mono);font-size:14.3px;letter-spacing:.08em;padding:13px 26px;
-       border-radius:9px;border:1px solid #2a3560;transition:.15s;display:inline-block}
-  .cta.primary{background:var(--cyan);color:#04182b;border-color:var(--cyan);font-weight:700}
-  .cta.primary:hover{background:var(--cyan-dk)}
-  .cta.ghost:hover{border-color:var(--cyan-dk);color:var(--white)}
 </style>
 </head>
 <body>
@@ -186,8 +173,10 @@
   <div class="mtable-wrap">
     <table class="mtable">
       <thead><tr>
-        <th>Experiment</th><th>TP</th><th>FN</th><th>FP</th><th>TN</th>
-        <th>Prec</th><th>Rec</th><th>F1</th><th>Acc</th><th>AP</th><th>AUC</th>
+        <th scope="col">Experiment</th><th scope="col">TP</th><th scope="col">FN</th>
+        <th scope="col">FP</th><th scope="col">TN</th><th scope="col">Prec</th>
+        <th scope="col">Rec</th><th scope="col">F1</th><th scope="col">Acc</th>
+        <th scope="col">AP</th><th scope="col">AUC</th>
       </tr></thead>
       <tbody id="mtableBody"></tbody>
     </table>
@@ -202,6 +191,7 @@
 
 <script src="landing_data.js"></script>
 <script src="assets/plexus.js"></script>
+<script src="assets/arch.js"></script>
 <script>
 "use strict";
 const D = window.LANDING_DATA;
@@ -209,186 +199,29 @@ initPlexus(document.getElementById("plexus"));
 
 /* ============================================================= results table */
 (function results(){
-  // D.metrics is already chronological (A0 -> A1 -> v12: oldest experiment
-  // first, most recent last) - it comes straight from build_landing_data.py's
-  // SCORE_FILES dict, iterated in insertion order, not re-sorted here.
+  // Render a copy in explicit timeline order: A0 -> A1 -> V12.
   const body = document.getElementById("mtableBody");
-  const bestAP = Math.max(...D.metrics.map(r => r.ap));
-  body.innerHTML = D.metrics.map(r => `<tr>
-    <td>${r.label}</td>
+  const fallbackOrder = {A0: 0, A1: 1, v12: 2};
+  const timeline = [...D.metrics].sort((a, b) =>
+    (a.timeline_order ?? fallbackOrder[a.arm]) -
+    (b.timeline_order ?? fallbackOrder[b.arm]));
+  const bestAP = Math.max(...timeline.map(r => r.ap));
+  body.innerHTML = timeline.map(r => `<tr${r.ap === bestAP ? ' class="ap-best-row"' : ''}>
+    <td>${r.arm === "v12" ? "V12 · Semantic" : r.label}</td>
     <td>${r.tp}</td><td>${r.fn}</td><td>${r.fp}</td><td>${r.tn}</td>
     <td>${r.precision.toFixed(4)}</td><td>${r.recall.toFixed(4)}</td>
     <td>${r.f1.toFixed(4)}</td><td>${r.accuracy.toFixed(4)}</td>
-    <td class="hero-metric${r.ap === bestAP ? " ap-best" : ""}">${r.ap.toFixed(4)}</td>
+    <td class="hero-metric">${r.ap.toFixed(4)}</td>
     <td class="hero-metric">${r.auc.toFixed(4)}</td>
   </tr>`).join("");
   document.getElementById("lambdaVal").textContent = D.semantic_lambda;
 })();
 
 /* ============================================================= architecture SVG
-   Hand-drawn (not the PNG) so it stays crisp at any zoom and matches the site
-   palette. Redrawn from reports/figures/arch_L3_training_a1fail_2026-08-29.png
-   (which itself is generated by make_arch_figures_2026-08-22.py::fig_L3 - the
-   vector-shape labels below are copied verbatim from that script, not guessed):
-   crash path (always active) vs the train-only semantic branch (discarded at
-   inference), sharing the same frozen V-JEPA2 trunk + trainable LoRA.
-
-   Deliberate differences from the reference PNG (both per explicit review
-   feedback, 2026-09-01):
-   - No "patch grid" box. In the reference PNG there never was one either - the
-     trunk's own output tensor (1,2560,1024) is consumed twice, once pooled by
-     the temporal processor (crash path) and once raw by the Predictor
-     (semantic path). Drawing it as its own box implied a module that does not
-     exist; both consumers now branch directly off V-JEPA2 ViT-L.
-   - Teacher caption sits LEFT of SigLIP with a left-to-right arrow (the
-     reference PNG stacks them vertically instead) - matches the actual data
-     flow (caption text -> encoder) more directly.
-   - No boxed "L" combination node (its two incoming arrows kept crossing the
-     dashed train-only boundary at an angle that made the diagram read as
-     "L is a fifth, separate module"). Replaced with a single bold equation
-     line under the diagram - still inside the SVG so it stays part of the
-     figure if copied out, but it is text, not a computation node. */
-(function arch(){
-  const NS = "http://www.w3.org/2000/svg";
-  const CYAN = "#00BFFF", GREEN = "#00E676", AMBER = "#FFA726", MUTED = "#A0B4CC",
-        WHITE = "#FFFFFF", PANEL = "#1C2340", PANEL_DK = "#161d36";
-
-  function box(x, y, w, h, {fill=PANEL, stroke=CYAN, dash=null, rx=8} = {}){
-    const r = document.createElementNS(NS, "rect");
-    r.setAttribute("x", x); r.setAttribute("y", y);
-    r.setAttribute("width", w); r.setAttribute("height", h);
-    r.setAttribute("rx", rx); r.setAttribute("fill", fill);
-    r.setAttribute("stroke", stroke); r.setAttribute("stroke-width", 1.6);
-    if (dash) r.setAttribute("stroke-dasharray", dash);
-    return r;
-  }
-  function label(x, y, text, {size=13.2, color=WHITE, anchor="middle", weight=600, mono=true, italic=false} = {}){
-    const t = document.createElementNS(NS, "text");
-    t.setAttribute("x", x); t.setAttribute("y", y);
-    t.setAttribute("text-anchor", anchor);
-    t.setAttribute("font-size", size);
-    t.setAttribute("font-weight", weight);
-    t.setAttribute("fill", color);
-    if (italic) t.setAttribute("font-style", "italic");
-    if (mono) t.setAttribute("font-family", "Consolas,'Cascadia Mono',ui-monospace,monospace");
-    t.textContent = text;
-    return t;
-  }
-  function block(x, y, w, h, title, sub, opts){
-    const g = document.createElementNS(NS, "g");
-    g.appendChild(box(x, y, w, h, opts));
-    g.appendChild(label(x + w/2, y + h/2 - (sub ? 6 : -4), title, {size:13.8}));
-    if (sub) g.appendChild(label(x + w/2, y + h/2 + 15, sub, {size:10.5, color:MUTED, weight:400}));
-    return g;
-  }
-  function arrow(x1, y1, x2, y2, color=MUTED){
-    const l = document.createElementNS(NS, "line");
-    l.setAttribute("x1", x1); l.setAttribute("y1", y1);
-    l.setAttribute("x2", x2); l.setAttribute("y2", y2);
-    l.setAttribute("stroke", color); l.setAttribute("stroke-width", 1.6);
-    // arrowhead marker must match the line's own color, or a green-tinted arrow
-    // (LoRA->trunk, the trunk->Predictor elbow) would still end in a grey head.
-    l.setAttribute("marker-end", color === GREEN ? "url(#arrowhead-g)" : "url(#arrowhead)");
-    return l;
-  }
-  /* elbow: vertical run then horizontal run, one shape/tensor-size label near the
-     horizontal leg - used for the two branches off the trunk's shared output. */
-  function elbow(x1, y1, xTurn, y2, color=MUTED){
-    const g = document.createElementNS(NS, "g");
-    const v = document.createElementNS(NS, "line");
-    v.setAttribute("x1", x1); v.setAttribute("y1", y1);
-    v.setAttribute("x2", x1); v.setAttribute("y2", y2);
-    v.setAttribute("stroke", color); v.setAttribute("stroke-width", 1.6);
-    g.appendChild(v);
-    g.appendChild(arrow(x1, y2, xTurn, y2, color));
-    return g;
-  }
-  function shapeLabel(cx, y, text, color=MUTED){
-    return label(cx, y, text, {size:9.9, color, weight:400, italic:true});
-  }
-
-  const W = 1000, H = 500;
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("width", W);
-
-  const defs = document.createElementNS(NS, "defs");
-  defs.innerHTML = `<marker id="arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="3"
-      orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="${MUTED}"/></marker>
-      <marker id="arrowhead-g" markerWidth="8" markerHeight="8" refX="6" refY="3"
-      orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="${GREEN}"/></marker>`;
-  svg.appendChild(defs);
-
-  /* train-only region - covers the semantic branch only (predictor/L_sem/SigLIP/
-     caption), NOT the crash path and NOT the equation line, matching what is
-     actually discarded at inference. */
-  const region = box(340, 195, 630, 175, {fill:PANEL_DK, stroke:AMBER, dash:"6 5", rx:12});
-  svg.appendChild(region);
-  svg.appendChild(label(950, 216, "train-only · discarded at inference",
-    {size:10.5, color:AMBER, anchor:"end", weight:600}));
-
-  /* ---- crash path (top row, always active) ---- */
-  const cy = 60, ch = 60, ccy = cy + ch / 2;
-  const frames = block(20, cy, 110, ch, "16 frames", "1280×720", {stroke:MUTED});
-  const trunk  = block(170, cy, 150, ch, "V-JEPA2 ViT-L", "frozen trunk", {stroke:CYAN});
-  const lora   = block(170, cy + ch + 15, 150, 34, "LoRA r=16", "trainable", {stroke:GREEN, fill:"#16321f"});
-  const tproc  = block(360, cy, 140, ch, "temporal processor", "frozen", {stroke:CYAN});
-  const clsf   = block(535, cy, 110, ch, "classifier", "frozen", {stroke:CYAN});
-  const pcoll  = block(680, cy, 100, ch, "P(collision)", "softmax(z)", {stroke:MUTED});
-  const lcrash = block(815, cy, 90, ch, "L_crash", "CE(z, y)", {stroke:AMBER, fill:"#3a2410"});
-  [frames, trunk, lora, tproc, clsf, pcoll, lcrash].forEach(b => svg.appendChild(b));
-
-  // LoRA -> trunk: the connection that was previously missing entirely.
-  svg.appendChild(arrow(245, cy + ch + 15, 245, cy + ch, GREEN));
-
-  // Shape labels sit ABOVE the whole row (cy - 10, clear of every box's top edge
-  // at y=cy), not just above the arrow's own midline (ccy) - the gaps between
-  // adjacent boxes are narrower than most of these label strings, so a label
-  // centered in the gap at arrow height spills sideways into the neighboring
-  // box titles. Floating them in the open margin above the row avoids that
-  // regardless of label width.
-  svg.appendChild(arrow(130, ccy, 170, ccy));
-  svg.appendChild(shapeLabel(150, cy - 10, "(1, 16, 3, 256, 320)"));
-  svg.appendChild(arrow(320, ccy, 360, ccy));
-  svg.appendChild(shapeLabel(340, cy - 10, "(1, 2560, 1024)"));
-  svg.appendChild(arrow(500, ccy, 535, ccy));
-  svg.appendChild(shapeLabel(517, cy - 10, "(1, 1024)"));
-  svg.appendChild(arrow(645, ccy, 680, ccy));
-  svg.appendChild(shapeLabel(662, cy - 10, "(1, 2) logits"));
-  svg.appendChild(arrow(780, ccy, 815, ccy));
-
-  /* ---- semantic branch (train-only region) ---- */
-  const sy = 240, sh = 58, scy = sy + sh / 2;
-  const pred  = block(360, sy, 140, sh, "Predictor", "8 queries · trainable", {stroke:GREEN, fill:"#16321f"});
-  svg.appendChild(shapeLabel(430, sy + sh + 14, "(1, 8, 768) → mean over queries"));
-  const lsem  = block(560, sy, 100, sh, "L_sem", "InfoNCE", {stroke:AMBER, fill:"#3a2410"});
-  const cy3 = 335, ch3 = 58, ccy3 = cy3 + ch3 / 2;
-  const cap    = block(400, cy3, 150, ch3, "teacher caption", "one sentence / clip", {stroke:MUTED});
-  const siglip = block(600, cy3, 150, ch3, "SigLIP text enc.", "frozen", {stroke:CYAN});
-  [pred, lsem, cap, siglip].forEach(b => svg.appendChild(b));
-
-  // trunk -> Predictor: same source point the crash path branches from (320,ccy),
-  // down then right into Predictor's left edge - the SAME tensor as the crash
-  // path's own (1,2560,1024), not a separately-computed feature map.
-  const elb = elbow(320, ccy, 360, scy, GREEN);
-  svg.appendChild(elb);
-  svg.appendChild(shapeLabel(340, sy - 10, "(1, 2560, 1024)", GREEN));
-
-  svg.appendChild(arrow(500, scy, 560, scy));
-  svg.appendChild(shapeLabel(530, scy - 12, "(1, 768)"));
-  // caption -> SigLIP (left-to-right, per review feedback)
-  svg.appendChild(arrow(550, ccy3, 600, ccy3));
-  // SigLIP -> L_sem (up into the loss, arriving from below-right)
-  svg.appendChild(arrow(675, cy3, 675, sy + sh, CYAN));
-  svg.appendChild(shapeLabel(700, cy3 - 8, "(1, 768)"));
-
-  /* ---- loss equation: bold text, not a box - the two branches above already
-     show where each term comes from; this line just states how they combine. */
-  svg.appendChild(label(W / 2, 465, "L  =  L_crash  +  λ · L_sem",
-    {size:19, weight:700, color:AMBER}));
-
-  document.getElementById("archHost").appendChild(svg);
-})();
+   Lives in assets/arch.js so the experiments page can render the same figure
+   recoloured per arm. Called with no options here = the original landing-page
+   configuration (semantic branch shown, LoRA + Predictor trainable). */
+buildArch(document.getElementById("archHost"));
 
 /* ============================================================= showcase player
    Same rules as the dataset page's player: [event-5, event+2] for positives,
