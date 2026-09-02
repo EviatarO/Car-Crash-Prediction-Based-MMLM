@@ -15,9 +15,25 @@ multi-stage plan; more stages (full Experiments page) are expected later.
     that arm trains, hyperparameters, and Train + Test results with a
     `All | Compare | TTE 0.5s | 1s | 1.5s` mode selector.
   - `#compare` — Cross-Experiment Comparison: a shared dataset + up to 3 arms, a
-    per-clip table (sort/filter/play, capped height with its own scrollbar), and a 1x4
-    bar figure (TTE 0.5s / 1s / 1.5s / Negatives) of correct predictions over a dashed
-    ground-truth ceiling, recomputed from the current filter.
+    per-clip table (sort/filter/play, capped height with its own scrollbar), a
+    free-text **Comments** column on the far right, and a 1x4 bar figure
+    (TTE 0.5s / 1s / 1.5s / Negatives) of correct predictions over a dashed
+    ground-truth ceiling.
+
+    The bar ceiling is the **whole dataset's** count for that category and does not
+    move when you filter — only the solid bars do — so you can see how much of a
+    category the current selection still covers. Panel subtitles read
+    "53 of 253 clips in filter" to make both numbers explicit.
+
+    Comments live in `localStorage` under `ccp:review-notes:v1`, keyed by dataset +
+    the row's `key` (`frames_dir` in the training pools, where one `video_id` spans up
+    to three windows and would otherwise collide — `build_compare_data.py` asserts
+    these keys are unique). The store, not the DOM, is the source of truth: the tbody
+    is rebuilt on every sort/filter, so a note living only in a textarea would be lost.
+    Editing a note deliberately does not re-render, which also keeps the caret. Empty
+    notes sort last, so sorting the column surfaces everything reviewed so far.
+    Export/Import buttons write and merge a JSON file — localStorage is per-browser and
+    a "clear site data" would otherwise wipe a review session with no way back.
 
 Shared modules in `website/assets/`, so no page carries a second copy:
 `site.css` (all shared styles; font-sizes were scaled +10% via a one-off script, not
@@ -140,13 +156,32 @@ Useful as a smoke test that the join logic is right — both fall out of the poo
 - The per-horizon bars sum to the confusion matrix: A1's TP bars are 136+112+72 = 320 = its
   `tp`; the Negatives bar is 216 = its `tn`.
 
-## Caching
+## Caching — the bug that wasted the most time here
 
-`serve.py` now sends `Cache-Control: no-store` on every response. Before that, editing CSS
-or rebuilding a `*_data.js` left the browser showing stale content that looked exactly like
-a bug — this cost real debugging time twice. If you see old numbers or unstyled sections,
-confirm the server was restarted after that change (the header only applies to a server
-started from the current `serve.py`); otherwise hard-refresh with Ctrl+Shift+R.
+`serve.py` had **two `end_headers` methods in the same class**. The later one won silently
+(that is just how a Python class body works), so the only `Cache-Control` ever sent was
+`max-age=3600` for `.jpg`/`.png`, and CSS/JS/HTML got **no cache header at all**. With only
+`Last-Modified` present, browsers apply heuristic freshness and happily serve a stale
+stylesheet or a stale `*_data.js` — which renders as a perfectly fine-looking page showing
+last week's layout or yesterday's numbers. This was misdiagnosed as a site bug more than
+once.
+
+Now there is exactly one `end_headers`: `max-age=3600` for images, `no-store,
+must-revalidate` for everything else. Verify with
+`curl -sI http://localhost:8765/.../assets/site.css | grep -i cache` — it must say
+`no-store`. If you add another `end_headers`, merge it into the existing one.
+
+A browser that cached a file *before* this fix will still hold that stale copy; one hard
+refresh (Ctrl+Shift+R) clears it, after which no-store keeps it correct.
+
+## Layout constraint worth knowing
+
+The comparison table's notes column is deliberately **not** `position:sticky`. Sticky on a
+table cell in Chrome lands ~95px short of the scroll container's right edge here and
+overlays the score columns, which is worse than scrolling. Instead the two caption columns
+(~310px, the width hogs) toggle off via the **Captions** pill, which brings the table from
+1579px to 1213px — under a typical container width — so the notes column sits on screen
+beside the scores with no horizontal scroll at all.
 
 ## Known gotchas
 - The in-app Browser pane's screenshot tool is unreliable on this page (stale/blank

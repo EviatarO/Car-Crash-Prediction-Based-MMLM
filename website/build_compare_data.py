@@ -98,6 +98,7 @@ def build_test():
     for r in manifest:
         vid = r["video_id"]
         out.append({
+            "key": vid,          # one window per clip here, so video_id is unique
             "video_id": vid,
             "window": GROUP_LABEL[r["group"]],
             "gt": "YES" if r["event_occurs"] == 1 else "NO",
@@ -137,6 +138,9 @@ def build_pool1761():
     out = []
     for fd, c12 in v12.items():
         out.append({
+            # a clip contributes up to 3 windows, so video_id is NOT unique here -
+            # frames_dir is, and it is what per-row UI state (notes) must key on.
+            "key": fd,
             "video_id": c12["video_id"],
             "window": bucket_of(c12),
             "split": "val" if c12["video_id"] in val_vids else "train",
@@ -187,6 +191,7 @@ def build_a1fail321():
         # itself (it is how the pool was mined), so the baseline needs no extra source.
         row_scores["A1"] = round(float(r["a1_score"]), 4)
         out.append({
+            "key": fd,
             "video_id": r["video_id"],
             "window": bucket_of(r),
             "split": r.get("split"),
@@ -214,6 +219,9 @@ def build_a1fail321():
 
 def main():
     datasets = [build_test(), build_pool1761(), build_a1fail321()]
+    for d in datasets:
+        keys = [r["key"] for r in d["rows"]]
+        assert len(keys) == len(set(keys)),             f"{d['key']}: row keys are not unique - per-row notes would collide"
     for d in datasets:
         gt = Counter(r["gt"] for r in d["rows"])
         buckets = Counter(r["window"] for r in d["rows"])

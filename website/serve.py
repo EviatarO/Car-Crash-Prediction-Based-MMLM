@@ -30,19 +30,6 @@ RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 class RangeHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def end_headers(self):
-        """Never let the browser cache anything from this server.
-
-        This is a local authoring server: the pages, the CSS and the generated
-        *_data.js files are edited and rebuilt constantly, and a cached copy shows
-        stale results that look exactly like a bug in the site. Without this, the
-        only fix is a hard refresh, and it is not obvious that one is needed - the
-        page renders fine, just with yesterday's numbers or last week's stylesheet.
-        Bandwidth is irrelevant over loopback, so correctness wins outright.
-        """
-        self.send_header("Cache-Control", "no-store, must-revalidate")
-        super().end_headers()
-
     def send_head(self):
         """SimpleHTTPRequestHandler.send_head, plus single-range 206 responses."""
         range_header = self.headers.get("Range")
@@ -102,10 +89,20 @@ class RangeHandler(SimpleHTTPRequestHandler):
             remaining -= len(chunk)
 
     def end_headers(self):
-        # mp4 seeking works without caching games, but thumbnails benefit: they never
-        # change between rebuilds of site_data.js, so let the browser keep them a bit.
+        # Thumbnails never change between rebuilds of site_data.js, so let the browser
+        # keep them; there are ~1,800 of them and re-fetching on every render is wasteful.
+        #
+        # EVERYTHING ELSE is explicitly no-store. This is a local authoring server: the
+        # pages, the CSS and the generated *_data.js files are rebuilt constantly, and a
+        # cached copy shows stale results that look exactly like a bug in the site -
+        # the page renders fine, just with yesterday's numbers or last week's stylesheet.
+        # Sending no header at all is NOT enough: with only Last-Modified present,
+        # browsers apply heuristic caching and will serve a stale file for a while.
+        # Bandwidth is irrelevant over loopback, so correctness wins outright.
         if self.path.endswith((".jpg", ".png")):
             self.send_header("Cache-Control", "max-age=3600")
+        else:
+            self.send_header("Cache-Control", "no-store, must-revalidate")
         super().end_headers()
 
     def log_message(self, fmt, *args):          # quiet: one line per request is noise

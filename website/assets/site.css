@@ -352,11 +352,20 @@ table.mini.kv td:last-child{color:var(--white)}
    pushing the charts off-screen entirely. */
 .cmp-scroll{max-height:min(720px,80vh);overflow:auto;border:1px solid #2a3560;
             border-radius:12px}
-.cmp-scroll table.cmp-table{min-width:900px}
+/* border-collapse:collapse (inherited from the base `table` rule) makes Chrome
+   compute wrong offsets for position:sticky on cells - the pinned notes column lands
+   ~100px short of the right edge instead of against it. `separate` with zero spacing
+   looks identical here because every border is drawn per-cell anyway. */
+.cmp-scroll table.cmp-table{min-width:900px;border-collapse:separate;border-spacing:0}
+.cmp-table td,.cmp-table th{white-space:nowrap}
 .cmp-scroll thead th{position:sticky;top:0;z-index:3}
 .cmp-scroll .filter-row th{position:sticky;top:34px;z-index:2}
 .cmp-table td{vertical-align:middle}
-.cap{display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;
+/* Captions are the width hogs: at full width the table overflows and the sticky
+   notes column ends up overlaying the score columns. Truncated to a width that lets
+   the whole table fit on a normal screen - the full text is in the title tooltip and
+   in the clip player - so sticky only actually engages on narrow viewports. */
+.cap{display:inline-block;max-width:155px;overflow:hidden;text-overflow:ellipsis;
      white-space:nowrap;vertical-align:bottom;color:var(--muted);font-size:12.65px}
 .score{font-family:var(--mono);font-weight:700;padding:3px 8px;border-radius:6px}
 .score.right{color:var(--soft-green);background:rgba(0,230,118,.10)}
@@ -365,3 +374,23 @@ table.mini.kv td:last-child{color:var(--white)}
 /* ---- player caption line (experiments page) ---- */
 #pCaption{font-size:15.4px;line-height:1.6;color:var(--muted);padding:14px 18px;
           border-top:1px solid #2a3560;background:var(--panel-dk)}
+
+/* ---- review notes column (Cross-Experiment Comparison) ---- */
+.cmp-toolbar .pushright{margin-left:auto}
+.notecount{color:var(--soft-green)}
+.notecount.warn{color:var(--amber)}
+/* The notes column is last, where a reviewer expects it. It is NOT sticky: a pinned
+   cell in a table this wide lands short of the edge in Chrome and overlays the score
+   columns, which is worse than scrolling. Instead the two caption columns - the width
+   hogs - can be toggled off, which makes the whole table fit and puts the notes on
+   screen next to the scores. */
+.cmp-table td:last-child{min-width:215px;border-left:1px solid #2a3560}
+.cmp-table th:last-child{border-left:1px solid #2a3560}
+.noteinput{width:200px;min-height:46px;resize:vertical;display:block;
+           background:var(--panel-dk);color:var(--white);border:1px solid #2a3560;
+           border-radius:8px;padding:7px 9px;font-family:var(--mono);
+           font-size:12.65px;line-height:1.45;transition:.12s}
+.noteinput::placeholder{color:#5c6d8a}
+.noteinput:focus{outline:none;border-color:var(--cyan-dk);background:var(--panel)}
+/* an annotated row should be findable by eye, not only by sorting */
+.noteinput.has-note{border-left:3px solid var(--soft-green);color:var(--soft-green)}

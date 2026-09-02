@@ -73,7 +73,12 @@
        threshold 0.5 and red when it is wrong. Sort and filter feed the charts below.</p>
     <div class="cmp-toolbar">
       <button class="pill clearbtn" id="cmpClear">Clear filters</button>
+      <button class="pill active" id="capToggle">Captions</button>
       <span class="rowcount" id="cmpCount"></span>
+      <span class="rowcount notecount" id="noteCount"></span>
+      <button class="pill pushright" id="notesExport">Export notes</button>
+      <button class="pill" id="notesImport">Import notes</button>
+      <input type="file" id="notesFile" accept="application/json" hidden>
     </div>
     <div class="table-wrap cmp-scroll">
       <table class="cmp-table">
@@ -85,8 +90,9 @@
     <div class="kicker" style="margin-top:32px">Correct predictions</div>
     <h2>How many each arm gets right, by horizon</h2>
     <p class="lede">Solid bar = clips this arm predicts correctly at threshold 0.5.
-       Dashed bar behind it = every clip of that kind in the current filter, i.e. the
-       ceiling. Recomputed live from the rows above.</p>
+       Dashed bar behind it = every clip of that kind in the whole dataset — a fixed
+       ceiling that does <em>not</em> move when you filter, so the solid bars shrink
+       against it and you can see how much of the category is still being covered.</p>
     <div class="chartscroll"><div id="cmpBars"></div></div>
     <p class="note" id="cmpBarsNote"></p>
   </section>
@@ -558,9 +564,87 @@ function renderTest(a){
   }
 }
 
+/* ==================================================================== notes
+   Free-text review notes per clip, persisted in localStorage. Keyed by dataset
+   plus the row's own `key` - frames_dir in the training pools, where one
+   video_id spans up to three windows and would otherwise collide.
+
+   The store, not the DOM, is the source of truth: cmpRenderBody() rebuilds the
+   whole tbody on any sort/filter change, so anything living only in a textarea
+   would be thrown away. Editing a note deliberately does NOT re-render, which
+   also means typing never loses focus mid-word. */
+const NOTES_LS = "ccp:review-notes:v1";
+let NOTES = (function () {
+  try { return JSON.parse(localStorage.getItem(NOTES_LS)) || {}; }
+  catch (e) { return {}; }   // private window, storage disabled, or corrupt value
+})();
+let notesTimer = null;
+function saveNotes(){
+  clearTimeout(notesTimer);            // debounced: one write per pause, not per keystroke
+  notesTimer = setTimeout(() => {
+    try { localStorage.setItem(NOTES_LS, JSON.stringify(NOTES)); }
+    catch (e) { flashNoteWarning(); }  // quota exceeded or storage blocked
+  }, 300);
+}
+function noteOf(r){ return (NOTES[cmpDs] || {})[r.key] || ""; }
+function setNote(key, text){
+  if (!NOTES[cmpDs]) NOTES[cmpDs] = {};
+  if (text) NOTES[cmpDs][key] = text;
+  else delete NOTES[cmpDs][key];       // don't persist blanks
+  saveNotes();
+}
+function updateNoteCount(){
+  const n = Object.keys(NOTES[cmpDs] || {}).length;
+  document.getElementById("noteCount").textContent =
+    n ? `${n} note${n === 1 ? "" : "s"} on this dataset` : "";
+}
+function flashNoteWarning(){
+  const el = document.getElementById("noteCount");
+  el.textContent = "notes could not be saved — export them before closing";
+  el.classList.add("warn");
+}
+
+/* Notes live only in this browser's localStorage, so export is the only way to
+   move them between machines or survive a "clear site data". */
+function exportNotes(){
+  const blob = new Blob([JSON.stringify(NOTES, null, 2)], {type: "application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `ccp-review-notes-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function importNotes(file){
+  const fr = new FileReader();
+  fr.onload = () => {
+    let incoming;
+    try { incoming = JSON.parse(fr.result); }
+    catch (e) { alert("That file is not valid JSON."); return; }
+    if (!incoming || typeof incoming !== "object"){ alert("Unexpected notes format."); return; }
+    let added = 0;
+    for (const ds in incoming){
+      if (!NOTES[ds]) NOTES[ds] = {};
+      for (const k in incoming[ds]){
+        // merge, never clobber: an existing note wins over an imported one
+        if (!NOTES[ds][k]){ NOTES[ds][k] = incoming[ds][k]; added++; }
+      }
+    }
+    saveNotes();
+    updateNoteCount();
+    cmpRenderBody();
+    alert(`Imported ${added} new note${added === 1 ? "" : "s"} (existing notes kept).`);
+  };
+  fr.readAsText(file);
+}
+
 /* ================================================== compare: state + config */
 let cmpDs = CMP.order[0];
 let cmpArms = [];
+/* The two caption columns are ~310px of the table's width. With three arms selected
+   the table overflows its container and the notes column ends up off-screen, which is
+   exactly where you don't want it while reviewing. Turning captions off makes
+   everything fit; the full caption is still in the tooltip and in the clip player. */
+let showCaptions = true;
 let cmpSort = null, cmpDir = 1;
 let cmpFilters = {};
 
@@ -605,7 +689,9 @@ function colSpec(name, ds){
 function cmpColumns(){
   const ds = dsOf();
   const cols = [{key: "clip", label: "Clip"}];
-  ds.columns.forEach(c => cols.push(colSpec(c, ds)));
+  ds.columns
+    .filter(c => showCaptions || !c.startsWith("caption_"))
+    .forEach(c => cols.push(colSpec(c, ds)));
   cmpArms.forEach((a, i) => cols.push({
     key: "arm:" + a, label: armLabel(ds, a), type: "num", arm: a,
     get: r => (r.scores[a] === undefined ? null : r.scores[a]),
@@ -616,6 +702,18 @@ function cmpColumns(){
       return `<span class="score ${right ? "right" : "wrong"}">${v.toFixed(4)}</span>`;
     },
   }));
+  // Notes go last, on the far right. `get` returns null rather than "" for an empty
+  // note so the shared nulls-last comparator sinks un-annotated rows - which makes
+  // "sort by Comments" the natural way to pull up everything reviewed so far.
+  cols.push({
+    key: "note", label: "Comments", type: "text",
+    get: r => noteOf(r) || null,
+    cell: r => {
+      const v = noteOf(r);
+      return `<textarea class="noteinput${v ? " has-note" : ""}" data-key="${esc(r.key)}"
+        rows="2" placeholder="add a note…">${esc(v)}</textarea>`;
+    },
+  });
   return cols;
 }
 
@@ -728,6 +826,7 @@ function cmpRenderBody(){
   document.getElementById("cmpBody").innerHTML = rows.map(cmpRowHTML).join("");
   document.getElementById("cmpCount").textContent =
     `${rows.length} of ${dsOf().rows.length} rows`;
+  updateNoteCount();
   cmpRenderBars(rows);
 }
 
@@ -739,21 +838,28 @@ const PANEL_DEFS = [
   {title: "TTE 0.5s", match: r => r.gt === "YES" && /0\.5/.test(r.window || "")},
   {title: "TTE 1s",   match: r => r.gt === "YES" && /1\.0/.test(r.window || "")},
   {title: "TTE 1.5s", match: r => r.gt === "YES" && /1\.5/.test(r.window || "")},
-  {title: "Negatives", match: r => r.gt === "NO", sub: "no event in the window"},
+  {title: "Negatives", match: r => r.gt === "NO"},
 ];
 
 function cmpRenderBars(rows){
   const ds = dsOf();
   const panels = PANEL_DEFS.map(def => {
-    const sub = rows.filter(def.match);
+    const sub = rows.filter(def.match);        // current filter
+    const total = ds.rows.filter(def.match);   // whole dataset - the fixed ceiling
     return {
       title: def.title,
-      sub: def.sub || `${sub.length} clip${sub.length === 1 ? "" : "s"} in filter`,
+      sub: sub.length === total.length
+        ? `${total.length} clip${total.length === 1 ? "" : "s"}`
+        : `${sub.length} of ${total.length} clips in filter`,
       bars: cmpArms.map((a, i) => {
-        const scored = sub.filter(r => r.scores[a] !== undefined && r.scores[a] !== null);
-        const correct = scored.filter(r =>
+        const has = r => r.scores[a] !== undefined && r.scores[a] !== null;
+        // Ceiling is the arm's coverage of the ENTIRE category, computed off the
+        // unfiltered rows, so the shadow bar stays put while filtering; only the
+        // solid bar (this arm's correct calls within the filter) moves.
+        const ceiling = total.filter(has).length;
+        const correct = sub.filter(r => has(r) &&
           (r.scores[a] >= CMP.threshold) === (r.gt === "YES")).length;
-        return {name: armLabel(ds, a), value: correct, max: scored.length,
+        return {name: armLabel(ds, a), value: correct, max: ceiling,
                 color: CHART_COLORS[i]};
       }),
     };
@@ -809,6 +915,33 @@ document.getElementById("armRow").addEventListener("click", e => {
 document.getElementById("cmpClear").addEventListener("click", () => {
   cmpFilters = {}; cmpSort = null; cmpDir = 1;
   cmpRenderHead(); cmpRenderBody();
+});
+document.getElementById("capToggle").addEventListener("click", e => {
+  showCaptions = !showCaptions;
+  e.currentTarget.classList.toggle("active", showCaptions);
+  // dropping a column invalidates any filter/sort held on it
+  delete cmpFilters.caption_V10; delete cmpFilters.caption_V12;
+  if (cmpSort && cmpSort.startsWith("caption_")){ cmpSort = null; cmpDir = 1; }
+  cmpRenderHead(); cmpRenderBody();
+});
+
+/* Note edits update the store in place and deliberately do NOT re-render - a
+   rebuild here would drop the caret mid-word and, with a Comments filter active,
+   yank the row out from under the person typing in it. */
+document.getElementById("cmpBody").addEventListener("input", e => {
+  const ta = e.target.closest("textarea[data-key]");
+  if (!ta) return;
+  const text = ta.value.trim();
+  setNote(ta.dataset.key, text);
+  ta.classList.toggle("has-note", !!text);
+  updateNoteCount();
+});
+document.getElementById("notesExport").addEventListener("click", exportNotes);
+document.getElementById("notesImport").addEventListener("click", () =>
+  document.getElementById("notesFile").click());
+document.getElementById("notesFile").addEventListener("change", e => {
+  if (e.target.files[0]) importNotes(e.target.files[0]);
+  e.target.value = "";               // so re-picking the same file fires again
 });
 
 /* Open the clip lightbox, carrying the caption through when the dataset has one. */
