@@ -97,11 +97,21 @@ def build_test():
     out = []
     for r in manifest:
         vid = r["video_id"]
+        pos = r["event_occurs"] == 1
         out.append({
             "key": vid,          # one window per clip here, so video_id is unique
             "video_id": vid,
-            "window": GROUP_LABEL[r["group"]],
-            "gt": "YES" if r["event_occurs"] == 1 else "NO",
+            # Horizon is shown for POSITIVES only. On this manifest a negative still
+            # carries time_before_event_s (0.5/1.0/1.5), but that is a stratum
+            # assignment - which matched-control condition the clip was allocated to -
+            # not a property of the clip: positives and negatives are cut identically
+            # (frames 1-16, same window_size/stride) and there is no t_event_s field at
+            # all. Printing it as a time-to-event on a clip with no event asserts
+            # something false, so it is left blank and the stratum is kept in `group`
+            # for anything that needs it.
+            "window": GROUP_LABEL[r["group"]] if pos else None,
+            "group": r["group"],
+            "gt": "YES" if pos else "NO",
             "scores": scores.get(vid, {}),
         })
     missing = [r for r in out if len(r["scores"]) != len(arms)]

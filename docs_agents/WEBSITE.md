@@ -25,6 +25,21 @@ multi-stage plan; more stages (full Experiments page) are expected later.
     category the current selection still covers. Panel subtitles read
     "53 of 253 clips in filter" to make both numbers explicit.
 
+    Below the bars, three sections all sliced on the **same four buckets**
+    (TTE 0.5s / 1s / 1.5s / Negatives) and all recomputed from the current filter:
+    **vs-baseline** (pick a baseline arm; fixed / broken / still-wrong / net per
+    bucket), **score distribution** (one histogram panel per bucket, one outline per
+    arm, mean score ticked, correct half shaded), and **agreement** (all right / all
+    wrong / disagree / only-X-right per bucket). The table also gains a sortable
+    **Δ spread** column — the max score spread across the selected arms — which is the
+    fastest way to surface the clips worth annotating.
+
+    Two invariants these sections reproduce independently, useful as a smoke test:
+    against A0 on pool-1761, `fixed + still wrong` is exactly **587** for every arm
+    (the mined-failure count, by construction); and on the test set the per-bucket nets
+    sum to the confusion-matrix deltas (A1 +12 on positives = 320−308, V12 −55, and
+    +7 / +91 on negatives).
+
     Comments live in `localStorage` under `ccp:review-notes:v1`, keyed by dataset +
     the row's `key` (`frames_dir` in the training pools, where one `video_id` spans up
     to three windows and would otherwise collide — `build_compare_data.py` asserts
@@ -173,6 +188,21 @@ must-revalidate` for everything else. Verify with
 
 A browser that cached a file *before* this fix will still hold that stale copy; one hard
 refresh (Ctrl+Shift+R) clears it, after which no-store keeps it correct.
+
+## Horizon is shown for positives only
+
+On the **test** manifest a negative still carries `time_before_event_s` (0.5/1.0/1.5),
+but that is a *stratum assignment* — which matched-control condition the clip was
+allocated to — not a property of the clip: positives and negatives are cut identically
+(frames 1–16, same `window_size`/`stride`) and the file has no `t_event_s` field at all.
+Printing it as a time-to-event on a clip with no event asserts something false, so the
+comparison table renders `—` for negatives and keeps the stratum in a `group` field for
+anything that needs it. The training pools were already correct — their negatives are
+genuinely midpoint-sampled and read `MID −4s` / `−8s` / `−10s`.
+
+Related trap, in the training pools only: `group` pairs TTE_0.5↔MID-10, TTE_1.0↔MID-4,
+TTE_1.5↔MID-8 — and note that pairing is **not** monotone, so do not read a negative's
+group as "the equivalent horizon".
 
 ## Layout constraint worth knowing
 

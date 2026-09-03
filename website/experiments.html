@@ -95,6 +95,43 @@
        against it and you can see how much of the category is still being covered.</p>
     <div class="chartscroll"><div id="cmpBars"></div></div>
     <p class="note" id="cmpBarsNote"></p>
+
+    <div id="cmpVsBase">
+      <div class="kicker" style="margin-top:34px">Versus a baseline</div>
+      <h2>What each arm fixes, and what it breaks</h2>
+      <p class="lede">Pick one arm as the reference; the others are scored against it
+         clip by clip. <b>Fixed</b> = the baseline was wrong here and this arm is right.
+         <b>Broken</b> = the baseline was right and this arm lost it. <b>Net</b> is the
+         difference — the only number that says whether the trade was worth it.</p>
+      <div class="baserow">
+        <span class="baselbl">Baseline</span>
+        <span class="chiprow" id="baseRow"></span>
+      </div>
+      <div class="table-wrap"><table class="mini" id="fixTable"></table></div>
+      <p class="note" id="fixNote"></p>
+    </div>
+
+    <div id="cmpDist">
+      <div class="kicker" style="margin-top:34px">Score distribution</div>
+      <h2>Where each arm actually puts its scores</h2>
+      <p class="lede">One panel per bucket, one outline per arm, with each arm's mean
+         score ticked on the axis. The shaded half is where a correct call lands. Two
+         arms can rank clips identically and still sit on opposite sides of the
+         threshold — that is a calibration difference, not a better model, and it is
+         visible here in a way an accuracy number hides.</p>
+      <div class="chartgrid four" id="distGrid"></div>
+      <p class="note" id="distNote"></p>
+    </div>
+
+    <div id="cmpAgree">
+      <div class="kicker" style="margin-top:34px">Agreement</div>
+      <h2>Where the selected arms disagree</h2>
+      <p class="lede">Clips every arm gets right carry no information about which arm is
+         better; the disagreements are the whole signal. Sort the table above by
+         <b>&Delta;</b> to bring the widest disagreements to the top.</p>
+      <div class="table-wrap"><table class="mini" id="agreeTable"></table></div>
+      <p class="note" id="agreeNote"></p>
+    </div>
   </section>
 </div>
 
@@ -172,6 +209,16 @@ const CLIP_INDEX = {
 };
 const ARMS = [...EX.arms].sort((a, b) => a.order - b.order);
 const ARM_BY_KEY = Object.fromEntries(ARMS.map(a => [a.key, a]));
+/* Horizon labels come from three different corpora conventions (tte_0.5s, TTE_0.5,
+   MID-4). Normalise for display only - the raw value stays the filter/match key. */
+function prettyWindow(w){
+  if (!w) return "—";
+  let m = /^tte_([\d.]+)s$/.exec(w) || /^TTE_([\d.]+)$/.exec(w);
+  if (m) return `TTE ${m[1]}s`;
+  m = /^MID-(\d+)$/.exec(w);
+  if (m) return `MID −${m[1]}s`;
+  return w;
+}
 const esc = s => String(s === null || s === undefined ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const f4 = v => (v === null || v === undefined) ? "–" : Number(v).toFixed(4);
@@ -645,6 +692,10 @@ let cmpArms = [];
    exactly where you don't want it while reviewing. Turning captions off makes
    everything fit; the full caption is still in the tooltip and in the clip player. */
 let showCaptions = true;
+/* Which arm the fixed/broken accounting is measured against. Kept in sync with the
+   selection: if the baseline is dropped from the arm list it falls back to the first
+   remaining arm, so the table can never reference an arm that is no longer shown. */
+let cmpBase = null;
 let cmpSort = null, cmpDir = 1;
 let cmpFilters = {};
 
@@ -663,7 +714,10 @@ function colSpec(name, ds){
               get: r => parseInt(r.video_id, 10), cell: r => esc(r.video_id)};
     case "window":
       return {key: name, label: "Horizon", type: "select", get: r => r.window,
-              opts: [["", "All"], ...distinct("window").map(v => [v, v])]};
+              cell: r => r.window
+                ? esc(prettyWindow(r.window))
+                : '<span class="dim" title="no event in this clip, so no time-to-event">—</span>',
+              opts: [["", "All"], ...distinct("window").map(v => [v, prettyWindow(v)])]};
     case "split":
       return {key: name, label: "Split", type: "select", get: r => r.split,
               opts: [["", "All"], ...distinct("split").map(v => [v, v])]};
@@ -702,6 +756,24 @@ function cmpColumns(){
       return `<span class="score ${right ? "right" : "wrong"}">${v.toFixed(4)}</span>`;
     },
   }));
+  // Spread between the selected arms on this clip. Only meaningful with 2+ arms, and
+  // it is the fastest way to find the rows worth reading: sorting by it puts the
+  // clips the arms most disagree about at the top.
+  if (cmpArms.length > 1){
+    cols.push({
+      key: "delta", label: "\u0394 spread", type: "num",
+      get: r => {
+        const vs = cmpArms.map(a => r.scores[a]).filter(v => v !== undefined && v !== null);
+        return vs.length > 1 ? Math.max(...vs) - Math.min(...vs) : null;
+      },
+      cell: r => {
+        const vs = cmpArms.map(a => r.scores[a]).filter(v => v !== undefined && v !== null);
+        if (vs.length < 2) return '<span class="dim">-</span>';
+        const d = Math.max(...vs) - Math.min(...vs);
+        return `<span class="delta${d >= 0.5 ? " big" : ""}">${d.toFixed(4)}</span>`;
+      },
+    });
+  }
   // Notes go last, on the far right. `get` returns null rather than "" for an empty
   // note so the shared nulls-last comparator sinks un-annotated rows - which makes
   // "sort by Comments" the natural way to pull up everything reviewed so far.
@@ -828,6 +900,10 @@ function cmpRenderBody(){
     `${rows.length} of ${dsOf().rows.length} rows`;
   updateNoteCount();
   cmpRenderBars(rows);
+  syncBaseline();
+  renderVsBase(rows);
+  renderDist(rows);
+  renderAgree(rows);
 }
 
 /* --------------------------------------------------------------- bar panels
@@ -876,6 +952,135 @@ function cmpRenderBars(rows){
     }).join("  ·  ") + `. Threshold ${CMP.threshold}.`;
 }
 
+/* ------------------------------------------------- vs-baseline / dist / agreement
+   All three sections slice on the SAME four buckets as the bar figure, and all three
+   are computed from the currently filtered rows so they stay consistent with the
+   table above. A null means the arm has no score on that clip, and the row is skipped
+   for that arm rather than counted as wrong. */
+function isCorrect(r, a){
+  const v = r.scores[a];
+  if (v === undefined || v === null) return null;
+  return (v >= CMP.threshold) === (r.gt === "YES");
+}
+
+function syncBaseline(){
+  if (!cmpArms.includes(cmpBase)) cmpBase = cmpArms[0] || null;
+}
+
+function renderBaseRow(){
+  const ds = dsOf();
+  document.getElementById("baseRow").innerHTML = cmpArms.map(a =>
+    `<button class="pill ${a === cmpBase ? "active" : ""}" data-base="${esc(a)}">${esc(armLabel(ds, a))}</button>`
+  ).join("");
+}
+
+function renderVsBase(rows){
+  const box = document.getElementById("cmpVsBase");
+  box.hidden = cmpArms.length < 2;
+  if (box.hidden) return;
+  const ds = dsOf();
+  const others = cmpArms.filter(a => a !== cmpBase);
+  renderBaseRow();
+
+  const head =
+    `<thead><tr><th rowspan="2">Bucket</th><th rowspan="2">n</th>` +
+    others.map(a => `<th colspan="4">${esc(armLabel(ds, a))} vs ${esc(armLabel(ds, cmpBase))}</th>`).join("") +
+    `</tr><tr>` +
+    others.map(() => `<th>fixed</th><th>broken</th><th>still wrong</th><th>net</th>`).join("") +
+    `</tr></thead>`;
+
+  const body = PANEL_DEFS.map(def => {
+    const sub = rows.filter(def.match);
+    const cells = others.map(a => {
+      let fixed = 0, broken = 0, still = 0;
+      sub.forEach(r => {
+        const b = isCorrect(r, cmpBase), o = isCorrect(r, a);
+        if (b === null || o === null) return;
+        if (!b && o) fixed++;
+        else if (b && !o) broken++;
+        else if (!b && !o) still++;
+      });
+      const net = fixed - broken;
+      return `<td class="num good">${fixed}</td><td class="num bad">${broken}</td>` +
+             `<td class="num">${still}</td>` +
+             `<td class="num ${net > 0 ? "good" : net < 0 ? "bad" : ""}">${net > 0 ? "+" : ""}${net}</td>`;
+    }).join("");
+    return `<tr><td>${esc(def.title)}</td><td class="num">${sub.length}</td>${cells}</tr>`;
+  }).join("");
+
+  document.getElementById("fixTable").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("fixNote").textContent =
+    `Counted over the ${rows.length} clip${rows.length === 1 ? "" : "s"} currently in ` +
+    `the filter, at threshold ${CMP.threshold}. "Still wrong" is clips neither the ` +
+    `baseline nor the arm gets right, i.e. the headroom that remains.`;
+}
+
+function renderDist(rows){
+  const ds = dsOf();
+  const grid = document.getElementById("distGrid");
+  grid.innerHTML = PANEL_DEFS.map((d, i) =>
+    `<figure><figcaption>${esc(d.title)}</figcaption><div id="dist${i}"></div></figure>`).join("");
+  PANEL_DEFS.forEach((def, i) => {
+    const sub = rows.filter(def.match);
+    histChart(document.getElementById("dist" + i), {
+      threshold: CMP.threshold,
+      // TTE buckets hold positives, where a correct call is a HIGH score; the last
+      // bucket holds negatives, where correct means low.
+      correctSide: def.title === "Negatives" ? "low" : "high",
+      series: cmpArms.map((a, k) => ({
+        name: armLabel(ds, a), color: CHART_COLORS[k],
+        values: sub.map(r => r.scores[a]).filter(v => v !== undefined && v !== null),
+      })),
+    });
+  });
+  document.getElementById("distNote").textContent =
+    "Each bucket holds a single class, so a reliability curve is undefined per panel - " +
+    "that needs both classes. The tick on the axis is the arm's mean score in the " +
+    "bucket: a shifted mean with an unchanged shape is a calibration difference, not " +
+    "better ranking.";
+}
+
+function renderAgree(rows){
+  const box = document.getElementById("cmpAgree");
+  box.hidden = cmpArms.length < 2;
+  if (box.hidden) return;
+  const ds = dsOf();
+
+  const head = `<thead><tr><th>Bucket</th><th>n</th><th>all right</th><th>all wrong</th>` +
+    `<th>disagree</th>` +
+    cmpArms.map(a => `<th>only ${esc(armLabel(ds, a))} right</th>`).join("") +
+    `</tr></thead>`;
+
+  const body = PANEL_DEFS.map(def => {
+    const sub = rows.filter(def.match);
+    let n = 0, allR = 0, allW = 0, mixed = 0;
+    const only = cmpArms.map(() => 0);
+    sub.forEach(r => {
+      const v = cmpArms.map(a => isCorrect(r, a));
+      if (v.some(x => x === null)) return;      // an arm without a score cannot vote
+      n++;
+      const nRight = v.filter(Boolean).length;
+      if (nRight === v.length) allR++;
+      else if (nRight === 0) allW++;
+      else {
+        mixed++;
+        if (nRight === 1) only[v.indexOf(true)]++;
+      }
+    });
+    return `<tr><td>${esc(def.title)}</td><td class="num">${n}</td>` +
+      `<td class="num">${allR}</td><td class="num">${allW}</td>` +
+      `<td class="num hero-metric">${mixed}</td>` +
+      only.map(c => `<td class="num good">${c}</td>`).join("") + `</tr>`;
+  }).join("");
+
+  document.getElementById("agreeTable").innerHTML = head + `<tbody>${body}</tbody>`;
+  document.getElementById("agreeNote").textContent =
+    `"Disagree" is clips where at least one selected arm is right and at least one is ` +
+    `wrong - the only rows that can separate these arms. "Only X right" counts the ` +
+    `subset where exactly one arm succeeded, the strongest evidence that a single arm ` +
+    `contributes something the others do not.`;
+}
+
 /* ------------------------------------------------------------ compare chrome */
 function cmpRenderChips(){
   const ds = dsOf();
@@ -915,6 +1120,12 @@ document.getElementById("armRow").addEventListener("click", e => {
 document.getElementById("cmpClear").addEventListener("click", () => {
   cmpFilters = {}; cmpSort = null; cmpDir = 1;
   cmpRenderHead(); cmpRenderBody();
+});
+document.getElementById("baseRow").addEventListener("click", e => {
+  const b = e.target.closest("[data-base]");
+  if (!b || b.dataset.base === cmpBase) return;
+  cmpBase = b.dataset.base;
+  cmpRenderBody();
 });
 document.getElementById("capToggle").addEventListener("click", e => {
   showCaptions = !showCaptions;

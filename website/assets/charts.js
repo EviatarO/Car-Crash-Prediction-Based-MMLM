@@ -252,6 +252,87 @@
     return mount(host, svg);
   };
 
+  /* -------------------------------------------------------------- histChart
+     Score distribution for one bucket, one outlined series per arm.
+
+     Every bucket here holds a SINGLE class (the three TTE buckets are positives,
+     the TN bucket is negatives), so a reliability curve is undefined per bucket -
+     it needs both classes. What this shows instead is where each arm places that
+     one class, which is the calibration question that actually matters here: two
+     arms can rank identically and still sit on opposite sides of 0.5.
+
+     The half of the axis where a correct call lands is shaded, and each arm's mean
+     score is ticked on the baseline, so a distribution-shift shows up directly.
+
+     opts: {series:[{name,color,values}], threshold, correctSide:"high"|"low", bins} */
+  global.histChart = function histChart(host, opts) {
+    const W = opts.width || 330, H = opts.height || 210;
+    const m = {t: 14, r: 12, b: 42, l: 40};
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const bins = opts.bins || 20;
+    const thr = opts.threshold === undefined ? 0.5 : opts.threshold;
+    const svg = svgRoot(W, H);
+
+    const hists = opts.series.map(s => {
+      const counts = new Array(bins).fill(0);
+      s.values.forEach(v => {
+        const i = Math.min(bins - 1, Math.max(0, Math.floor(v * bins)));
+        counts[i]++;
+      });
+      const mean = s.values.length
+        ? s.values.reduce((a, b) => a + b, 0) / s.values.length : null;
+      return {series: s, counts, mean};
+    });
+    const peak = Math.max(1, ...hists.map(h => Math.max(...h.counts)));
+    const sx = v => m.l + v * iw;
+    const sy = c => m.t + ih - (c / peak) * ih;
+
+    // shade the side of the threshold where this bucket's class is called correctly
+    if (opts.correctSide) {
+      const from = opts.correctSide === "high" ? sx(thr) : sx(0);
+      const to = opts.correctSide === "high" ? sx(1) : sx(thr);
+      svg.appendChild(el("rect", {x: from, y: m.t, width: Math.max(0, to - from),
+                                  height: ih, fill: GREEN, "fill-opacity": 0.06}));
+    }
+    for (let i = 0; i <= 2; i++) {
+      const y = m.t + ih - (i / 2) * ih;
+      svg.appendChild(el("line", {x1: m.l, y1: y, x2: m.l + iw, y2: y,
+                                  stroke: GRID, "stroke-width": 1}));
+      svg.appendChild(txt(m.l - 6, y + 3.5, String(Math.round(peak * i / 2)),
+                          {anchor: "end", size: 9.5}));
+    }
+    [0, 0.25, 0.5, 0.75, 1].forEach(v =>
+      svg.appendChild(txt(sx(v), m.t + ih + 15, v.toFixed(2), {size: 9.5})));
+
+    hists.forEach((h, i) => {
+      const color = h.series.color || SERIES_COLORS[i % SERIES_COLORS.length];
+      // step outline rather than filled bars: three overlaid arms stay readable
+      const pts = [];
+      h.counts.forEach((c, b) => {
+        pts.push(`${sx(b / bins)},${sy(c)}`, `${sx((b + 1) / bins)},${sy(c)}`);
+      });
+      svg.appendChild(el("polyline", {points: pts.join(" "), fill: "none",
+                                      stroke: color, "stroke-width": 1.7,
+                                      "stroke-linejoin": "round"}));
+      if (h.mean !== null) {
+        svg.appendChild(el("line", {x1: sx(h.mean), y1: m.t + ih - 5,
+                                    x2: sx(h.mean), y2: m.t + ih + 5,
+                                    stroke: color, "stroke-width": 2.4}));
+        svg.appendChild(txt(sx(h.mean), m.t + ih + 30, h.mean.toFixed(2),
+                            {size: 9, color: color, weight: 700}));
+      }
+    });
+
+    svg.appendChild(el("line", {x1: sx(thr), y1: m.t, x2: sx(thr), y2: m.t + ih,
+                                stroke: AMBER, "stroke-width": 1.3,
+                                "stroke-dasharray": "4 3"}));
+    svg.appendChild(txt(sx(thr), m.t - 3, String(thr), {size: 9, color: AMBER}));
+    svg.appendChild(txt(m.l + iw / 2, H - 4, "score", {size: 10}));
+    svg.appendChild(el("line", {x1: m.l, y1: m.t + ih, x2: m.l + iw, y2: m.t + ih,
+                                stroke: MUTED, "stroke-width": 1.2}));
+    return mount(host, svg);
+  };
+
   /* -------------------------------------------------------------- groupedBars
      panels: [{title, sub, bars:[{name, value, max, color?}]}]
      Each bar is drawn over a dimmed "max" bar, so the reader sees the count AND
