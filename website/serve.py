@@ -15,6 +15,7 @@ binds 127.0.0.1, nothing is reachable from other machines.
 """
 import os
 import re
+import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,9 +27,40 @@ SITE_URL = ("http://localhost:%d/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/"
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
+# A browser aborting a connection is ROUTINE on this site, not a fault: every time the
+# video player closes, seeks, or the page navigates away, an in-flight mp4 range
+# transfer is cut off mid-write. socketserver's default handler prints a full traceback
+# for each one, which buried the log in noise and made a genuine failure impossible to
+# spot - the server was assumed to be crashing when it was in fact healthy and merely
+# loud. These three are swallowed; everything else still gets the normal traceback.
+_DISCONNECT = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    # daemon_threads so a hung keep-alive connection cannot keep the process alive
+    # after Ctrl+C - HTTP/1.1 holds sockets open, and without this the server can
+    # refuse to exit until every browser tab is closed.
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], _DISCONNECT):
+            return
+        super().handle_error(request, client_address)
+
 
 class RangeHandler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        # Browsers request /favicon.ico on every page load; there is no such file, so
+        # each one produced a 404 plus a traceback when the browser dropped it. 204 is
+        # a valid "nothing here, stop asking" with no body.
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_GET()
 
     def send_head(self):
         """SimpleHTTPRequestHandler.send_head, plus single-range 206 responses."""
@@ -112,7 +144,7 @@ class RangeHandler(SimpleHTTPRequestHandler):
 def main():
     os.chdir(ROOT)
     handler = partial(RangeHandler, directory=str(ROOT))
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+    srv = QuietThreadingHTTPServer(("127.0.0.1", PORT), handler)
     print(f"serving {ROOT}")
     print(f"open    {SITE_URL}")
     print("Ctrl+C to stop")
