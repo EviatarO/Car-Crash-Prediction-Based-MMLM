@@ -1,5 +1,49 @@
 # Project State
 
+## ⚠️ 2026-09-09 status update (read this first — the rest of this file predates it)
+
+A `/project-review`-style audit ran 2026-09-06 (`reports/project_reviews/
+2026-09-06_project_review.md`, gitignored/untracked — not in git history), followed by a
+two-session remediation (commits `fcb91fb` 2026-09-08, `3f59ccc` 2026-09-09; not pushed —
+the user pushes themselves). The rest of this file was written before that and is stale in
+detail (git state, uncommitted-file list, "Next step") but not in substance — the
+scientific conclusions below (A1=0.900 banked, semantic supervision null) still stand,
+now with better-measured uncertainty. What changed:
+
+- **Measurement integrity**: `--deterministic` (default on) added to `semsup_train.py`
+  and `score_checkpoints_on_test.py` — the review found the SAME A1 checkpoint scored
+  twice disagreed on 677/677 clips (max|Δ|=0.097, ΔAP=0.0009, the same size as the
+  V12-vs-v12shuf headline effect) with nothing pinning inference numerics.
+- **The recovery-family ordering (V10 > V12 > v12shuf > a1cont) is not established.**
+  `paired_bootstrap_ab.py` (fixed 2026-09-09 to read the a1fail321 arms' score-file
+  schema) now gives every pairwise ΔAP a 95% CI — see `EXPERIMENTS.md`'s "Bootstrap CIs"
+  section for the full matrix and why even the CI-excluding-zero pairs can't be trusted
+  without a same-checkpoint noise-floor replicate. **The null itself is not threatened**
+  — an effect at/below the noise floor is what a null looks like — only the specific
+  ranking is unsupported.
+- **A new, default-off research capability exists**: `--sem-pooled-weight` attaches a
+  second semantic loss term to `pooled` (the crash head's actual classifier input)
+  instead of only the patch grid every prior arm used. This is architecturally the
+  reason "captions add nothing" and "the channel to the classifier is too narrow" have
+  been indistinguishable across every null this project has collected — see
+  `docs_agents/ARCHITECTURE_BLOCKS.md` §5 (new doc, also written 2026-09-09) for the
+  full derivation. **Not yet run** — staged for the next pod session.
+- **The 2560-vs-2048 patch-token question is mostly resolved, locally, without a pod**:
+  `nexar-ai/BADAS-Open`'s HF source turned out to be readable without gating. Confirmed
+  `img_size=224` is dead for the real scoring path and the actual resolution is 256×256
+  (measured directly); derived that the stock config forces exactly 2048 tokens, still in
+  tension with this project's own 2026-08-13 runtime measurement of 2560 — needs one more
+  pod-side shape print to fully close. See `ARCHITECTURE_BLOCKS.md` §1-2 and
+  `NEXT_LORA_PLACEMENT.md`.
+- Several silent-wrong-number bugs fixed across the website builders and
+  `paired_bootstrap_ab.py` (previously undocumented, and unable to read the
+  a1fail321 score files at all) — see the commit messages for `fcb91fb`/`3f59ccc` for
+  the full list, and `experiments.html`'s comparison-table wrong-clip bug (browser-
+  verified fix) in particular.
+
+**Do not trust this file's "Git state" or "Next step" sections below without checking
+`git log`/`git status` directly** — they describe the state before the above.
+
 ## Goal
 MSc thesis: collision anticipation on Nexar dashcam clips via Teacher→Student distillation.
 Accepted shipped baseline: InternVL3.5-4B-Flash student, test AP=0.762 (677 clips). Active

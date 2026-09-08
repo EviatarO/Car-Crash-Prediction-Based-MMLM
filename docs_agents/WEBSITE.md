@@ -7,7 +7,9 @@ multi-stage plan; more stages (full Experiments page) are expected later.
 ## Structure
 3 pages, shared nav/palette/plexus animation in `website/assets/`:
 - `index.html` — landing page: random clip showcase w/ V12 caption, project-goal cards,
-  hand-drawn architecture SVG, A0/A1/v12 test-set results table.
+  hand-drawn architecture SVG, a 10-arm test-set results table (updated 2026-09-09 — was
+  A0/A1/v12 only; now A0, A1, B-v1/v2/v3, P1, and the four a1fail321 recovery arms
+  a1cont/V10/V12/v12shuf, all scored on the same 677 clips).
 - `dataset.html` — train/test clip browser: sortable+filterable table, video player.
 - `experiments.html` — two hash-routed sub-views:
   - `#detail/<arm>` — one arm in full: description (hypothesis / aim / method), the
@@ -69,13 +71,18 @@ both use it).
   "no event time" badge and play with the TN rule.
 - `build_landing_data.py` → `landing_data.js` — showcase clips (all 321
   `outputs/a1fail321/Caption_a1fail321_V12.jsonl` windows, joined to `train.xlsx`) +
-  the A0/A1/v12 test-set metrics table. **Asserts computed metrics against known-good
-  values** (`EXPECTED` dict in the script) — fails loudly rather than silently
-  embedding drifted numbers if the score files ever change.
-- `build_experiments_data.py` → `experiments_data.js` — the per-arm reports for
-  A0/A1/B-v1/B-v2/B-v3/P1/V10/V12. Imports and CALLS the real prompt builders
+  the 10-arm test-set metrics table (updated 2026-09-09: A0, A1, B-v1/v2/v3, P1,
+  a1cont, V10, v12, v12shuf). **Asserts computed metrics against known-good values**
+  (`EXPECTED` dict in the script) — fails loudly rather than silently embedding drifted
+  numbers if the score files ever change. Also selects the **epoch-matched** checkpoint
+  from each arm's `test_summary.json` (fixed 2026-09-08 — previously took
+  `checkpoints[0]` and relied on summaries happening to be rank-sorted).
+- `build_experiments_data.py` → `experiments_data.js` — the per-arm reports for all 10
+  arms above. Imports and CALLS the real prompt builders
   (`prompts/PROMPT_SEMSUP_V1{0,2}_*.py::build_prompt`) so a displayed prompt cannot
-  drift from the one the captions were generated with.
+  drift from the one the captions were generated with. Every arm's confusion matrix is
+  now pinned against a known-good `EXPECTED_CM` dict (added 2026-09-08 — previously
+  only the 4 arms with a `test_summary.json` had any drift protection at all).
 - `build_compare_data.py` → `compare_data.js` — per-clip rows for the three comparable
   datasets (test677 / pool1761 / a1fail321). Imports `clip_level_split` from
   `build_pool1761_comparison.py` rather than re-deriving the train/val split.
@@ -235,11 +242,31 @@ beside the scores with no horizontal scroll at all.
 ## Commits (chronological)
 `a42ebfc` stage 1 (single-page dataset explorer) · `8503609` stage 2 (3-page split,
 sort/filter, scrubber) · `54a962c` README update · `3cf8336` architecture diagram
-redraw + 10% font bump + best-AP highlight.
+redraw + 10% font bump + best-AP highlight · `fcb91fb`/`3f59ccc` (2026-09-08/09)
+post-review remediation — see "Recent fixes" below.
+
+## Recent fixes (2026-09-08/09, project review remediation)
+- **Wrong-clip bug fixed and browser-verified**: `experiments.html`'s comparison-table
+  lightbox resolved rows by `video_id`, which is not unique on the training pools (up to
+  3 windows/clip) — clicking a non-first window opened a *different* window's data.
+  Affected 1,183/1,761 pool1761 rows and 145/321 a1fail321 rows. Now resolves by the
+  row's own unique `key` (`frames_dir`).
+- **`cmpColumns()` memoized** — was rebuilding the full column spec (including a full
+  dataset rescan per select-column) on every row render and every filter keystroke
+  (~19M array ops/keystroke on pool1761).
+- **Silent-wrong-number fixes**: a1fail321 join now asserts coverage before correctness
+  (a total join failure previously passed vacuously); a missing recovery arm now
+  hard-fails instead of silently vanishing from the page; every arm's confusion matrix
+  is pinned (`EXPECTED_CM`); `build_landing_data.py` selects the epoch-matched
+  checkpoint instead of `checkpoints[0]`. All builders verified to produce
+  byte-identical output on the current data before/after — the new asserts are
+  provably no-ops.
 
 ## Next step
-- Score **V10** on the 677-clip test set so it stops being the one hole in the
-  comparison view: `score_checkpoints_on_test.py` pointed at
-  `outputs/a1fail321/results/v10/fold_01/epoch_10/lora_adapter`. Needs the pod.
-- Everything under `website/` is committed; the training/analysis scripts this thread
-  produced are still uncommitted (see PROJECT_STATE.md).
+- **V10 IS now scored** on the 677-clip test set (`outputs/a1fail321/test_scores/
+  v10_ep10.jsonl`, done 2026-09-05) — the site's arm coverage is complete; this is no
+  longer a gap.
+- Not everything under `website/` is committed at any given time — check `git status`
+  rather than trusting this line; it goes stale between sessions. As of the
+  2026-09-08/09 remediation commits (`fcb91fb`, `3f59ccc`), the fixes above are
+  committed (not pushed — the user pushes themselves).
