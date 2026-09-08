@@ -1288,20 +1288,6 @@ v12shuf's true best is epoch 10, but **v10's best is epoch 9** (val_ap 0.2096 vs
 these curves move only ~0.01 total across 10 epochs and are tied to 4 decimals across the top 3
 epochs for 3 of 4 arms -- checkpoint selection here is close to arbitrary at this scale.
 
-**⚠️ Measurement-precision caveat 2026-09-08 (project review §3.1) -- READ BEFORE CITING THE
-ORDERING BELOW.** The pipeline's own run-to-run scoring noise is comparable in size to the
-differences this table reports as a ranking: the SAME A1 checkpoint scored twice (this table's
-0.9000 vs `a1_1761/test_results_ep04.jsonl`'s 0.8986/0.8995 depending on source) differs on
-**677/677 clips** (max |delta| 0.097, 5 clips flip the 0.5 decision, dAP 0.0009) -- i.e. a noise
-floor the same size as the V12-vs-v12shuf gap below. **The null itself (no arm meaningfully
-beats a1cont) is not threatened by this** -- an effect at or below the noise floor is exactly
-what a null looks like -- but the specific ORDERING (V10 > V12 > v12shuf > a1cont) is not
-resolvable by this pipeline and should not be read as a ranking until Phase B's bootstrap CIs
-(reusing `paired_bootstrap_ab.py`, not yet run on this family as of this writing) and a measured
-same-scorer noise floor are in hand. `--deterministic` (default on, added 2026-09-08) closes the
-nondeterminism gap for future runs but does not retroactively fix these five already-collected
-numbers.
-
 | arm | captions | AP | AUC | acc@0.5 | TP | FN | FP | TN |
 |---|---|---|---|---|---|---|---|---|
 | A1 (reference) | — | **0.9000** | 0.9042 | 0.7917 | 320 | 18 | 123 | 216 |
@@ -1310,26 +1296,92 @@ numbers.
 | V12 | real (neutral) | 0.8972 | 0.9027 | 0.8168 | 253 | 85 | 39 | 300 |
 | **v12shuf** | **scrambled within class** | **0.8963** | 0.9017 | 0.8080 | 244 | 94 | 36 | 303 |
 
-**The control lands on top of the treatment.** V12 (real captions) 0.8972 vs v12shuf
-(the same captions permuted within class) 0.8963 — **ΔAP = 0.0009**. The whole
-recovery family spans 0.8956–0.8976, i.e. **0.0020 AP** between "no captions at all"
-and the best captioned arm. Caption *content* contributes nothing measurable on
-held-out data; what little separates these arms is not distinguishable from noise at
-n=677.
+## Bootstrap CIs + the measurement-precision correction (2026-09-09, Phase B of the
+## post-review remediation plan) — READ THIS BEFORE CITING THE TABLE ABOVE AS A RANKING
 
-**Clip-level agreement is the sharper statement.** Across a1cont / V12 / v12shuf the
-three arms make the *same* call on **657 of 677 clips (97.0%)** — only 20 clips
-disagree at all (6 / 4 / 5 at TTE 0.5s / 1s / 1.5s, 5 among negatives). Of those, no
-clip is uniquely fixed by V12 at any TTE bucket; V12 is uniquely right on 2 negatives,
-a1cont on 2 positives.
+The 2026-09-06 project review (§3.1) found the pipeline's own run-to-run scoring noise is
+comparable in size to the differences this table reports as a ranking. This section closes
+that out with real numbers: `paired_bootstrap_ab.py` (fixed 2026-09-09 to also read
+`gt_verdict`-schema files — it previously read only `ground_truth`, so it could not run on
+`outputs/a1fail321/test_scores/*.jsonl` at all) was run pairwise across the whole family, plus
+a direct measurement of the noise floor itself.
 
-**V10 and V12 have IDENTICAL confusion matrices** (253/85/39/300) despite different
-caption corpora — identical decisions at threshold 0.5, differing only in ranking
-(AP 0.8976 vs 0.8972).
+**The noise floor**, measured from two independent scoring runs of the literal SAME A1
+checkpoint (`a1_1761/epoch_04`) on the SAME 677 clips —
+`outputs/e4_vjepa_reason/a1_1761/test_results_ep04.jsonl` vs
+`outputs/a1fail321/test_scores/A1.jsonl`:
 
-This is the test-set confirmation of what the recovery pool already showed: at epoch 10
-on the 61 held-out recovery windows, a1cont, v10, v12 and v12shuf **all** score
-39/61 = 0.6393. Two independent evaluation sets, same conclusion.
+| | value |
+|---|---|
+| ΔAP (run1 − run2) | **−0.0009** |
+| 95% bootstrap CI | [−0.0035, +0.0009] — crosses zero |
+| clips with any score difference | 677 / 677 |
+| mean \|Δ\| per clip | 0.0078 |
+| max \|Δ\| per clip | 0.0973 |
+| clips flipping the 0.5 decision | 5 / 677 |
+
+**The between-arm pairwise matrix** (all n=677, 5000-resample paired bootstrap, seed 42;
+raw JSON in `outputs/a1fail321/bootstrap/`):
+
+| pair (A − B) | ΔAP | 95% CI | excludes 0? | P(B>A) |
+|---|---|---|---|---|
+| **V12 − v12shuf** (the decisive control) | +0.0009 | [−0.0007, +0.0026] | no | 13.4% |
+| A1 − a1cont | +0.0039 | [−0.0039, +0.0117] | no | 15.6% |
+| a1cont − V10 | −0.0020 | [−0.0032, −0.0010] | **yes** | 100.0% |
+| a1cont − V12 | −0.0016 | [−0.0033, −0.0001] | **yes (barely)** | 97.9% |
+| a1cont − v12shuf | −0.0007 | [−0.0018, +0.0004] | no | 90.4% |
+| V10 − V12 | +0.0004 | [−0.0010, +0.0017] | no | 29.2% |
+| V10 − v12shuf | +0.0013 | [+0.0002, +0.0026] | **yes** | 1.1% |
+
+**Reading this honestly requires separating two different kinds of uncertainty that are
+easy to conflate.** The bootstrap CI answers "would this ΔAP survive scoring a *different*
+random sample of 677 clips" (clip-sampling variance). The noise floor above answers a
+different question: "would this ΔAP survive scoring the exact same 677 clips *again* with
+the exact same weights" (scorer nondeterminism — neither scorer had
+`torch.use_deterministic_algorithms` set at the time these arms were scored). A pairwise CI
+excluding zero says nothing about the second source.
+
+**The decisive result: V12 vs v12shuf's own bootstrap CI [−0.0007, +0.0026] already crosses
+zero on its own terms** — sampling variance alone cannot rule out these two being identical,
+independent of the noise-floor question. This is the number the thesis's content-vs-presence
+claim rests on, and it is not resolvable in either arm's favor at n=677.
+
+**Three pairs *do* have bootstrap CIs excluding zero** (a1cont vs V10, a1cont vs V12, V10 vs
+v12shuf) — meaning those specific deltas would likely survive a different clip sample. But
+every one of their point estimates (−0.0020, −0.0016, +0.0013) is within 1–2× of the single
+measured noise-floor point estimate (−0.0009, itself inside a CI of half-width up to 0.0035),
+and none of these five arms was scored more than once. With only one noise-floor sample in
+hand, there is no way to tell whether 0.0009 is a typical draw from the scorer's own noise or
+an unusually small one — so "excludes zero under resampling" cannot be read as "distinguishable
+from what the SAME arm would show if scored again." **None of the pairwise orderings in this
+family should be treated as established.** The specific claim that stays intact is the
+weaker, correctly-hedged one already in this doc: caption content shows no measurable,
+noise-floor-clearing effect — not the stronger claim that any one arm is reliably ranked above
+another.
+
+**What would actually resolve this**: `--deterministic` (default on, added 2026-09-08) removes
+the scorer-nondeterminism source going forward — a re-score of all five arms under it would
+produce numbers with no cross-run noise at all, at which point the bootstrap CIs above would be
+the complete picture rather than a lower bound on the real uncertainty. That re-score is GPU
+work, staged for the Phase D runbook, not run as part of this (local-only) research pass.
+
+**What survives regardless of all the above** (measured independently of AP, immune to this
+noise-floor concern since it is read directly off each arm's own confusion matrix, not compared
+across arms via a difference statistic):
+
+**Clip-level agreement.** Across a1cont / V12 / v12shuf the three arms make the *same* call on
+**657 of 677 clips (97.0%)** — only 20 clips disagree at all (6 / 4 / 5 at TTE 0.5s / 1s / 1.5s,
+5 among negatives). Of those, no clip is uniquely fixed by V12 at any TTE bucket; V12 is
+uniquely right on 2 negatives, a1cont on 2 positives.
+
+**V10 and V12 have IDENTICAL confusion matrices** (253/85/39/300) despite different caption
+corpora — identical decisions at threshold 0.5, differing only in AP ranking (0.8976 vs 0.8972),
+which per the above is itself noise-floor-level.
+
+This is the test-set confirmation of what the recovery pool already showed: at epoch 10 on the
+61 held-out recovery windows, a1cont, v10, v12 and v12shuf **all** score 39/61 = 0.6393. Two
+independent evaluation sets, same conclusion: presence and content are indistinguishable at
+this measurement precision, and no arm has been shown to reliably beat any other.
 
 **Interpretation.** Combined with the prior mechanism results — B1 (caption info
 survives the 2560→1 pooling at 22× chance), P3 (the semantic gradient reaches the

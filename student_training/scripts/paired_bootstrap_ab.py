@@ -7,7 +7,14 @@ Usage:
                                    --b <path/to/test_results_epNN.jsonl> --b-name B-v2 \
                                    [--n-boot 5000] [--seed 42]
 
-Each input file is JSONL with rows: {"video_id": ..., "ground_truth": 0/1, "score": float}.
+Each input file is JSONL, one of two label conventions (both accepted, see load_scores):
+  {"video_id": ..., "ground_truth": 0/1, "score": float}     - semsup_train.py's own scorer
+  {"video_id": ..., "gt_verdict": "YES"/"NO", "score": float} - score_checkpoints_on_test.py
+Fixed 2026-09-09 (project review 2026-09-06, Phase B of the remediation plan): this script
+previously read ONLY "ground_truth" and could not run at all on the a1fail321 recovery-family
+score files (outputs/a1fail321/test_scores/*.jsonl), which score_checkpoints_on_test.py writes
+with "gt_verdict" instead - a schema difference between the project's two test-set scorers that
+was undocumented until the review's §6.3 flagged this script as undocumented in the first place.
 Rows are matched by video_id (order-independent, asserts identical id sets).
 """
 import argparse
@@ -18,6 +25,23 @@ import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 
+def _to01(r):
+    """Accept either label convention a test-set score file might use in this project -
+    semsup_train.py's own scorer writes "ground_truth" (int 0/1); score_checkpoints_on_test.py
+    (used for the a1fail321 recovery family) writes "gt_verdict" ("YES"/"NO") instead. Exactly
+    one of the two keys must be present - a row with neither, or with both disagreeing, is a
+    data problem worth crashing on rather than silently guessing."""
+    if "ground_truth" in r:
+        return int(r["ground_truth"])
+    if "gt_verdict" in r:
+        v = r["gt_verdict"]
+        if v not in ("YES", "NO"):
+            raise ValueError(f"gt_verdict={v!r} is neither 'YES' nor 'NO' "
+                              f"(video_id={r.get('video_id')})")
+        return 1 if v == "YES" else 0
+    raise KeyError(f"row has neither 'ground_truth' nor 'gt_verdict': {r}")
+
+
 def load_scores(path):
     rows = {}
     with open(path, "r", encoding="utf-8") as f:
@@ -26,7 +50,7 @@ def load_scores(path):
             if not line:
                 continue
             r = json.loads(line)
-            rows[r["video_id"]] = (float(r["score"]), int(r["ground_truth"]))
+            rows[r["video_id"]] = (float(r["score"]), _to01(r))
     return rows
 
 

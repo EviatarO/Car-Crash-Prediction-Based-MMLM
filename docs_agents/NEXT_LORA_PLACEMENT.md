@@ -23,13 +23,58 @@ confidence level is stated where it matters.
    most dangerous class of bug is ruled out. The stale yaml keys should be deleted or
    commented as unused.
 
-3. **The 2560-token layout is still unresolved.** Candidates: 8×(16×20) or 10×(16×16)
-   (2560/256 = 10 exactly). 224² is inconsistent with both (14×14=196 does not divide
-   2560). The public GitHub (`getnexar/BADAS-Open`) does **not** contain the architecture
-   internals — only an inference wrapper (`img_size: int = 224`, `frame_count: int = 32`);
-   the real source ships in the `nexar-ai/nexight` HF repo's `src/`, pulled at load time
-   (pod-side). README does confirm the attentive probe has **12 learned queries**.
-   Must be measured: `e4_badas_attention_bbox.py --list_modules` on the pod.
+3. **The 2560-token layout — substantially resolved 2026-09-09, locally, without a pod.**
+   Contrary to the earlier note here, `nexar-ai/BADAS-Open`'s HF repo IS readable without
+   gating (confirmed: `huggingface_hub.list_repo_files`/`hf_hub_download` both succeed with
+   no auth prompt). Read the actual source directly instead of guessing:
+
+   - `badas_loader.py` constructs `VJEPAModel(model_name="facebook/vjepa2-vitl-fpc16-256-ssv2",
+     img_size=224, ...)`. **But `img_size` never reaches the actual preprocessing path.**
+     `VJEPAModel.load()` builds `self.processor = get_processor_for_model(self.model_name)`
+     (in `src/utils/video.py`) which calls `AutoVideoProcessor.from_pretrained(model_name)`
+     with **no `img_size` argument at all** — `img_size` is used only by the *fallback*
+     `self.transform` path (`get_transform_for_model`), which our own `preprocess_clip` never
+     exercises (it always uses `vjepa.processor`, same as BADAS's own `_predict_sliding_window`
+     path via `processor(videos=frames_array, return_tensors="pt")`). `img_size=224` is
+     confirmed **dead** for the actual scoring path, exactly as the yaml note already said —
+     but now with the mechanism, not just the symptom.
+   - Loaded `facebook/vjepa2-vitl-fpc16-256-ssv2`'s `AutoVideoProcessor` directly (public Meta
+     model, no gating) and printed its config: `crop_size: {height:256, width:256},
+     do_center_crop: true, size: {shortest_edge: 292}`. Ran it on 16 dummy 1280×720 frames
+     (the same call shape `preprocess_clip` makes) and got **`pixel_values_videos.shape ==
+     (1, 16, 3, 256, 256)`** — confirmed **256×256, not 224×224**, matching the BADAS-2.0 paper
+     and the HF model card, not the GitHub wrapper's constructor default.
+   - Loaded the model's `AutoConfig` and read the real numbers instead of guessing:
+     **`patch_size=16, tubelet_size=2, num_hidden_layers=24, pred_hidden_size=384,
+     pred_num_hidden_layers=12, num_pooler_layers=3`** — confirms the 24 encoder layers, the
+     12 V-JEPA2-predictor-stack layers, and the predictor stack's 384-dim (vs the encoder's
+     1024-dim) cited elsewhere in this doc, all from the actual config now, not inference.
+   - With `patch_size=16, tubelet_size=2` on a `(1,16,3,256,256)` input, the arithmetic is
+     forced: temporal groups = 16/2 = **8**; spatial patches/frame = (256/16)×(256/16) =
+     16×16 = **256**; total = 8×256 = **2048** — exactly BADAS's own documented "2048 patches
+     × 1024 dim". Read `EnhancedVideoClassifier._extract_video_features`'s V-JEPA2 branch
+     (`src/train/video_training.py`) directly: it calls
+     `self.backbone.get_vision_features(pixel_values_videos=x)` (or `.last_hidden_state`) with
+     **no reshaping specific to V-JEPA2** — the `seq_len // frame_count` reshape a few lines
+     away is gated behind `elif self.model_info['is_videomae']`, a different code path entirely.
+
+   **⚠️ Still open, and this is now the interesting part**: this derivation gives **2048**, but
+   this project's own runtime hook (`semsup_common.py`'s `_pre_hook`, per its comment "verified
+   2026-08-13 on BADAS-Open: input (1, 2560, 1024)") measured **2560** on the actual pod, on the
+   actual loaded `badas_open.pth` checkpoint. 2560/2048 = 1.25 — not a clean relationship. Two
+   readings, and only a fresh pod-side measurement decides between them: (a) the earlier 2560
+   measurement was taken under different conditions than assumed here (a different img_size
+   path, a stale/mislabeled tap point) and 2048 is actually correct; or (b) BADAS's fine-tuning
+   of `badas_open.pth` changed the effective patch grid away from the stock pretrained
+   config this derivation assumes (e.g. interpolated position embeddings at a different
+   resolution than `facebook/vjepa2-vitl-fpc16-256-ssv2`'s stock 256×256) — checkable only by
+   loading the actual weights, which needs the pod. **Next pod session: re-run
+   `e4_badas_attention_bbox.py --list_modules` (still the direct way to get the number that
+   matters) and additionally print `patches.shape` right where `semsup_common.py`'s pre-hook
+   fires, to settle 2048-vs-2560 for real** — this local investigation narrows the search space
+   (settles img_size=256, rules out img_size=224 and the 10×(16×16) hypothesis, since the
+   temporal factor is now confirmed pinned at 8 = 16/tubelet_size(2), not derivable as
+   2560/256=10) but does not close the file.
 
 ## The diagnostic to add
 

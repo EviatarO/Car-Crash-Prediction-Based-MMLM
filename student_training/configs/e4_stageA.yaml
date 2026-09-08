@@ -21,25 +21,29 @@ model:
 # `return_tensors="pt"` to vjepa.processor (the HF AutoVideoProcessor); img_size,
 # num_frames, target_fps, norm_mean/norm_std below are NEVER READ on the actual
 # scoring path — only num_frames is read, and only inside dry_run() as a
-# warn-only mismatch check (never enforced). Whatever the processor's own default
-# resolution is is what actually runs — unmeasured as of this writing.
+# warn-only mismatch check (never enforced).
 #
-# The 224-vs-256 contradiction between the comment below and the `img_size:` value is
-# INHERITED, not a local typo: Nexar's own sources disagree with each other. The
-# BADAS-2.0 paper (arXiv 2604.05767) and the nexar-ai/BADAS-Open HF model card both
-# state 256x256 (HF card additionally states "2048 patches x 1024 dim"); the public
-# github.com/getnexar/BADAS-Open inference wrapper's `VJEPAModel(img_size=224)`
-# constructor default says 224. This repo measures **2560** patch tokens at
-# runtime — 25% more than BADAS's own documented 2048 — so the real resolution this
-# scorer runs at is an open, measurable question, not yet settled. See
-# NEXT_LORA_PLACEMENT.md and the 2026-09-06 project review §3.4 for the full
-# derivation (current best hypothesis: 8 temporal groups x 16x20 spatial = 2560,
-# i.e. a 256x320 frame — favored over 10x(16x16) because the temporal factor is
-# pinned at 8 = 16 frames / tubelet 2, and 8x16x16=2048 matches BADAS's own count
-# exactly). Settle with a runtime shape print
-# (`print(preprocess_clip(vjepa, paths).shape)`) or
-# `e4_badas_attention_bbox.py --list_modules` next time the pod is up — do NOT
-# "fix" the values below without that measurement; either 224 or 256 could be wrong.
+# RESOLVED 2026-09-09 (locally, no pod/GPU needed — see NEXT_LORA_PLACEMENT.md §3 for
+# the full derivation): the actual `nexar-ai/BADAS-Open` HF source is readable without
+# gating. `VJEPAModel.load()` builds its processor via `AutoVideoProcessor.from_pretrained
+# (model_name)` with NO img_size argument at all — `img_size=224` (the GitHub wrapper's
+# constructor default) only reaches a *fallback* transform path this scorer never uses.
+# Loaded `facebook/vjepa2-vitl-fpc16-256-ssv2`'s real processor directly (public Meta
+# model) and ran it on 16 dummy 1280x720 frames -> measured
+# `pixel_values_videos.shape == (1, 16, 3, 256, 256)`. **img_size is confirmed 256, not
+# 224** - the value below is dead AND wrong; the comment above it was always correct.
+#
+# The model's own AutoConfig gives patch_size=16, tubelet_size=2, which on a
+# (1,16,3,256,256) input mathematically forces 8 temporal groups x 16x16 spatial =
+# **2048 tokens** - exactly BADAS's own documented "2048 patches x 1024 dim". This
+# derivation is now STRONG for 2048, but this project's own 2026-08-13 pod-side runtime
+# hook (semsup_common.py) measured **2560** on the actual loaded badas_open.pth
+# checkpoint - 2560/2048=1.25, not a clean ratio. Two readings remain until a fresh pod
+# check: the old 2560 measurement was under different conditions than assumed here and
+# 2048 is right, OR BADAS's fine-tuning changed the effective patch grid away from the
+# stock pretrained config (checkable only with real weights, i.e. the pod). Next pod
+# session: re-run `e4_badas_attention_bbox.py --list_modules` AND print `patches.shape`
+# right at semsup_common.py's pre-hook to settle this for real.
 #
 # CONFIRMED 2026-06-24 from badas/core/preprocessing.py on RunPod:
 #   - img_size = 256 (VideoPreprocessor default)
