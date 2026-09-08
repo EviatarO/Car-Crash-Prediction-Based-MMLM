@@ -403,7 +403,9 @@ def main():
     print(f"  -----------------------------------------")
     print(f"  Mean score (pos)  : {metrics['mean_score_pos']:.4f}")
     print(f"  Mean score (neg)  : {metrics['mean_score_neg']:.4f}")
-    print(f"  Optimal thr/F1    : {metrics['optimal_threshold']:.3f} / {metrics['optimal_f1']:.4f}")
+    # oracle stat: threshold fit on this SAME array, not an achievable operating
+    # point - see metrics_core.py's docstring / project review 2026-09-06 §4.4
+    print(f"  Oracle thr/F1 (same split): {metrics['optimal_threshold']:.3f} / {metrics['optimal_f1']:.4f}")
 
     if group_metrics:
         print(f"\n  AP by group (time before event):")

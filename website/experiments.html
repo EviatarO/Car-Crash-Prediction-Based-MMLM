@@ -120,6 +120,7 @@
          threshold — that is a calibration difference, not a better model, and it is
          visible here in a way an accuracy number hides.</p>
       <div class="chartgrid four" id="distGrid"></div>
+      <div class="legend" id="distLegend"></div>
       <p class="note" id="distNote"></p>
     </div>
 
@@ -402,9 +403,10 @@ function renderDetail(key){
     <h2>Run configuration</h2>
     ${a.hyper ? `<p class="lede small">Source: <code>${esc(a.hyper.source)}</code></p>
       <div class="table-wrap"><table class="mini kv">
-        <thead><tr><th>argument</th><th>value</th></tr></thead>
-        <tbody>${a.hyper.rows.map(([k, v]) =>
+        <thead><tr><th>argument</th><th>what it does</th><th>value</th></tr></thead>
+        <tbody>${a.hyper.rows.map(([k, d, v]) =>
           `<tr><td><code>--${esc(k.replace(/_/g, "-"))}</code></td>
+               <td class="hpdesc">${esc(d)}</td>
                <td class="num">${esc(v)}</td></tr>`).join("")}</tbody>
       </table></div>` : ""}
     ${noteHTML(a.hyper_note, a.hyper ? "flat" : "warn")}
@@ -714,13 +716,15 @@ function colSpec(name, ds){
               get: r => parseInt(r.video_id, 10), cell: r => esc(r.video_id)};
     case "window":
       return {key: name, label: "Horizon", type: "select", get: r => r.window,
-              cell: r => r.window
-                ? esc(prettyWindow(r.window))
-                : '<span class="dim" title="no event in this clip, so no time-to-event">—</span>',
+              cell: r => r.window ? esc(prettyWindow(r.window)) : '<span class="dim">—</span>',
               opts: [["", "All"], ...distinct("window").map(v => [v, prettyWindow(v)])]};
     case "split":
       return {key: name, label: "Split", type: "select", get: r => r.split,
               opts: [["", "All"], ...distinct("split").map(v => [v, v])]};
+    case "pool_split":
+      // a second, DIFFERENT partition of the same rows - see the dataset note
+      return {key: name, label: "Pool split", type: "select", get: r => r.pool_split,
+              opts: [["", "All"], ...distinct("pool_split").map(v => [v, v])]};
     case "mined_failure":
       return {key: name, label: "Mined failure", type: "select",
               get: r => String(r.mined_failure),
@@ -740,12 +744,53 @@ function colSpec(name, ds){
       return {key: name, label: name, type: "text", get: r => r[name]};
   }
 }
+/* Verdict: is each selected arm right on this clip, at threshold 0.5?
+
+   Filtered by TWO controls in one cell - the verdict itself and which arm it applies
+   to. Scope "All arms" means EVERY selected arm must satisfy the verdict, so
+   "correct + All arms" is "they all got this one right" and "wrong + All arms" is
+   "they all missed it". A named arm scopes it to that arm alone.
+
+   The cell shows one mark per arm in selection order, so agreement is readable without
+   comparing three score columns by eye; `get` returns the COUNT of correct arms, which
+   makes sorting the column run from all-right to all-wrong. */
+function verdictCol(ds){
+  const names = cmpArms.map(a => armLabel(ds, a)).join(" · ");
+  return {
+    key: "verdict", label: "Verdict", type: "verdict",
+    get: r => cmpArms.reduce((n, a) => n + (isCorrect(r, a) === true ? 1 : 0), 0),
+    cell: r => `<span class="vmarks" title="${esc(names)}">` + cmpArms.map(a => {
+      const v = isCorrect(r, a);
+      if (v === null) return '<i class="vm na">·</i>';
+      return `<i class="vm ${v ? "ok" : "no"}">${v ? "✓" : "✗"}</i>`;
+    }).join("") + "</span>",
+  };
+}
+
+/* cmpColumns() is called from cmpPasses() and cmpRowHTML() - once PER ROW, and
+   cmpRenderBody() runs on every filter-input keystroke. Building it used to rescan
+   colSpec()'s distinct(key) (a full ds.rows.map+Set+sort) for every select column,
+   on every one of those calls - on pool1761 (1,761 rows, 3 select columns) that is
+   roughly 19M array ops per keystroke. Memoized on the only three inputs the column
+   SET depends on: which dataset, which arms, and whether captions are shown. Project
+   review 2026-09-06 §5.6. */
+let _cmpColumnsCache = null, _cmpColumnsKey = "";
 function cmpColumns(){
+  const k = cmpDs + "|" + cmpArms.join(",") + "|" + showCaptions;
+  if (k === _cmpColumnsKey && _cmpColumnsCache) return _cmpColumnsCache;
+  _cmpColumnsKey = k;
+  _cmpColumnsCache = buildCmpColumns();
+  return _cmpColumnsCache;
+}
+
+function buildCmpColumns(){
   const ds = dsOf();
   const cols = [{key: "clip", label: "Clip"}];
   ds.columns
     .filter(c => showCaptions || !c.startsWith("caption_"))
     .forEach(c => cols.push(colSpec(c, ds)));
+  // `gt` is last in every dataset's column list, so this lands right after it.
+  if (cmpArms.length) cols.push(verdictCol(ds));
   cmpArms.forEach((a, i) => cols.push({
     key: "arm:" + a, label: armLabel(ds, a), type: "num", arm: a,
     get: r => (r.scores[a] === undefined ? null : r.scores[a]),
@@ -792,6 +837,16 @@ function cmpColumns(){
 function cmpPasses(r){
   for (const c of cmpColumns()){
     if (c.key === "clip") continue;
+    if (c.type === "verdict"){
+      const vf = cmpFilters.verdict || {};
+      if (!vf.v) continue;
+      const want = vf.v === "correct";
+      const arms = vf.scope ? [vf.scope] : cmpArms;
+      const vals = arms.map(a => isCorrect(r, a)).filter(x => x !== null);
+      // a clip no selected arm scored cannot satisfy either verdict
+      if (!vals.length || !vals.every(x => x === want)) return false;
+      continue;
+    }
     const f = cmpFilters[c.key];
     if (f === undefined || f === "" || f === null) continue;
     const v = c.get(r);
@@ -827,8 +882,14 @@ function cmpVisible(){
 function cmpRowHTML(r){
   const ds = dsOf();
   const clip = CLIP_INDEX[ds.clip_split].get(r.video_id);
+  // data-key is the row's own unique key (frames_dir on the training pools, where a
+  // clip contributes up to 3 windows - video_id alone is NOT unique there). data-id
+  // stays video_id, still needed to look up the shared per-CLIP metadata (thumb/event
+  // time) from CLIP_INDEX. Project review 2026-09-06 §5.1: looking the row up by
+  // video_id alone opened a DIFFERENT window's row on 1,183/1,761 pool1761 rows and
+  // 145/321 a1fail321 rows (any row past the first window of a multi-window clip).
   const thumb = clip && !clip.video_missing
-    ? `<a class="thumb" data-id="${esc(r.video_id)}"><img loading="lazy" src="${esc(clip.thumb)}" alt="">
+    ? `<a class="thumb" data-key="${esc(r.key)}" data-id="${esc(r.video_id)}"><img loading="lazy" src="${esc(clip.thumb)}" alt="">
          <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span></a>`
     : `<span class="dim">no video</span>`;
   return `<tr><td>${thumb}</td>` +
@@ -850,6 +911,21 @@ function cmpRenderHead(){
              data-col="${esc(c.key)}">${esc(c.label)}<span class="caret"></span></th>`).join("")}</tr>
      <tr class="filter-row">${cols.map(c => {
        if (c.key === "clip") return "<th></th>";
+       if (c.type === "verdict"){
+         const vf = cmpFilters.verdict || {};
+         const ds2 = dsOf();
+         return `<th><span class="range">
+           <select data-col="verdict" data-part="v">
+             <option value="">All</option>
+             <option value="correct"${vf.v === "correct" ? " selected" : ""}>&#10003; correct</option>
+             <option value="wrong"${vf.v === "wrong" ? " selected" : ""}>&#10007; wrong</option>
+           </select>
+           <select data-col="verdict" data-part="scope">
+             <option value="">All arms</option>
+             ${cmpArms.map(a => `<option value="${esc(a)}"${vf.scope === a ? " selected" : ""}>${esc(armLabel(ds2, a))}</option>`).join("")}
+           </select>
+         </span></th>`;
+       }
        if (c.type === "select"){
          return `<th><select data-col="${esc(c.key)}">${
            c.opts.map(([v, l]) => `<option value="${esc(v)}"${cmpFilters[c.key] === v ? " selected" : ""}>${esc(l)}</option>`).join("")
@@ -877,8 +953,13 @@ function cmpRenderHead(){
     if (cmpSort === key) th.classList.add(cmpDir === 1 ? "sort-asc" : "sort-desc");
     cmpRenderBody();
   }));
-  head.querySelectorAll("select[data-col]").forEach(s => s.addEventListener("change", () => {
-    cmpFilters[s.dataset.col] = s.value;
+  head.querySelectorAll("select[data-col]").forEach(sel => sel.addEventListener("change", () => {
+    if (sel.dataset.part){                     // the verdict cell holds two selects
+      cmpFilters.verdict = Object.assign({v: "", scope: ""}, cmpFilters.verdict);
+      cmpFilters.verdict[sel.dataset.part] = sel.value;
+    } else {
+      cmpFilters[sel.dataset.col] = sel.value;
+    }
     cmpRenderBody();
   }));
   head.querySelectorAll("input[data-col]").forEach(inp => inp.addEventListener("input", () => {
@@ -1033,6 +1114,12 @@ function renderDist(rows){
       })),
     });
   });
+  // One legend for the whole grid rather than four identical ones - the panels share
+  // a colour assignment, so repeating it per panel is noise.
+  const lg = document.getElementById("distLegend");
+  lg.innerHTML = cmpArms.map((a, k) =>
+    `<span><i style="background:${CHART_COLORS[k]}"></i>${esc(armLabel(ds, a))}</span>`
+  ).join("");
   document.getElementById("distNote").textContent =
     "Each bucket holds a single class, so a reliability curve is undefined per panel - " +
     "that needs both classes. The tick on the axis is the arm's mean score in the " +
@@ -1160,7 +1247,11 @@ document.getElementById("cmpBody").addEventListener("click", e => {
   const th = e.target.closest(".thumb");
   if (!th) return;
   const ds = dsOf();
-  const row = ds.rows.find(r => r.video_id === th.dataset.id);
+  // Look up by data-key (the row's own unique key), NOT data-id/video_id - a clip
+  // contributes up to 3 windows on the training pools, and video_id alone resolves to
+  // whichever window .find() hits first, not the one that was actually clicked. The
+  // shared per-clip metadata (thumbnail/event time) legitimately keys on video_id.
+  const row = ds.rows.find(r => r.key === th.dataset.key);
   const clip = CLIP_INDEX[ds.clip_split].get(th.dataset.id);
   if (!row || !clip) return;
   const bits = [ds.clip_split.toUpperCase(), row.gt === "YES" ? "POSITIVE" : "NEGATIVE"];
@@ -1177,6 +1268,8 @@ document.getElementById("cmpBody").addEventListener("click", e => {
   player.open(clip, {
     title: `#${row.video_id}`, meta: bits.join("  ·  "),
     caption: row.caption_V12 || row.caption_V10 || "",
+    mode: ds.clip_split === "test" ? "test" : "train",
+    horizon: row.window,          // MID-4/-8/-10 anchors a negative's playback window
   });
 });
 

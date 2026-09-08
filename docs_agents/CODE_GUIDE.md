@@ -338,7 +338,7 @@ from "the experiment was executed wrong". That instrumentation is most of what y
 | Term | Meaning |
 |---|---|
 | **clip / video** | one Nexar dashcam video, identified by `video_id` |
-| **window** | 16 consecutive frames cut from a clip at a given time offset |
+| **window** | 16 frames cut from a clip at a given time offset, **sampled every 4th source frame** (stride 4 at ~30fps native ≈ 7.5fps effective), spanning ~2s of source video - NOT 16 back-to-back frames. Corrected 2026-09-08: this table previously said "consecutive"; the implementation (`WINDOW=16, STRIDE=4` in every extraction script, e.g. `semsup_extract_promptbakeoff_frames.py:96-97`) was always correct - only this doc line was wrong. |
 | **TTE** | time-to-event: seconds *before* the collision (`TTE_0.5/1.0/1.5`) |
 | **MID-n** | for negatives: offset from the clip midpoint (no event exists to count down to) |
 | **A clip is not a window** | 1,761 windows come from 1,107 unique clips. Splitting by row leaks. |

@@ -15,6 +15,32 @@ model:
   use_official_loader: true           # badas_loader.py from the HF repo
 
 # ── Preprocessing ────────────────────────────────────────────────────────────
+# ⚠️ DEAD CONFIG, confirmed 2026-09-06/08 (project review §3.4/§6). The real scoring
+# path is e4_stageA_badas_open_eval.py::preprocess_clip(vjepa, paths) — its signature
+# takes NO cfg argument at all. It passes only `videos=<frames>` and
+# `return_tensors="pt"` to vjepa.processor (the HF AutoVideoProcessor); img_size,
+# num_frames, target_fps, norm_mean/norm_std below are NEVER READ on the actual
+# scoring path — only num_frames is read, and only inside dry_run() as a
+# warn-only mismatch check (never enforced). Whatever the processor's own default
+# resolution is is what actually runs — unmeasured as of this writing.
+#
+# The 224-vs-256 contradiction between the comment below and the `img_size:` value is
+# INHERITED, not a local typo: Nexar's own sources disagree with each other. The
+# BADAS-2.0 paper (arXiv 2604.05767) and the nexar-ai/BADAS-Open HF model card both
+# state 256x256 (HF card additionally states "2048 patches x 1024 dim"); the public
+# github.com/getnexar/BADAS-Open inference wrapper's `VJEPAModel(img_size=224)`
+# constructor default says 224. This repo measures **2560** patch tokens at
+# runtime — 25% more than BADAS's own documented 2048 — so the real resolution this
+# scorer runs at is an open, measurable question, not yet settled. See
+# NEXT_LORA_PLACEMENT.md and the 2026-09-06 project review §3.4 for the full
+# derivation (current best hypothesis: 8 temporal groups x 16x20 spatial = 2560,
+# i.e. a 256x320 frame — favored over 10x(16x16) because the temporal factor is
+# pinned at 8 = 16 frames / tubelet 2, and 8x16x16=2048 matches BADAS's own count
+# exactly). Settle with a runtime shape print
+# (`print(preprocess_clip(vjepa, paths).shape)`) or
+# `e4_badas_attention_bbox.py --list_modules` next time the pod is up — do NOT
+# "fix" the values below without that measurement; either 224 or 256 could be wrong.
+#
 # CONFIRMED 2026-06-24 from badas/core/preprocessing.py on RunPod:
 #   - img_size = 256 (VideoPreprocessor default)
 #   - resize = squash (cv2.resize to (256,256), no crop)

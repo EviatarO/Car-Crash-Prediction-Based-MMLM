@@ -87,7 +87,7 @@ def main():
     per = m.get("per_tte_ap", {})
     print(f"\n[gate] Stage-A encoder + FROZEN crash head, n_test={len(yt)}")
     print(f"       test_AP={m['ap']}  AUC={m['auc_roc']}  F1={m['f1']} "
-          f"(F1*={m['f1_optimal']}@{m['optimal_threshold']})")
+          f"(F1@oracle-thr(same split)={m['f1_optimal']}@{m['optimal_threshold']})")
     print(f"       per-TTE AP: " + "  ".join(f"{k}={v['ap']}(n={v['n']})" for k, v in per.items()))
     print(f"\n[reference] A0 frozen baseline: test_AP=0.853  AUC=0.864")
     print(f"[reference] A1_1761 control:     test_AP=0.900  AUC=0.904")

@@ -46,7 +46,19 @@ def metrics_from_arrays(y_true, y_score, groups=None, threshold: float = 0.5,
                         ece_bins: int = 10) -> dict:
     """Self-contained metric dict from raw arrays. Includes everything the E3
     metric table asks for. JSON-safe: NaN metrics (single-class splits) become
-    None rather than NaN."""
+    None rather than NaN.
+
+    Also returns n_positive/n_negative/n_total - use these to compute the
+    prevalence floor (n_positive/n_total) beside any AP you report. A
+    below-floor AP is not merely "bad", it means the selection/ranking signal
+    is worse than guessing the majority class - flag it, don't just print it
+    (see semsup_train.py's WARN on val_ap < prevalence, added 2026-09-08 per
+    the project review, §4.3: on the a1fail321 pool the selector ran at ~0.20
+    against a 0.333 floor for an entire 10-epoch run with nothing flagging it).
+
+    f1_optimal/optimal_threshold are an ORACLE statistic (threshold fit on the
+    same array being scored) - do not present them as an achievable operating
+    point without saying so."""
     y_true = np.asarray(y_true).astype(int)
     y_score = np.asarray(y_score).astype(float)
     y_pred = (y_score >= threshold).astype(int)
@@ -70,6 +82,13 @@ def metrics_from_arrays(y_true, y_score, groups=None, threshold: float = 0.5,
     auc = float(roc_auc_score(y_true, y_score))          if both else float("nan")
 
     if both:
+        # NOTE (project review 2026-09-06, §4.4): opt_thr/opt_f1 are fit on the SAME
+        # array being scored - an oracle statistic, not an achievable operating point.
+        # Keep the "f1_optimal"/"optimal_threshold" key names for backward compat with
+        # every historical test_summary.json/metrics_epNN.json on disk, but any NEW
+        # display of these values should be labelled "F1@oracle-thr(same split)" or
+        # similar, never bare "F1*" or "best F1" - see semsup_train.py/p1_stageA_gate.py
+        # print statements for the corrected phrasing.
         p_arr, r_arr, thr = precision_recall_curve(y_true, y_score)
         f1_arr = np.where((p_arr + r_arr) > 0, 2 * p_arr * r_arr / (p_arr + r_arr), 0.0)
         bi = int(np.argmax(f1_arr[:-1])) if len(f1_arr) > 1 else 0

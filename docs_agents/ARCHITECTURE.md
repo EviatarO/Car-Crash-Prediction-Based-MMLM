@@ -338,10 +338,31 @@ the student already sees, so semantic supervision was never adding new informati
 reorganization pressure the frozen crash head's fixed linear readout is largely blind to.
 
 `score_checkpoints_on_test.py` (new script): loads BADAS once, swaps LoRA adapters between
-checkpoints for speed. Uses `softmax(logits)[0,1]` with **no `/2.0` divisor**, unlike
-`e4_stageA_badas_open_eval.py`'s published-scorer convention — confirmed this does not affect
-AP/AUC or the confusion matrix at threshold 0.5 (dividing logits by a constant is monotone,
-preserving the 0.5 crossing); it would only matter for calibration metrics at other thresholds.
+checkpoints for speed. Uses `softmax(logits/temperature)[0,1]` (`--temperature`, default 1.0
+— no `/2.0`), matching `semsup_train.py`'s own scorer, unlike `e4_stageA_badas_open_eval.py`'s
+published A0-scorer convention (T=2.0) — confirmed via direct comparison (§ below) that
+temperature does not affect AP/AUC or the confusion matrix at threshold 0.5 (dividing logits
+by a constant is monotone, preserving the 0.5 crossing); it DOES move Brier/ECE, so never
+compare calibration metrics across two runs at different `--temperature` (project review
+2026-09-06 §4.5 — comparing A0's published T=2 Brier/ECE against every other arm's T=1 values
+inverts the calibration ranking, even though AP/AUC/CM are bit-identical).
+
+**⚠️ Corrected 2026-09-08 — the `/2.0` divisor does NOT explain the A1-vs-A1 scoring gap.**
+An earlier version of this doc (and of `EXPERIMENTS.md`) attributed the difference between
+`a1_1761/test_results_ep04.jsonl` and `a1fail321/test_scores/A1.jsonl` — the SAME checkpoint
+scored on the SAME 677 clips by two different runs of this script — to the temperature
+convention. That is wrong on inspection: both files come from divisor-free scorers
+(`semsup_train.py:1199` and `score_checkpoints_on_test.py` are both bare
+`softmax(logits)[0,1]`), and a real `/2.0` would force every score to exactly 0.5, which is
+not what the two files show. The actual, measured gap: **677/677 clips differ** (mean |Δ|
+0.0078, max 0.0973, 5 clips flip the 0.5 decision, ΔAP 0.0009 — the same size as the headline
+V12-vs-v12shuf effect). Zero-centred (signed mean +0.00118, median +0.00001), consistent with
+**unmanaged GPU-inference nondeterminism** (no `torch.use_deterministic_algorithms`/
+`cudnn.deterministic` was set in either scorer at the time), not a systematic scoring-formula
+difference. See `PROJECT_STATE.md`'s "Measurement integrity" note and the 2026-09-06 project
+review §3.1 for the full derivation. `--deterministic` (default on) was added to
+`semsup_train.py` 2026-09-08 to close this; `score_checkpoints_on_test.py` should get the same
+flag before its next real GPU use.
 
 ## `select_a1fail321.py` (new) and `build_a1fail321_comparison.py` (new)
 `select_a1fail321.py`: mines A0/A1's own threshold-0.5 failures from the 1,761-pool into the

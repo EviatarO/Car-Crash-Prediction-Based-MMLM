@@ -114,6 +114,7 @@
         <div class="m"><div class="k">Time of event</div><div class="v" id="scEvent">–</div></div>
         <div class="m"><div class="k">Time of alert</div><div class="v" id="scAlert">–</div></div>
         <div class="m"><div class="k">Response time</div><div class="v" id="scResp">–</div></div>
+        <div class="m"><div class="k">Horizon</div><div class="v" id="scHorizon">–</div></div>
       </div>
     </div>
   </div>
@@ -192,6 +193,7 @@
 <script src="landing_data.js"></script>
 <script src="assets/plexus.js"></script>
 <script src="assets/arch.js"></script>
+<script src="assets/player.js"></script>
 <script>
 "use strict";
 const D = window.LANDING_DATA;
@@ -201,13 +203,12 @@ initPlexus(document.getElementById("plexus"));
 (function results(){
   // Render a copy in explicit timeline order: A0 -> A1 -> V12.
   const body = document.getElementById("mtableBody");
-  const fallbackOrder = {A0: 0, A1: 1, v12: 2};
-  const timeline = [...D.metrics].sort((a, b) =>
-    (a.timeline_order ?? fallbackOrder[a.arm]) -
-    (b.timeline_order ?? fallbackOrder[b.arm]));
+  // Order comes from the data (`timeline_order`), never a hard-coded arm list - with ten
+  // arms a missing entry used to sort as `undefined` and silently scramble the table.
+  const timeline = [...D.metrics].sort((a, b) => a.timeline_order - b.timeline_order);
   const bestAP = Math.max(...timeline.map(r => r.ap));
   body.innerHTML = timeline.map(r => `<tr${r.ap === bestAP ? ' class="ap-best-row"' : ''}>
-    <td>${r.arm === "v12" ? "V12 · Semantic" : r.label}</td>
+    <td>${r.label}</td>
     <td>${r.tp}</td><td>${r.fn}</td><td>${r.fp}</td><td>${r.tn}</td>
     <td>${r.precision.toFixed(4)}</td><td>${r.recall.toFixed(4)}</td>
     <td>${r.f1.toFixed(4)}</td><td>${r.accuracy.toFixed(4)}</td>
@@ -270,6 +271,13 @@ function loadShowcase(clip){
     clip.time_of_event !== null ? clip.time_of_event.toFixed(3) + "s" : "–";
   document.getElementById("scAlert").textContent =
     clip.time_of_alert !== null ? clip.time_of_alert.toFixed(3) + "s" : "–";
+  // The sampling horizon this window was cut at. Positives read TTE_0.5/1.0/1.5 (time
+  // before the event); negatives read MID-4/-8/-10 (offset from the clip midpoint), so
+  // the field is a horizon, not always a time-to-event - hence the neutral label.
+  document.getElementById("scHorizon").textContent = clip.horizon_label
+    ? clip.horizon_label.replace("TTE_", "TTE ").replace(/^MID-(\d+)$/, "MID \u2212$1s")
+        + (clip.horizon_label.startsWith("TTE_") ? "s" : "")
+    : "–";
   document.getElementById("scResp").textContent =
     clip.response_time !== null ? clip.response_time.toFixed(3) + "s" : "–";
   document.getElementById("scCaption").textContent = clip.caption;
@@ -281,11 +289,14 @@ scVideo.addEventListener("loadedmetadata", () => {
   if (!scCur) return;
   const c = scCur.clip, dur = scVideo.duration;
   if (c.time_of_event !== null){
+    scCur.anchor   = c.time_of_event;
     scCur.segStart = Math.max(0, c.time_of_event - 5);
     scCur.segEnd   = Math.min(dur, c.time_of_event + 2);
   } else {
-    scCur.segStart = 0;
-    scCur.segEnd   = Math.min(dur, dur / 2 + 2);
+    // negatives anchor on their sampled MID window, same rule as the lightbox player
+    scCur.anchor   = negAnchor(dur, c.horizon_label);
+    scCur.segStart = Math.max(0, scCur.anchor - 5);
+    scCur.segEnd   = Math.min(dur, scCur.anchor + 2);
   }
   document.getElementById("scSegInfo").textContent =
     `segment ${scCur.segStart.toFixed(2)}s → ${scCur.segEnd.toFixed(2)}s of ${dur.toFixed(2)}s  ·  loops automatically`;
@@ -325,9 +336,19 @@ function scTick(){
       sub.textContent = "after event";
     }
   } else {
-    document.getElementById("scTteLbl").textContent = "TN — NO EVENT";
-    document.getElementById("scTteVal").textContent = t.toFixed(2) + "s";
-    document.getElementById("scTteVal").className = "val";
+    const left = (scCur.anchor === null || scCur.anchor === undefined ? 0 : scCur.anchor) - t;
+    document.getElementById("scTteLbl").textContent = "TIME TO WINDOW";
+    const val = document.getElementById("scTteVal");
+    const sub = document.getElementById("scTteSub");
+    if (left >= 0){
+      val.textContent = left.toFixed(2) + "s";
+      val.className = "val" + (left < 1 ? " warn" : "");
+      sub.textContent = c.horizon_label || "";
+    } else {
+      val.textContent = "+" + (-left).toFixed(2) + "s";
+      val.className = "val after";
+      sub.textContent = "after window";
+    }
   }
   const inWin = c.time_of_alert !== null && c.time_of_event !== null &&
                 t > c.time_of_alert && t < c.time_of_event;

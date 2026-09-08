@@ -10,12 +10,22 @@ WHY A SEPARATE SCRIPT: semsup_train.py test-scores its kept checkpoints only whe
 test-scored. This scores them after the fact without retraining.
 
 SOFTMAX CONVENTION (matters, and is easy to get wrong here): this uses
-softmax(logits)[0,1] with NO /2.0 divisor - identical to semsup_train.py and
-score_arms_on_pool1761.py. e4_stageA_badas_open_eval.py DOES divide by 2.0 (the
-published-scorer convention). For AP/AUC the difference is irrelevant - dividing
-logits by a constant is a monotone transform and rank metrics are invariant to it -
-but it DOES move acc@0.5 and any other thresholded metric, so those are only
-comparable against numbers produced by this same scorer.
+softmax(logits/--temperature)[0,1], default temperature=1.0 - identical to
+semsup_train.py and score_arms_on_pool1761.py at the default. e4_stageA_badas_open_eval.py
+uses temperature=2.0 (the published-scorer convention; pass --temperature 2.0 here for a
+directly A0-comparable run). For AP/AUC/accuracy@0.5/the confusion matrix the difference is
+irrelevant - dividing logits by a constant is a monotone transform and those are all
+invariant to it - but it DOES move Brier/ECE (calibration metrics), which are NOT invariant
+to temperature. Project review (2026-09-06 §4.5): publishing A0's Brier/ECE (T=2) next to
+every other arm's (T=1) INVERTS the calibration ranking (A0's ECE moves 0.1528 -> 0.1920,
+i.e. worse than A1, not better) even though AP/AUC/CM are bit-identical across the two
+conventions. Never compare Brier/ECE across runs at different --temperature.
+
+--unfreeze-head checkpoints (project review §4.1): if a lora_adapter/'s sibling
+epoch_XX/head_state.pt exists, it MUST be passed via --head-states NAME=path or this
+script hard-fails - scoring an unfrozen-head checkpoint against the ORIGINAL frozen head
+would silently produce numbers for a model that was never actually trained (peft's
+save_pretrained() persists only the LoRA delta, never the head).
 
 Loads BADAS ONCE and swaps adapters between checkpoints (~3 min/checkpoint of actual
 scoring vs ~2 min of model load), so scoring N checkpoints costs far less than N runs.
@@ -27,6 +37,14 @@ Usage (on the pod):
       --adapters A1=/workspace/semsup/a1_1761/epoch_04/lora_adapter \
                  v12=/workspace/MMLM_AI/outputs/a1fail321/results/v12/fold_01/epoch_10/lora_adapter \
       --out-dir /workspace/MMLM_AI/outputs/a1fail321/test_scores
+
+  # scoring an --unfreeze-head checkpoint:
+  python3 score_checkpoints_on_test.py ... \
+      --adapters vision=/workspace/semtest200/vision/epoch_08/lora_adapter \
+      --head-states vision=/workspace/semtest200/vision/epoch_08/head_state.pt
+
+  # an A0-comparable (T=2) run, for calibration metrics comparable to the published baseline:
+  python3 score_checkpoints_on_test.py ... --temperature 2.0
 """
 import argparse
 import json
@@ -40,6 +58,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 
 from semsup_common import TrainableBadasWrapper  # noqa: E402
+from metrics_core import metrics_from_arrays  # noqa: E402
+
+# The two module-name substrings that make up the crash head - see
+# semsup_common.py's --unfreeze-head comment. Used only to snapshot/restore the
+# ORIGINAL frozen head weights between checkpoints scored in the same process, so
+# an --unfreeze-head arm never leaks its mutated head into the next arm scored.
+HEAD_SUBSTRINGS = ("temporal_processor", "classifier")
 
 
 def frame_paths_for(record, frames_root, pattern):
@@ -58,9 +83,45 @@ def main():
     ap.add_argument("--adapters", nargs="+", required=True,
                      help="one or more NAME=/path/to/lora_adapter. Use NAME=NONE to score "
                           "the frozen no-adapter baseline.")
+    ap.add_argument("--head-states", nargs="+", default=[],
+                     help="one or more NAME=/path/to/head_state.pt, matching a NAME in "
+                          "--adapters. REQUIRED for any arm whose lora_adapter/ has a "
+                          "sibling head_state.pt on disk (i.e. it was trained with "
+                          "--unfreeze-head) - this script hard-fails rather than silently "
+                          "score that checkpoint against the original frozen head.")
+    ap.add_argument("--temperature", type=float, default=1.0,
+                     help="softmax(logits/temperature). Default 1.0 matches "
+                          "semsup_train.py/score_arms_on_pool1761.py. Pass 2.0 to match "
+                          "e4_stageA_badas_open_eval.py's A0 convention - only needed for "
+                          "a directly A0-comparable Brier/ECE; AP/AUC/CM are invariant to "
+                          "this (see module docstring).")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--num-workers", type=int, default=8)
+    ap.add_argument("--deterministic", action="store_true", default=True,
+                     help="torch.use_deterministic_algorithms(True) + "
+                          "cudnn.deterministic=True (default ON). Project review "
+                          "(2026-09-06 §3.1): the SAME checkpoint scored twice through "
+                          "this script on the same 677 clips disagreed on 677/677 of "
+                          "them (max|delta|=0.097, 5 clips flipped the 0.5 boundary, "
+                          "dAP=0.0009) with nothing pinning inference numerics. Pass "
+                          "--no-deterministic to restore the old behavior.")
+    ap.add_argument("--no-deterministic", action="store_false", dest="deterministic")
     args = ap.parse_args()
+
+    if args.deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(True)
+
+    head_state_map = {}
+    for spec in args.head_states:
+        if "=" not in spec:
+            raise SystemExit(f"--head-states entry {spec!r} must be NAME=/path")
+        hname, hpath = spec.split("=", 1)
+        head_state_map[hname] = hpath
 
     import yaml
     cfg = yaml.safe_load(open(args.config))
@@ -88,6 +149,14 @@ def main():
                                    lora_r=16, lora_alpha=32, lora_dropout=0.05)
     badas.nn_model.eval()
 
+    # Snapshot the ORIGINAL frozen head weights before scoring anything, so any arm
+    # scored with --head-states can be restored to the frozen head afterward - without
+    # this, an --unfreeze-head arm's mutated head would silently leak into the NEXT
+    # arm scored in the same process if that arm has no head_state.pt of its own.
+    orig_head_sd = {k: v.detach().clone() for k, v in badas.nn_model.state_dict().items()
+                     if any(sub in k for sub in HEAD_SUBSTRINGS)}
+    print(f"[setup] snapshotted {len(orig_head_sd)} original head-param tensors for restore")
+
     from safetensors.torch import load_file
     from peft.utils import set_peft_model_state_dict
 
@@ -101,6 +170,7 @@ def main():
 
         if path.upper() == "NONE":
             print(f"\n[score] {name}: frozen baseline, no adapter attached")
+            sibling_head = None
         else:
             adapter_path = Path(path)
             sft = (adapter_path / "adapter_model.safetensors") if adapter_path.is_dir() else adapter_path
@@ -110,6 +180,35 @@ def main():
             # previous checkpoint's lora_A/lora_B - no residue carries between arms.
             set_peft_model_state_dict(badas.nn_model, load_file(str(sft)))
             print(f"\n[score] {name}: loaded {sft}")
+            # sibling head_state.pt convention (semsup_train.py writes both under the
+            # same epoch_XX/ dir): adapter_path is .../epoch_XX/lora_adapter, so the
+            # sibling is adapter_path.parent / "head_state.pt".
+            candidate = adapter_path.parent / "head_state.pt" if adapter_path.is_dir() \
+                else adapter_path.parent.parent / "head_state.pt"
+            sibling_head = candidate if candidate.exists() else None
+
+        # --unfreeze-head correctness gate (project review §4.1): hard-fail rather
+        # than silently score against the wrong head.
+        if sibling_head is not None and name not in head_state_map:
+            raise SystemExit(
+                f"{name}: found {sibling_head} next to this adapter (this checkpoint "
+                f"was trained with --unfreeze-head) but no --head-states {name}=... was "
+                f"passed. Scoring it against the ORIGINAL frozen head would silently "
+                f"produce numbers for a model that was never actually trained this way. "
+                f"Pass --head-states {name}={sibling_head} (or, if you deliberately want "
+                f"the frozen-head numbers for this checkpoint, rename/move the sibling "
+                f"head_state.pt out of the way first).")
+        if name in head_state_map:
+            hpath = head_state_map[name]
+            if sibling_head is not None and str(sibling_head) != hpath and Path(hpath).resolve() != sibling_head.resolve():
+                print(f"  [warn] {name}: --head-states path ({hpath}) differs from the "
+                      f"sibling head_state.pt found next to the adapter ({sibling_head}) - "
+                      f"using the explicitly-passed path.")
+            badas.load_head_state(hpath)
+        else:
+            # No head_state for this arm - restore the ORIGINAL frozen head in case a
+            # prior arm in this same process mutated it.
+            badas.nn_model.load_state_dict(orig_head_sd, strict=False)
 
         n_failed, rows = 0, []
         with torch.no_grad():
@@ -121,12 +220,14 @@ def main():
                     print(f"  [warn] skipping {rec.get('video_id')}: {err}")
                     continue
                 logits, _ = badas.forward_clip(clip.to(device))
-                # NO /2.0 - see the convention note in this module's docstring.
-                score = float(torch.softmax(logits, dim=1)[0, 1].item())
+                # See module docstring for the temperature convention (--temperature,
+                # default 1.0 = "no /2.0", matching semsup_train.py's own scorer).
+                score = float(torch.softmax(logits / args.temperature, dim=1)[0, 1].item())
                 rows.append({
                     "arm": name,
                     "video_id": rec["video_id"],
                     "frames_dir": rec.get("frames_dir"),
+                    "group": rec.get("group"),
                     "gt_verdict": "YES" if int(rec[gt_field]) == 1 else "NO",
                     "score": score,
                 })
@@ -138,13 +239,23 @@ def main():
             for r in rows:
                 f.write(json.dumps(r) + "\n")
 
+        # metrics_core.metrics_from_arrays - the SAME function the training pipeline
+        # and the results website use, per the project's single-metric-source rule
+        # (project review §4.5/§B-5: this scorer previously hand-rolled AP/AUC/acc
+        # inline and emitted no CM, no per-TTE, no n_positive/n_negative).
         y = [1 if r["gt_verdict"] == "YES" else 0 for r in rows]
         s = [r["score"] for r in rows]
-        from sklearn.metrics import average_precision_score, roc_auc_score
-        acc = sum(1 for yy, ss in zip(y, s) if (ss >= 0.5) == bool(yy)) / len(y)
-        print(f"  {name}: n={len(rows)}  AP={average_precision_score(y, s):.4f}  "
-              f"AUC={roc_auc_score(y, s):.4f}  acc@0.5={acc:.4f}")
+        g = [r["group"] for r in rows]
+        m = metrics_from_arrays(y, s, groups=g, threshold=0.5)
+        metrics_path = out_dir / f"{name}.metrics.json"
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump({"arm": name, "temperature": args.temperature,
+                       "head_state": head_state_map.get(name), **m}, f, indent=2)
+        print(f"  {name}: n={m['n_total']}  AP={m['ap']}  AUC={m['auc_roc']}  "
+              f"acc@0.5={m['accuracy']}  tp={m['tp']} fn={m['fn']} fp={m['fp']} tn={m['tn']}  "
+              f"Brier={m['brier']}  ECE={m['ece']}  (temperature={args.temperature})")
         print(f"  [wrote] {out_path}")
+        print(f"  [wrote] {metrics_path}")
 
 
 if __name__ == "__main__":

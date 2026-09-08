@@ -4,7 +4,8 @@ build_experiments_data.py
 Generates website/experiments_data.js (window.EXPERIMENTS_DATA) - the per-arm payload
 behind the Experiments page's detail view: description, prompt, dataset composition,
 architecture configuration, hyperparameters, training curves and test results for
-A0, A1, B-v1, B-v2, B-v3, P1, V10 and V12.
+A0, A1, B-v1, B-v2, B-v3, P1 and the four a1fail321 recovery arms (a1cont, V10, V12,
+v12shuf) - ten arms, all scored on the same 677-clip test set.
 
 Every metric comes from student_training/scripts/metrics_core.py::metrics_from_arrays -
 the same function the training pipeline itself uses - so the page cannot disagree with
@@ -26,8 +27,8 @@ WHAT IS DELIBERATELY ABSENT
 Rendered as explicit "not available" notes rather than interpolated:
   - accuracy-vs-epoch and AUC-vs-epoch: `epoch_metrics.jsonl` never logged them for any
     arm. `val_ap` is the per-epoch curve that exists, and is literally the checkpoint
-    selection criterion. For V10/V12 only, per-epoch val accuracy/AUC ARE derived here
-    from their `val_scores_ep*.jsonl` dumps.
+    selection criterion. For the four a1fail321 arms only, per-epoch val accuracy/AUC
+    ARE derived here from their `val_scores_ep*.jsonl` dumps.
   - train-split per-example scores: never dumped, so no train ROC / train confusion
     matrix exists for any arm.
   - per-TTE metrics on the TRAINING pools: TTE is perfectly confounded with the label
@@ -60,6 +61,30 @@ THRESHOLD = 0.5
 # metrics_core.py's own mapping - group is an int on the test manifest and every test dump.
 GROUP_LABEL = {0: "tte_0.5s", 1: "tte_1.0s", 2: "tte_1.5s"}
 TTE_ORDER = ["tte_0.5s", "tte_1.0s", "tte_1.5s"]
+
+# Expected confusion-matrix values, verified against the source artifacts. Same numbers
+# as build_landing_data.py's EXPECTED dict (kept in sync by hand - the two builders read
+# the same underlying score files, so a real drift trips BOTH pages, not just one).
+#
+# Project review 2026-09-06 §5.2: before this, only 4 of the 10 arms (those with a
+# test_summary.json) had ANY drift protection here, via the f1/recall/specificity gate
+# below - and that gate only fires when cfg["summary"] is set. A0, B-v1, a1cont, V10,
+# V12, v12shuf had ZERO protection: a re-scored or partially-overwritten 677-row dump for
+# any of those six would render new numbers on this page with no assertion catching it,
+# even though build_landing_data.py's pin on the SAME data would have caught it. This
+# dict closes that gap for every arm, not just the four with a summary file.
+EXPECTED_CM = {
+    "A0":      dict(n=677, tp=308, fn=30, fp=130, tn=209),
+    "A1":      dict(n=677, tp=320, fn=18, fp=123, tn=216),
+    "B-v1":    dict(n=677, tp=317, fn=21, fp=130, tn=209),
+    "B-v2":    dict(n=677, tp=285, fn=53, fp=76, tn=263),
+    "B-v3":    dict(n=677, tp=267, fn=71, fp=55, tn=284),
+    "P1":      dict(n=677, tp=278, fn=60, fp=92, tn=247),
+    "a1cont":  dict(n=677, tp=238, fn=100, fp=34, tn=305),
+    "V10":     dict(n=677, tp=253, fn=85, fp=39, tn=300),
+    "V12":     dict(n=677, tp=253, fn=85, fp=39, tn=300),   # build_landing_data.py: "v12"
+    "v12shuf": dict(n=677, tp=244, fn=94, fp=36, tn=303),
+}
 
 
 # --------------------------------------------------------------------------- io helpers
@@ -185,6 +210,40 @@ HYPER_KEYS = [
 ]
 
 
+# One clause each, sized to sit between ARGUMENT and VALUE on a single row. Kept next to
+# HYPER_KEYS so the text travels with the ordering it documents rather than drifting in a
+# separate file.
+HYPER_DESC = {
+    "lora_target_modules": "which Linear layers get an adapter",
+    "lora_r": "adapter rank - the capacity added per layer",
+    "lora_alpha": "adapter scaling; effective LR multiplier is alpha/r",
+    "lora_dropout": "dropout inside the adapter only",
+    "lora_init": "checkpoint the LoRA weights start from (blank = from scratch)",
+    "predictor_init": "checkpoint the semantic Predictor starts from",
+    "crash_weight": "weight on the crash cross-entropy term",
+    "semantic_weight": "lambda on the semantic term; 0 makes this a crash-only arm",
+    "semantic_loss": "how caption and vision embeddings are compared",
+    "infonce_tau_init": "starting temperature of the InfoNCE softmax",
+    "siglip_model": "frozen text encoder that embeds the captions",
+    "captions_path": "caption corpus supervising this run",
+    "bank_captions": "wider corpus used only to add InfoNCE distractors",
+    "lr": "peak learning rate for the trunk/LoRA group",
+    "lr_schedule": "how the learning rate decays after warmup",
+    "warmup_frac": "fraction of training spent warming the LR up",
+    "epochs": "passes over the training pool",
+    "grad_accum": "batches accumulated before an optimizer step",
+    "clip_grad_per_group": "clip LoRA and Predictor on separate budgets, not one shared",
+    "unfreeze_head": "whether the crash head trains too, or stays frozen",
+    "head_lr_mult": "head learning rate as a multiple of the trunk's",
+    "head_lr_schedule": "constant keeps the head's LR flat once the trunk's decays",
+    "early_stop_patience": "epochs without improvement before stopping (0 = never)",
+    "select_by": "metric that picks the reported checkpoint",
+    "keep_top_k": "how many checkpoints are kept and scored",
+    "val_frac": "fraction of clips held out, split by video",
+    "seed": "seed for the split and initialisation",
+}
+
+
 def shorten(v):
     """Long absolute paths are noise in a table; the basename identifies the file."""
     if isinstance(v, str) and ("/" in v or "\\" in v) and not v.startswith("re:"):
@@ -196,7 +255,7 @@ def hyper_rows(args):
     rows = []
     for k in HYPER_KEYS:
         if k in args and args[k] is not None:
-            rows.append([k, str(shorten(args[k]))])
+            rows.append([k, HYPER_DESC.get(k, ""), str(shorten(args[k]))])
     return rows
 
 
@@ -213,6 +272,16 @@ A1FAIL_ARGS = {
     "grad_accum": 8, "unfreeze_head": False, "select_by": "val_ap", "keep_top_k": 10,
     "val_frac": 0.2, "seed": 0,
 }
+
+
+# a1cont is the same launcher recipe with the semantic branch switched off entirely: no
+# caption path, no InfoNCE bank, no Predictor to warm-start. Everything else - the A1
+# epoch-4 init, LR, schedule, epochs, seed - is identical, which is what makes it the
+# controlled floor for the three semantic arms.
+A1FAIL_CRASH_ONLY = {k: v for k, v in A1FAIL_ARGS.items()
+                     if k not in ("predictor_init", "semantic_loss", "infonce_tau_init",
+                                  "siglip_model")}
+A1FAIL_CRASH_ONLY["semantic_weight"] = 0.0
 
 
 # --------------------------------------------------------------------------- arm registry
@@ -368,7 +437,32 @@ ARMS = [
                           (2, E4 / "p1_stageB" / "test_results_ep02.jsonl")],
                 source="e4_vjepa_reason/p1_stageB (epoch 2)")),
 
-    A(key="V10", label="V10 · Failure recovery, GT captions", order=6, family="a1fail321",
+    A(key="a1cont", label="A1-cont · Recovery control (no captions)", order=6,
+      family="a1fail321",
+      tagline="The same weights and the same 321 windows, with the caption term switched off.",
+      hypothesis="None of its own - this arm exists to make the others interpretable. If a "
+                 "semantic arm beats it, the caption term did something; if it matches, "
+                 "whatever the semantic arms gained came from continued crash training on "
+                 "the failure pool, not from language.",
+      aim="Be the controlled floor. Same A1 epoch-4 initialisation, same pool, same LR and "
+          "schedule and seed as V10/V12/V12-shuffled - the only difference is that no "
+          "caption ever reaches a gradient.",
+      method="Identical to the recovery recipe with --semantic-weight 0: no caption corpus, "
+             "no InfoNCE bank, no Predictor. Crash cross-entropy only, crash head frozen.",
+      prompt=None,
+      prompt_note="No language supervision in this arm - that is the whole point of it.",
+      pool="a1fail321", train_dir=A1F / "results" / "a1cont" / "fold_01",
+      arch=dict(semantic=False, loss=True, state={},
+                note="LoRA initialized from A1 epoch 4; no semantic branch is constructed"),
+      hyper=A1FAIL_CRASH_ONLY,
+      hyper_note="Transcribed from run_a1fail321_4arms.sh (the crash-only variant) - this "
+                 "run's train_metrics.json was never written, so the checked-in launcher "
+                 "is the record.",
+      test=dict(path=A1F / "test_scores" / "a1cont_ep10.jsonl", gt_key="gt_verdict",
+                summary=None, epoch=10,
+                source="a1fail321/test_scores/a1cont_ep10.jsonl (epoch 10)")),
+
+    A(key="V10", label="V10 · Failure recovery, GT captions", order=7, family="a1fail321",
       tagline="Start from A1's weights and train only on the 321 windows A1 gets wrong.",
       hypothesis="Semantic supervision failed at pool scale because the signal was "
                  "diluted across mostly-easy windows. Concentrated on A1's own failures — "
@@ -388,12 +482,11 @@ ARMS = [
       hyper=A1FAIL_ARGS,
       hyper_note="Transcribed from run_a1fail321_4arms.sh — this run's train_metrics.json "
                  "was never written, so the checked-in launcher is the record.",
-      test=None,
-      test_note="Never scored on the 677-clip test set. Producing it needs a GPU pass with "
-                "score_checkpoints_on_test.py pointed at this arm's epoch-10 LoRA adapter; "
-                "no number is estimated here in the meantime."),
+      test=dict(path=A1F / "test_scores" / "v10_ep10.jsonl", gt_key="gt_verdict",
+                summary=None, epoch=10,
+                source="a1fail321/test_scores/v10_ep10.jsonl (epoch 10)")),
 
-    A(key="V12", label="V12 · Failure recovery, neutral captions", order=7, family="a1fail321",
+    A(key="V12", label="V12 · Failure recovery, neutral captions", order=8, family="a1fail321",
       tagline="The same recovery run on register-neutral captions — the cleanest B-vs-A1 test.",
       hypothesis="Same as V10, on the neutral corpus: with the register leak removed and "
                  "the predictor demonstrably learning, concentrated semantic supervision "
@@ -415,6 +508,34 @@ ARMS = [
       test=dict(path=A1F / "test_scores" / "v12_ep10.jsonl", gt_key="gt_verdict",
                 summary=None, epoch=10,
                 source="a1fail321/test_scores/v12_ep10.jsonl (epoch 10)")),
+
+    A(key="v12shuf", label="V12-shuffled · Caption-content control", order=9,
+      family="a1fail321",
+      tagline="V12 with the captions permuted within class - same words, wrong clips.",
+      hypothesis="If V12's effect comes from what the captions SAY, scrambling which clip "
+                 "each caption belongs to should destroy it. If instead the effect comes "
+                 "from merely having a second loss term - a regulariser that happens to be "
+                 "text-shaped - scrambled captions will perform the same.",
+      aim="Separate caption CONTENT from caption PRESENCE. This is the control that decides "
+          "whether the thesis claim is about language or about auxiliary-loss regularisation, "
+          "and no aggregate metric on V12 alone can answer it.",
+      method="Byte-identical to V12 except the caption file: the same V12 captions permuted "
+             "WITHIN class (YES with YES, NO with NO, enforced as a derangement), so class "
+             "balance and vocabulary are untouched and only the clip-caption pairing is "
+             "destroyed. Same prompt, same weights, same schedule, same seed.",
+      prompt="v12",
+      prompt_note="Same V12 prompt as the real arm - the prompt did not change, the caption "
+                  "ASSIGNMENT did. This is not a different prompt variant.",
+      pool="a1fail321", train_dir=A1F / "results" / "v12shuf" / "fold_01",
+      arch=dict(semantic=True, loss=True, state={},
+                note="identical to V12; only the clip-to-caption pairing is scrambled"),
+      hyper=A1FAIL_ARGS,
+      hyper_note="Transcribed from run_a1fail321_4arms.sh - this run's train_metrics.json "
+                 "was never written, so the checked-in launcher is the record. The only "
+                 "differing argument is --captions-path (the shuffled corpus).",
+      test=dict(path=A1F / "test_scores" / "v12shuf_ep10.jsonl", gt_key="gt_verdict",
+                summary=None, epoch=10,
+                source="a1fail321/test_scores/v12shuf_ep10.jsonl (epoch 10)")),
 ]
 
 
@@ -541,6 +662,18 @@ def test_block(arm, group_by_vid):
     bundle = test_metrics_bundle(y, s, groups)
     m = bundle["all"]["metrics"]
     ap, auc, published = m["ap"], m["auc_roc"], None
+
+    # EVERY arm gets its confusion matrix checked against EXPECTED_CM, not only the four
+    # with a test_summary.json (project review §5.2 - previously six arms had zero drift
+    # protection on this page even though build_landing_data.py pins the same numbers).
+    exp = EXPECTED_CM.get(arm["key"])
+    assert exp is not None, \
+        f"{arm['key']}: no entry in EXPECTED_CM - add one (see build_landing_data.py's " \
+        f"EXPECTED for the paste-ready values) before this arm can ship on the page."
+    got = dict(n=m["n_total"], tp=m["tp"], fn=m["fn"], fp=m["fp"], tn=m["tn"])
+    assert got == exp, \
+        f"{arm['key']}: confusion matrix drifted from the expected/verified values.\n" \
+        f"  expected {exp}\n  got      {got}\n  (source: {cfg['path']})"
 
     if cfg.get("summary"):
         best = json.load(open(cfg["summary"], encoding="utf-8"))["checkpoints"]

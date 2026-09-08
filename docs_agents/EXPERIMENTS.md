@@ -1219,6 +1219,18 @@ metrics at other thresholds). Scored A1 itself through this same scorer as a val
 (reproduced 0.8995/0.9034, matching its documented 0.900/0.904 to 3 decimals -- confirms the
 scorer is trustworthy) and v12's epoch-10 checkpoint:
 
+**⚠️ Corrected 2026-09-08: the 0.8995 vs 0.9000 gap is NOT the temperature convention.**
+`a1_1761/test_results_ep04.jsonl` (0.9000/published) and this section's own A1 validation-check
+score (0.8995) are the SAME checkpoint scored on the SAME 677 clips by two divisor-free scorers
+(`semsup_train.py` and `score_checkpoints_on_test.py` both use bare `softmax(logits)[0,1]`, no
+`/2.0` -- confirmed by reading both scorers directly). Measured directly: 677/677 clips differ
+between the two files (mean |delta| 0.0078, max 0.0973), 5 clips flip the 0.5 decision, and the
+signed mean is +0.00118 (median +0.00001) -- zero-centred noise, not a systematic divisor
+effect, consistent with unmanaged GPU-inference nondeterminism across the two scoring runs
+(neither had `torch.use_deterministic_algorithms` set at the time). `--deterministic` (default
+on) was added to both scorers 2026-09-08 to close this gap going forward. See
+`ARCHITECTURE.md`'s matching correction and the 2026-09-06 project review §3.1.
+
 | arm | n | AP | AUC | acc@0.5 | acc@own-best-threshold |
 |---|---|---|---|---|---|
 | A0 | 677 | 0.8530 | 0.8642 | 0.7637 | 0.8287 (thr 0.68) |
@@ -1263,3 +1275,71 @@ numbers into the deck. Also regenerates `make_arch_figures_2026-08-22.py`'s `fig
 parameterized by `lam`/`out_name` so a different `semantic_weight` can be drawn without
 overwriting the original 0.05-weight figure other decks depend on) -- produced
 `reports/figures/arch_L3_training_a1fail_2026-08-29.png` (lambda=0.2 variant).
+
+## Recovery family on the 677-clip test set — the content-vs-presence control (2026-09-05)
+
+`score_checkpoints_on_test.py`, one BADAS load + three adapter swaps, epoch 10 for all.
+Scores: `outputs/a1fail321/test_scores/{a1cont,v10,v12shuf}_ep10.jsonl`, 677 rows each.
+
+**⚠️ Correction 2026-09-08**: "epoch 10 is each arm's own best `val_ap`" is not quite right --
+re-derived from `epoch_metrics.jsonl` (project review §4.3): a1cont and v12 tie epochs 8/9/10,
+v12shuf's true best is epoch 10, but **v10's best is epoch 9** (val_ap 0.2096 vs epoch 10's
+0.2094) -- the 0.0002 gap is immaterial but the stated justification was inaccurate. Separately,
+these curves move only ~0.01 total across 10 epochs and are tied to 4 decimals across the top 3
+epochs for 3 of 4 arms -- checkpoint selection here is close to arbitrary at this scale.
+
+**⚠️ Measurement-precision caveat 2026-09-08 (project review §3.1) -- READ BEFORE CITING THE
+ORDERING BELOW.** The pipeline's own run-to-run scoring noise is comparable in size to the
+differences this table reports as a ranking: the SAME A1 checkpoint scored twice (this table's
+0.9000 vs `a1_1761/test_results_ep04.jsonl`'s 0.8986/0.8995 depending on source) differs on
+**677/677 clips** (max |delta| 0.097, 5 clips flip the 0.5 decision, dAP 0.0009) -- i.e. a noise
+floor the same size as the V12-vs-v12shuf gap below. **The null itself (no arm meaningfully
+beats a1cont) is not threatened by this** -- an effect at or below the noise floor is exactly
+what a null looks like -- but the specific ORDERING (V10 > V12 > v12shuf > a1cont) is not
+resolvable by this pipeline and should not be read as a ranking until Phase B's bootstrap CIs
+(reusing `paired_bootstrap_ab.py`, not yet run on this family as of this writing) and a measured
+same-scorer noise floor are in hand. `--deterministic` (default on, added 2026-09-08) closes the
+nondeterminism gap for future runs but does not retroactively fix these five already-collected
+numbers.
+
+| arm | captions | AP | AUC | acc@0.5 | TP | FN | FP | TN |
+|---|---|---|---|---|---|---|---|---|
+| A1 (reference) | — | **0.9000** | 0.9042 | 0.7917 | 320 | 18 | 123 | 216 |
+| a1cont | none | 0.8956 | 0.9011 | 0.8021 | 238 | 100 | 34 | 305 |
+| V10 | real (GT-conditioned) | 0.8976 | 0.9033 | 0.8168 | 253 | 85 | 39 | 300 |
+| V12 | real (neutral) | 0.8972 | 0.9027 | 0.8168 | 253 | 85 | 39 | 300 |
+| **v12shuf** | **scrambled within class** | **0.8963** | 0.9017 | 0.8080 | 244 | 94 | 36 | 303 |
+
+**The control lands on top of the treatment.** V12 (real captions) 0.8972 vs v12shuf
+(the same captions permuted within class) 0.8963 — **ΔAP = 0.0009**. The whole
+recovery family spans 0.8956–0.8976, i.e. **0.0020 AP** between "no captions at all"
+and the best captioned arm. Caption *content* contributes nothing measurable on
+held-out data; what little separates these arms is not distinguishable from noise at
+n=677.
+
+**Clip-level agreement is the sharper statement.** Across a1cont / V12 / v12shuf the
+three arms make the *same* call on **657 of 677 clips (97.0%)** — only 20 clips
+disagree at all (6 / 4 / 5 at TTE 0.5s / 1s / 1.5s, 5 among negatives). Of those, no
+clip is uniquely fixed by V12 at any TTE bucket; V12 is uniquely right on 2 negatives,
+a1cont on 2 positives.
+
+**V10 and V12 have IDENTICAL confusion matrices** (253/85/39/300) despite different
+caption corpora — identical decisions at threshold 0.5, differing only in ranking
+(AP 0.8976 vs 0.8972).
+
+This is the test-set confirmation of what the recovery pool already showed: at epoch 10
+on the 61 held-out recovery windows, a1cont, v10, v12 and v12shuf **all** score
+39/61 = 0.6393. Two independent evaluation sets, same conclusion.
+
+**Interpretation.** Combined with the prior mechanism results — B1 (caption info
+survives the 2560→1 pooling at 22× chance), P3 (the semantic gradient reaches the
+pooled representation at least as well as an equal-norm random perturbation, paired CI
+excludes zero) and the near-zero `grad_cos` — the account is now closed on the
+"does the signal arrive" question: **it arrives, it is decodable, and it does not
+help.** A shuffled-caption arm matching the real one is the cleanest available
+evidence that the effect is caption *presence* (a text-shaped auxiliary regulariser),
+not caption *meaning*. Any future claim that language supervision helps this task has
+to beat v12shuf, not A0.
+
+Website: all ten arms now appear in the landing results table, the Cross-Experiment
+Comparison test-set arm list, and the detail view.

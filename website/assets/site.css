@@ -332,7 +332,13 @@ table.mini th{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;
               padding:10px 14px;background:var(--panel-dk);
               border-bottom:1px solid #2a3560;white-space:nowrap;
               position:static;top:auto}
-table.mini th:first-child{text-align:left}
+/* Only the FIRST header row's first cell is a row label. Unscoped, this also matched
+   the first cell of the SECOND header row - "fixed" in the vs-baseline table - which is
+   why that one header was left-aligned while the other three in its group were right. */
+table.mini thead tr:first-child th:first-child{text-align:left}
+/* rowspan headers default to middle, which floats "Bucket"/"N" above the second-row
+   headers they sit beside; bottom puts them on the same baseline. */
+table.mini th[rowspan]{vertical-align:bottom}
 table.mini td{font-family:var(--mono);font-size:14.3px;text-align:right;
               padding:10px 14px;border-bottom:1px solid #1d2748}
 table.mini td:first-child{text-align:left;font-weight:700}
@@ -345,13 +351,18 @@ table.mini.kv td:last-child{color:var(--white)}
 /* ---- comparison view ---- */
 .chiprow{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 4px}
 .cmp-toolbar{display:flex;align-items:center;gap:16px;margin-bottom:12px}
+.chartscroll{margin-left:-6vw;margin-right:-6vw}
 /* The table body scrolls inside its own box instead of running the whole page long,
    so the bar charts underneath stay reachable while filtering. Sized for ~6 rows:
    a row is ~105px (thumbnail-driven) and the two header rows ~87px, so 720px shows
    6 of them. Capped at 80vh so a short screen degrades gracefully rather than
    pushing the charts off-screen entirely. */
+/* Break out of section.block's 6vw side padding so the Clip column starts at the left
+   edge and Comments ends at the right - about 12vw of extra width, which together with
+   dropping the Mined-failure column is usually enough to remove horizontal scrolling
+   entirely once Captions are toggled off. */
 .cmp-scroll{max-height:min(720px,80vh);overflow:auto;border:1px solid #2a3560;
-            border-radius:12px}
+            border-radius:12px;margin-left:-6vw;margin-right:-6vw}
 /* border-collapse:collapse (inherited from the base `table` rule) makes Chrome
    compute wrong offsets for position:sticky on cells - the pinned notes column lands
    ~100px short of the right edge instead of against it. `separate` with zero spacing
@@ -367,6 +378,18 @@ table.mini.kv td:last-child{color:var(--white)}
    in the clip player - so sticky only actually engages on narrow viewports. */
 .cap{display:inline-block;max-width:155px;overflow:hidden;text-overflow:ellipsis;
      white-space:nowrap;vertical-align:bottom;color:var(--muted);font-size:12.65px}
+/* one mark per selected arm, in selection order - narrow enough to add a column
+   without costing the width the full-bleed change just recovered */
+.vmarks{display:inline-flex;gap:4px}
+.vm{font-style:normal;font-family:var(--mono);font-size:13px;font-weight:700;
+    line-height:1;width:18px;height:18px;border-radius:4px;display:inline-flex;
+    align-items:center;justify-content:center}
+.vm.ok{color:var(--soft-green);background:rgba(0,230,118,.14)}
+.vm.no{color:var(--red);background:rgba(255,107,107,.14)}
+.vm.na{color:var(--muted);background:rgba(160,180,204,.10)}
+/* the argument-description column: readable but clearly secondary to the value */
+table.mini td.hpdesc{text-align:left;font-weight:400;color:var(--muted);
+                     font-size:12.65px;white-space:normal;max-width:340px}
 .score{font-family:var(--mono);font-weight:700;padding:3px 8px;border-radius:6px}
 .score.right{color:var(--soft-green);background:rgba(0,230,118,.10)}
 .score.wrong{color:var(--red);background:rgba(255,107,107,.10)}

@@ -11,11 +11,54 @@
 
    Usage:
      const player = createPlayer();
-     player.open(clip, {title: "#00810", meta: "TRAIN · POSITIVE", caption: "..."});
+     player.open(clip, {title: "#00810", meta: "TRAIN · POSITIVE", caption: "...",
+                        mode: "train"});
 
    `clip` needs: video, video_missing, time_of_event, time_of_alert, target.
+
+   TWO PLAYBACK MODES, passed explicitly rather than inferred from a null field:
+
+     "train"  positives play [event-5s, event+2s] and count down to the event, then
+              show "+Xs after". Negatives get the SAME shape around their sampled
+              window instead of the event: [anchor-5s, anchor+2s], counting down to
+              the anchor and then "+Xs after". Without this a negative just counted
+              elapsed time, so there was no way to see which moment the caption and
+              the prediction actually refer to.
+
+     "test"   the last 5 seconds of the clip, counting 5.00 -> 0.00, for BOTH classes.
+              The test set has no usable event time: test.xlsx carries no
+              time_of_event column at all, and the 284 clips that do have one get it
+              from extract_tte_curve_test_frames.py, which DERIVES it as
+              `total_frames/fps - 0.5` rather than reading an annotation. So the
+              readout is labelled time-to-clip-end, which is what it actually
+              measures, and there is no "+Xs after" branch because there is no
+              post-event footage to show. All test clips are >= 6.57s, so 5s always
+              exists.
+
+   The mode is explicit because the old behaviour keyed off `time_of_event === null`,
+   which silently lumped "this clip has no event" together with "we have no annotation
+   for this clip" - two different situations that need different readouts.
    ================================================================ */
 (function (global) {
+
+  /* A negative has no event, but it DOES have a sampled window, and that window is
+     what the caption describes and what the model scored. The extractor placed it at
+     max(T_FLOOR, duration/2 + offset), offset -10/-4/-8 by bucket
+     (semsup_extract_promptbakeoff_frames.py:238-256; T_FLOOR = 2.0). The offset is
+     recoverable from the horizon label, so the anchor needs no new stored field -
+     `t_seconds` is null for every MID row in the manifests anyway.
+
+     Clip-level views fall back to the plain midpoint: the dataset page lists whole
+     clips, and a negative clip has THREE windows (MID-4/-8/-10), so no single one is
+     "the" window there. The midpoint is the reference all three offsets are measured
+     from, which makes it the honest stand-in. */
+  const MID_OFFSET = {"MID-4": -4, "MID-8": -8, "MID-10": -10};
+  const T_FLOOR = 2.0;
+  global.negAnchor = function negAnchor(duration, horizon){
+    const off = MID_OFFSET[horizon] !== undefined ? MID_OFFSET[horizon] : 0;
+    return Math.min(duration, Math.max(T_FLOOR, duration / 2 + off));
+  };
+
   global.createPlayer = function createPlayer() {
     const $ = id => document.getElementById(id);
     const overlay = $("overlay"), video = $("pVideo");
@@ -38,7 +81,9 @@
     function open(clip, meta){
       if (!clip || clip.video_missing) return false;
       meta = meta || {};
-      cur = { clip, segStart: 0, segEnd: null };
+      cur = { clip, segStart: 0, segEnd: null, anchor: null,
+              mode: meta.mode === "test" ? "test" : "train",
+              horizon: meta.horizon || null };
       $("pTitle").textContent = meta.title || ("#" + (clip.id || ""));
       $("pMeta").textContent = meta.meta || "";
       if (capBox){
@@ -56,12 +101,16 @@
     video.addEventListener("loadedmetadata", () => {
       if (!cur) return;
       const c = cur.clip, dur = video.duration;
-      if (c.time_of_event !== null && c.time_of_event !== undefined){
+      if (cur.mode === "test"){
+        cur.segStart = Math.max(0, dur - 5);
+        cur.segEnd   = dur;
+      } else if (c.time_of_event !== null && c.time_of_event !== undefined){
         cur.segStart = Math.max(0, c.time_of_event - 5);
         cur.segEnd   = Math.min(dur, c.time_of_event + 2);
       } else {
-        cur.segStart = 0;
-        cur.segEnd   = Math.min(dur, dur / 2 + 2);
+        cur.anchor   = global.negAnchor(dur, cur.horizon);
+        cur.segStart = Math.max(0, cur.anchor - 5);
+        cur.segEnd   = Math.min(dur, cur.anchor + 2);
       }
       $("segInfo").textContent =
         `segment ${cur.segStart.toFixed(2)}s → ${cur.segEnd.toFixed(2)}s of ${dur.toFixed(2)}s`;
@@ -95,7 +144,15 @@
       if (!cur) return;
       const t = video.currentTime, c = cur.clip;
       checkEnd();
-      if (c.time_of_event !== null && c.time_of_event !== undefined){
+      if (cur.mode === "test"){
+        // counts to the end of available footage, NOT to the collision - see the mode
+        // note at the top of this file for why no event time is trustworthy here.
+        const left = Math.max(0, cur.segEnd - t);
+        tteLbl.textContent = "TIME TO CLIP END";
+        tteVal.textContent = left.toFixed(2) + "s";
+        tteVal.className = "val" + (left < 1 ? " warn" : "");
+        tteSub.textContent = "";
+      } else if (c.time_of_event !== null && c.time_of_event !== undefined){
         const tte = c.time_of_event - t;
         tteLbl.textContent = "TIME TO EVENT";
         if (tte >= 0){
@@ -108,10 +165,18 @@
           tteSub.textContent = "after event";
         }
       } else {
-        tteLbl.textContent = c.target === 1 ? "NO EVENT TIME" : "TN — NO EVENT";
-        tteVal.textContent = t.toFixed(2) + "s";
-        tteVal.className = "val";
-        tteSub.textContent = `of ${cur.segEnd !== null ? cur.segEnd.toFixed(2) : "–"}s segment`;
+        // counts to the sampled window, not to an event - a negative has none
+        const left = (cur.anchor === null ? 0 : cur.anchor) - t;
+        tteLbl.textContent = "TIME TO WINDOW";
+        if (left >= 0){
+          tteVal.textContent = left.toFixed(2) + "s";
+          tteVal.className = "val" + (left < 1 ? " warn" : "");
+          tteSub.textContent = cur.horizon ? cur.horizon : "";
+        } else {
+          tteVal.textContent = "+" + (-left).toFixed(2) + "s";
+          tteVal.className = "val after";
+          tteSub.textContent = "after window";
+        }
       }
       const inWin = c.time_of_alert !== null && c.time_of_alert !== undefined &&
                     c.time_of_event !== null && c.time_of_event !== undefined &&

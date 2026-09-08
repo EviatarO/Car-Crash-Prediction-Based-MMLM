@@ -344,7 +344,8 @@ document.getElementById("tbody").addEventListener("click", e => {
   if (clip.time_of_event !== null) bits.push(`event @ ${clip.time_of_event.toFixed(2)}s`);
   if (clip.time_of_alert !== null && clip.time_of_alert !== undefined)
     bits.push(`alert @ ${clip.time_of_alert.toFixed(2)}s`);
-  player.open(clip, {title: `#${clip.id}`, meta: bits.join("  ·  ")});
+  player.open(clip, {title: `#${clip.id}`, meta: bits.join("  ·  "),
+                     mode: split === "test" ? "test" : "train"});
 });
 </script>
 </body>

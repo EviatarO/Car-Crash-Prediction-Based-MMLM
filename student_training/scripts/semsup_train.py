@@ -59,9 +59,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import shutil
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -134,6 +136,29 @@ def infonce_from_bank(pred, anchor_idx, bank, vids, log_tau):
     return F.cross_entropy(logits.unsqueeze(0), label)
 
 
+_LAYER_RE = re.compile(r"backbone\.encoder\.layer\.(\d+)\.")
+_PREDICTOR_STACK_RE = re.compile(r"backbone\.predictor\.layer\.\d+\.")
+
+
+def _layer_bucket(param_name):
+    """--per-layer-grads (project review / NEXT_LORA_PLACEMENT.md): map a LoRA
+    parameter's name to its reporting bucket. Encoder layers 0-23 bucket by their own
+    index (comparable to each other - identical q/k/v shapes). The 36 V-JEPA2
+    SSL-predictor-stack adapters (only present if --lora-target-modules is the legacy
+    'query,key,value' substring form, not the encoder-only regex default) bucket
+    together as 'predictor_stack' and are NOT comparable to the encoder buckets - see
+    NEXT_LORA_PLACEMENT.md ("norms are comparable across the 24 encoder layers ...
+    but not against the predictor-head adapters (384-dim vs 1024-dim)"). Anything
+    matching neither pattern (should not occur for lora_params, defensive only)
+    buckets as 'other'."""
+    m = _LAYER_RE.search(param_name)
+    if m:
+        return int(m.group(1))
+    if _PREDICTOR_STACK_RE.search(param_name):
+        return "predictor_stack"
+    return "other"
+
+
 def _clip_grads(args, lora_params, aux_params, trainable, head_params=None):
     """Gradient clipping, matching A1's budget for the LoRA trunk when requested.
 
@@ -161,7 +186,9 @@ def _clip_grads(args, lora_params, aux_params, trainable, head_params=None):
 def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                  siglip_tok=None, semantic_loss="cosine", val_bank=None,
                  val_vids=None, log_tau=None, full_bank=None,
-                 retrieval_tolerance=0.92, dump_scores_path=None):
+                 retrieval_tolerance=0.92, dump_scores_path=None,
+                 pooled_head=None, log_tau_pooled=None,
+                 sem_patch_weight=1.0, sem_pooled_weight=0.0):
     """ONE pass over the val set ->
     (val_ap, val_crash_loss, val_sem_loss, n_failed, retrieval_stats).
 
@@ -276,6 +303,7 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
             sem_loss = torch.tensor(0.0, device=device)
+            sem_loss_pooled = torch.tensor(0.0, device=device)
             if predictor is not None:
                 patches32 = patches.unsqueeze(0).to(dtype=torch.float32)
                 pred = predictor(patches32).mean(dim=1)
@@ -291,11 +319,23 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
                         tgt_list.append(val_bank[bank_idx])
                         vid_list.append(ex["video_id"])
                         bank_idx_list.append(bank_idx)
+                    # Pooled tap (project review §3.2) - same bank/anchor, applied to
+                    # `pooled` instead of the patch grid. Kept OUT of the
+                    # pred_list/tgt_list retrieval-health diagnostics above, which are
+                    # scoped to the patch-tap predictor specifically - mixing two
+                    # different embedding spaces into one retrieval computation would
+                    # make that diagnostic meaningless.
+                    if pooled_head is not None:
+                        pooled = badas._captured["pooled"].to(dtype=torch.float32)
+                        pred_pooled = F.normalize(pooled_head(pooled), dim=-1)
+                        sem_loss_pooled = infonce_from_bank(
+                            pred_pooled, bank_idx, val_bank, val_vids, log_tau_pooled)
                 else:
                     tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
                     sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
+            sem_loss_combined = sem_patch_weight * sem_loss + sem_pooled_weight * sem_loss_pooled
             total_crash += crash_loss.item()
-            total_sem += sem_loss.item()
+            total_sem += sem_loss_combined.item()
             n += 1
 
     if n_failed:
@@ -314,8 +354,25 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
         ys.append(sum(s for s, _ in pairs) / len(pairs))
         yt.append(label)
     val_ap = average_precision_score(yt, ys) if len(set(yt)) >= 2 else float("nan")
+    n_val_pos = sum(yt)
+    n_val_clips = len(yt)
+    val_prevalence = n_val_pos / n_val_clips if n_val_clips else float("nan")
+    # WARN, don't just log: an AP below its own prevalence floor is not merely "bad",
+    # it means the ranking signal is worse than guessing the majority class - and
+    # nothing previously flagged this. Measured on the a1fail321 pool (project review
+    # 2026-09-06 §4.3): the --select-by val_ap selector ran at ~0.20 against a 0.333
+    # floor for an entire 10-epoch run with no warning anywhere. Expected/benign when
+    # the val pool is deliberately adversarial by construction (e.g. a1fail321, where
+    # A1 itself scores 0.0 AP there); a red flag anywhere else.
+    if val_ap == val_ap and val_prevalence == val_prevalence and val_ap < val_prevalence:
+        print(f"  [WARN] val_ap={val_ap:.4f} < prevalence floor={val_prevalence:.4f} "
+              f"(n_pos={n_val_pos}/{n_val_clips} clips) - selection signal is worse "
+              f"than guessing the majority class on this split")
 
     retrieval_stats = {}
+    retrieval_stats["val_prevalence"] = val_prevalence
+    retrieval_stats["val_n_pos_clips"] = n_val_pos
+    retrieval_stats["val_n_clips"] = n_val_clips
     if pred_list and val_bank is not None:
         P = torch.stack(pred_list)              # (n_rows, Dt)
         T = torch.stack(tgt_list)                # (n_rows, Dt) - each row's OWN true target
@@ -396,14 +453,21 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--lora-target-modules", required=True,
-                     help="Comma-separated module-name SUBSTRINGS (e.g. 'query,key,value'), "
-                          "or a single REGEX if the value starts with 're:'. Prefer the regex "
-                          "form: bare 'query,key,value' matches 108 Linears on BADAS-Open - the "
-                          "72 encoder ones you want PLUS 36 on the V-JEPA2 predictor "
-                          "(latent-forecast) stack, which is not on the classification path. "
-                          r"Encoder-only: --lora-target-modules "
-                          r"'re:backbone\.encoder\.layer\.\d+\.attention\.(query|key|value)'")
+    ap.add_argument(
+        "--lora-target-modules",
+        default=r"re:backbone\.encoder\.layer\.\d+\.attention\.(query|key|value)",
+        help="Comma-separated module-name SUBSTRINGS (e.g. 'query,key,value'), or a "
+             "single REGEX if the value starts with 're:'. DEFAULT CHANGED 2026-09-08 "
+             "(project review §A5): now the encoder-only regex (72 adapters), not the "
+             "legacy bare substring list. Bare 'query,key,value' matches 108 Linears on "
+             "BADAS-Open - the 72 encoder ones you want PLUS 36 on the V-JEPA2 predictor "
+             "(SSL latent-forecast) stack, which is not on the classification path - "
+             "15.8%% of every A1_1761/B-arm's LoRA params (442,368 of 2,801,664) landed "
+             "there. That waste is COMMON-MODE across every historical arm (it cannot "
+             "explain the A-vs-B gap - see DECISIONS.md), so no prior result is retired "
+             "by this change; it only affects arms trained from here on. To reproduce "
+             "A1_1761's EXACT historical recipe (108 adapters, encoder+predictor), pass "
+             "--lora-target-modules query,key,value explicitly.")
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
@@ -432,6 +496,35 @@ def main():
     ap.add_argument("--infonce-tau-init", type=float, default=0.07,
                      help="initial temperature for --semantic-loss infonce (learnable, "
                           "matches semsup_b1_probe.py's default)")
+    ap.add_argument("--sem-patch-weight", type=float, default=1.0,
+                     help="weight on the EXISTING semantic term (Predictor over the "
+                          "2560-token PATCH grid). Default 1.0 = old behavior unchanged. "
+                          "See --sem-pooled-weight for what this pairs with.")
+    ap.add_argument("--sem-pooled-weight", type=float, default=0.0,
+                     help="NEW (2026-09-08, project review §3.2). Weight on a SECOND "
+                          "semantic term attached to `pooled` - the SAME 1024-d vector "
+                          "the crash head's classifier actually reads (the probe's OUTPUT, "
+                          "not its input). DEFAULT 0.0: this term does not exist unless you "
+                          "opt in - at 0.0 the pooled_head module is not even constructed "
+                          "(see main()), so a run that omits this flag is byte-for-byte the "
+                          "old code path, no exceptions. WHY THIS EXISTS: every semantic arm "
+                          "to date attaches its loss to the PATCH grid, which the frozen "
+                          "crash head compresses through a FIXED attention pool before the "
+                          "classifier ever sees it - whatever the semantic loss shapes "
+                          "outside that pool's span is structurally invisible to the crash "
+                          "decision. 'captions add no information' and 'the channel to the "
+                          "classifier is too narrow' are OBSERVATIONALLY IDENTICAL under the "
+                          "patch-only design; every prior null (B-v1/v2/v3, P1, SemTest-200, "
+                          "a1fail321 recovery family) cannot distinguish them. This term can. "
+                          "Combined loss: sem_loss = sem_patch_weight*sem_patch_loss + "
+                          "sem_pooled_weight*sem_pooled_loss, both under --semantic-weight's "
+                          "same outer multiplier. Uses its own InfoNCE bank/predictor head "
+                          "(pooled_head: LayerNorm+Linear, ~0.8M params) and its own learnable "
+                          "temperature (log_tau_pooled) - shares nothing with the patch-tap "
+                          "predictor except the frozen SigLIP caption bank. Requires "
+                          "--semantic-weight > 0 and --semantic-loss infonce (cosine's "
+                          "degenerate-optimum problem applies here too, and was never fixed "
+                          "for cosine).")
     ap.add_argument("--siglip-model", default="google/siglip-base-patch16-224")
     ap.add_argument("--predictor-init", default=None, help="warm-start from B1 checkpoint")
     ap.add_argument("--clip-grad-per-group", action="store_true",
@@ -453,6 +546,33 @@ def main():
                           "the sampled steps (~15%% epoch time at N=8) and does NOT touch the "
                           "optimizer - autograd.grad() returns gradients without accumulating "
                           "into .grad, so training is bit-identical with this on or off.")
+    ap.add_argument("--per-layer-grads", action="store_true",
+                     help="NEW (2026-09-08, NEXT_LORA_PLACEMENT.md). Group the SAME "
+                          "per-parameter gradients --grad-cosine-every already computes "
+                          "(torch.autograd.grad(crash_loss, lora_params) - a per-PARAMETER "
+                          "list, previously flattened immediately) by encoder-layer index "
+                          "before reducing, instead of after. No extra backward pass - same "
+                          "cost as --grad-cosine-every alone. Answers: where does the crash "
+                          "gradient concentrate (if placement is a lever at all), and does "
+                          "the near-zero GLOBAL crash-vs-semantic cosine hide per-layer "
+                          "structure (mildly-unrelated-everywhere vs conflicting-in-some-"
+                          "layers-cancelling-in-others - different mechanisms, different "
+                          "fixes, currently indistinguishable). Requires "
+                          "--grad-cosine-every > 0 (piggybacks on that probe's sampled "
+                          "steps). Writes per_layer_grads to epoch_metrics.jsonl: per "
+                          "encoder-layer-index crash-grad norm, semantic-grad norm (0 if no "
+                          "predictor), and their cosine, AVERAGED over this epoch's sampled "
+                          "steps - plus a separate 'predictor_stack' bucket for the 36 "
+                          "V-JEPA2-predictor-stack adapters if --lora-target-modules matches "
+                          "them (query,key,value substring form, not the encoder-only regex "
+                          "default) - NOT comparable to the encoder buckets (different "
+                          "shapes: 384-dim vs 1024-dim attention, per NEXT_LORA_PLACEMENT.md, "
+                          "reported separately for exactly that reason). Norms alone do not "
+                          "mean importance (a converged layer has small gradients BECAUSE it "
+                          "is already adapted) - cross-reference against the per-layer "
+                          "WEIGHT-CHANGE norm (computed the same way, from the same LoRA "
+                          "adapter's saved epoch-to-epoch delta) before reading anything "
+                          "into a bare gradient-norm ranking.")
     ap.add_argument("--lora-init", default=None,
                      help="path to an existing lora_adapter DIRECTORY (e.g. "
                           "/workspace/semsup/a1_1761/epoch_04/lora_adapter) to START training "
@@ -582,7 +702,31 @@ def main():
     ap.add_argument("--test-limit", type=int, default=0, help="debug: score only first N test clips")
     ap.add_argument("--seed", type=int, default=0,
                      help="seeds random/torch RNG (LoRA init, example shuffle) so A1 "
-                          "and B are comparable runs, not confounded by different init")
+                          "and B are comparable runs, not confounded by different init. "
+                          "Also the default for --split-seed/--init-seed when those are "
+                          "omitted - see those flags to vary split and init independently.")
+    ap.add_argument("--split-seed", type=int, default=None,
+                     help="seed for clip_level_split (train/val partition) ONLY. Defaults "
+                          "to --seed (old behavior: one seed drives split+init+shuffle "
+                          "together, so a multi-seed sweep cannot attribute variance to "
+                          "a source). Set this once and vary --init-seed across runs to "
+                          "hold the split fixed while sampling LoRA init/shuffle noise - "
+                          "the project review (2026-09-06) flagged this as needed before "
+                          "any Delta-AP this small (~0.001-0.002) can carry a CI.")
+    ap.add_argument("--init-seed", type=int, default=None,
+                     help="seed for torch/cuda RNG (LoRA init, per-epoch example shuffle) "
+                          "ONLY. Defaults to --seed (old behavior). See --split-seed.")
+    ap.add_argument("--deterministic", action="store_true", default=True,
+                     help="torch.use_deterministic_algorithms(True) + "
+                          "cudnn.deterministic=True (default ON). The project review "
+                          "(2026-09-06) found the SAME checkpoint scored twice on the "
+                          "same 677 clips disagreed on 677/677 of them (max|delta|=0.097, "
+                          "5 clips flipped across the 0.5 boundary, dAP=0.0009 - the exact "
+                          "size of the V12-vs-v12shuf headline effect) with nothing pinning "
+                          "inference numerics. Pass --no-deterministic to restore the old "
+                          "(nondeterministic) behavior, e.g. if a deterministic kernel is "
+                          "unavailable for some op on a given GPU/torch build.")
+    ap.add_argument("--no-deterministic", action="store_false", dest="deterministic")
     ap.add_argument("--min-examples", type=int, default=1,
                      help="fail fast if fewer than this many training examples load "
                           "(catches a partially-synced/missing frames volume early)")
@@ -594,11 +738,39 @@ def main():
     if args.select_by == "retrieval" and args.semantic_weight <= 0:
         raise ValueError("--select-by retrieval requires --semantic-weight > 0 (a Predictor + "
                           "caption bank must exist to compute retrieval@1 at all).")
+    if args.sem_pooled_weight > 0 and args.semantic_weight <= 0:
+        raise ValueError("--sem-pooled-weight > 0 requires --semantic-weight > 0 (it is a "
+                          "second term inside the semantic loss, weighted by the same outer "
+                          "--semantic-weight multiplier).")
+    if args.sem_pooled_weight > 0 and args.semantic_loss != "infonce":
+        raise ValueError("--sem-pooled-weight > 0 requires --semantic-loss infonce - cosine's "
+                          "degenerate-optimum problem (see --semantic-loss's help) was never "
+                          "fixed for the pooled tap either.")
+    if args.per_layer_grads and args.grad_cosine_every <= 0:
+        raise ValueError("--per-layer-grads requires --grad-cosine-every > 0 - it groups the "
+                          "SAME per-parameter gradients that probe already computes, by "
+                          "encoder-layer index, rather than running a separate backward pass.")
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    # --split-seed / --init-seed default to --seed (old behavior preserved) but are
+    # tracked separately so a multi-seed sweep can hold the split fixed and vary only
+    # init/shuffle noise, or vice versa - see --split-seed's help for why this matters.
+    args.split_seed = args.seed if args.split_seed is None else args.split_seed
+    args.init_seed = args.seed if args.init_seed is None else args.init_seed
+
+    random.seed(args.init_seed)
+    torch.manual_seed(args.init_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(args.init_seed)
+    if args.deterministic:
+        # See --deterministic's help: closes the ~0.0009 AP / 5-clip-flip nondeterminism
+        # gap the project review measured between two scorings of the same checkpoint.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            # older torch: no warn_only kwarg
+            torch.use_deterministic_algorithms(True)
 
     import yaml
     with open(args.config, encoding="utf-8") as f:
@@ -622,7 +794,9 @@ def main():
     sem_note = f"  semantic_loss={args.semantic_loss}" if args.semantic_weight > 0 else ""
     print(f"[cfg] stage={stage}  crash_weight={args.crash_weight}  "
           f"semantic_weight={args.semantic_weight}{sem_note}  select_by={args.select_by}  "
-          f"lora_target_modules={args.lora_target_modules}  seed={args.seed}")
+          f"lora_target_modules={args.lora_target_modules}  seed={args.seed}  "
+          f"split_seed={args.split_seed}  init_seed={args.init_seed}  "
+          f"deterministic={args.deterministic}")
 
     # 're:' prefix -> pass the regex through to peft untouched (peft accepts a single
     # regex string as target_modules). Otherwise keep the legacy comma-substring form
@@ -671,9 +845,25 @@ def main():
     # two objectives actually SHARE - the Predictor is semantic-only (its crash
     # gradient is identically zero, which would drag any cosine toward 0).
     lora_params = list(trainable)
+    # Parallel NAME list, same filter/order as lora_params above, used only by
+    # --per-layer-grads to bucket each gradient tensor by encoder-layer index. Zero
+    # cost when the flag is off (a list of strings, never used).
+    lora_param_names = [n for n, p in badas.nn_model.named_parameters()
+                         if p.requires_grad and id(p) not in head_param_ids]
+    assert len(lora_param_names) == len(lora_params), \
+        "named_parameters() and parameters() diverged in order/filter - " \
+        "--per-layer-grads would attribute gradients to the wrong layer"
 
     predictor = None
+    pooled_head = None
     siglip_model = siglip_tok = None
+    # Built EXPLICITLY by identity (project review 2026-09-08, §6.4 in CODE_GUIDE.md),
+    # not by list-slicing `trainable` after the fact - the old
+    # `aux_params = trainable[len(lora_params):]` was correct but positionally
+    # coupled: any future param appended between capturing lora_params and this line
+    # would silently misclassify it. Fixed here alongside the pooled-tap addition
+    # since both touch this construction path.
+    aux_params = []
     if args.semantic_weight > 0:
         print(f"[load] SigLIP: {args.siglip_model}")
         siglip_model, siglip_tok = load_siglip(args.siglip_model, device)
@@ -693,18 +883,47 @@ def main():
             predictor.load_state_dict(torch.load(args.predictor_init, map_location=device))
             print(f"[load] warm-started predictor from {args.predictor_init}")
         trainable += list(predictor.parameters())
+        aux_params += list(predictor.parameters())
 
-    # Learnable InfoNCE temperature (same contract as semsup_b1_probe.py). Must be
-    # in the optimizer's param list or it silently stays at its init value.
+        # --sem-pooled-weight (project review §3.2): a SECOND semantic head attached
+        # to `pooled`, the crash head's actual classifier input, not just the patch
+        # grid. Only constructed when actually requested - at the default 0.0 this
+        # branch never runs, so a run that omits --sem-pooled-weight gets neither a
+        # new module, new params, nor new RNG draws: byte-for-byte the old code path.
+        if args.sem_pooled_weight > 0:
+            pooled_head = torch.nn.Sequential(
+                torch.nn.LayerNorm(1024), torch.nn.Linear(1024, dt)).to(device)
+            trainable += list(pooled_head.parameters())
+            aux_params += list(pooled_head.parameters())
+            n_ph = sum(p.numel() for p in pooled_head.parameters())
+            print(f"[cfg] pooled-tap semantic head: {n_ph:,} params "
+                  f"(sem_patch_weight={args.sem_patch_weight}  "
+                  f"sem_pooled_weight={args.sem_pooled_weight})")
+
+    # Learnable InfoNCE temperature(s) (same contract as semsup_b1_probe.py). Must be
+    # in the optimizer's param list or they silently stay at their init value. The
+    # pooled tap gets its OWN temperature (log_tau_pooled) rather than sharing
+    # log_tau - the two heads' similarity distributions need not share a scale.
     log_tau = None
+    log_tau_pooled = None
     if args.semantic_weight > 0 and args.semantic_loss == "infonce":
         log_tau = torch.nn.Parameter(
             torch.log(torch.tensor(args.infonce_tau_init, device=device)))
         trainable = trainable + [log_tau]
+        aux_params = aux_params + [log_tau]
+        if pooled_head is not None:
+            log_tau_pooled = torch.nn.Parameter(
+                torch.log(torch.tensor(args.infonce_tau_init, device=device)))
+            trainable = trainable + [log_tau_pooled]
+            aux_params = aux_params + [log_tau_pooled]
 
-    # Params trained ONLY for the semantic branch (Predictor + log_tau) - everything
-    # in `trainable` after `lora_params` was captured above, in construction order.
-    aux_params = trainable[len(lora_params):]
+    # Equivalence check for the aux_params refactor above: it must still contain
+    # EXACTLY the params appended after lora_params, just built by identity instead
+    # of by slice position.
+    assert len(aux_params) == len(trainable) - len(lora_params), \
+        "aux_params (built by identity) diverged from trainable[len(lora_params):] " \
+        "(the old slice-based definition) - a semantic-branch param was appended to " \
+        "trainable without also being appended to aux_params, or vice versa."
 
     param_groups = [{"params": trainable, "lr": args.lr}]
     if head_params:
@@ -761,8 +980,9 @@ def main():
         print(f"[data] train={len(train_ex)}  val={len(val_ex)} "
               f"(fixed split from --val-video-ids, {len(val_vids)} ids)")
     else:
-        train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.seed)
-        print(f"[data] train={len(train_ex)}  val={len(val_ex)} (clip-level split)")
+        train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.split_seed)
+        print(f"[data] train={len(train_ex)}  val={len(val_ex)} "
+              f"(clip-level split, split_seed={args.split_seed})")
 
     # Built here, not at optimizer construction, because total_steps needs
     # len(train_ex) - only known after the pool is loaded and split. If resuming
@@ -860,10 +1080,17 @@ def main():
         opt.zero_grad()
         epoch_t0 = time.time()
         total_crash, total_sem, n, n_failed = 0.0, 0.0, 0, 0
+        # Sub-loss accumulators for the pooled-tap addition (only meaningful when
+        # pooled_head exists - stay 0 otherwise, so their averages are harmless NaN-free
+        # zeros rather than something a reader might mistake for a real measurement).
+        total_sem_patch, total_sem_pooled = 0.0, 0.0
         # Crash-vs-semantic gradient-angle accumulators (diagnostic; see --grad-cosine-every).
         cos_sum, cos_n, cos_neg = 0.0, 0, 0
         gnorm_crash, gnorm_sem = 0.0, 0.0
         gc_probe_failed = False
+        # --per-layer-grads: per-bucket running sums (bucket key -> [crash_norm_sum,
+        # sem_norm_sum, cos_sum, n_sampled]), reset each epoch, averaged at epoch end.
+        layer_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0]) if args.per_layer_grads else None
         # `pending` counts SUCCESSFUL backward() calls since the last opt.step().
         # Driving the accumulation boundary off the enumerate() index instead would
         # desync the moment any example is skipped: some steps would average fewer
@@ -893,6 +1120,7 @@ def main():
             crash_loss = F.cross_entropy(logits, label)
 
             sem_loss = torch.tensor(0.0, device=device)
+            sem_loss_pooled = torch.tensor(0.0, device=device)
             if predictor is not None:
                 # BADAS may run in fp16; the Predictor is fp32. .to(dtype=) is a
                 # differentiable cast (autograd supports it) so the semantic-loss
@@ -912,6 +1140,26 @@ def main():
                     tgt = siglip_text_embed([ex["caption"]], siglip_model, siglip_tok, device)
                     sem_loss = (1 - F.cosine_similarity(pred, tgt, dim=-1)).mean()
 
+                # --sem-pooled-weight (project review §3.2): the SAME anchor/bank
+                # machinery, applied to `pooled` - the crash head's actual classifier
+                # input - instead of the patch grid. `badas._captured["pooled"]` is
+                # from THIS SAME forward_clip() call above (the hook fires during
+                # badas.nn_model(clip), before forward_clip returns), so this is zero
+                # extra GPU compute - no second forward pass.
+                if pooled_head is not None:
+                    pooled = badas._captured["pooled"].to(dtype=torch.float32)
+                    pred_pooled = F.normalize(pooled_head(pooled), dim=-1)
+                    sem_loss_pooled = infonce_from_bank(
+                        pred_pooled, ex["_bank_idx"], train_bank, train_bank_vids,
+                        log_tau_pooled)
+
+            # Combined semantic term: patch-tap and pooled-tap (if enabled), each under
+            # its own weight, both under --semantic-weight's outer multiplier below. At
+            # the default sem_patch_weight=1.0/sem_pooled_weight=0.0 this is exactly the
+            # old sem_loss, unchanged.
+            sem_loss_combined = (args.sem_patch_weight * sem_loss
+                                  + args.sem_pooled_weight * sem_loss_pooled)
+
             # --- crash-vs-semantic gradient angle (diagnostic only, never optimized) ---
             # Measured on lora_params (the SHARED trunk) before the combined backward.
             # retain_graph=True is required because loss.backward() below reuses the graph.
@@ -921,7 +1169,7 @@ def main():
                 try:
                     g_c = torch.autograd.grad(crash_loss, lora_params,
                                               retain_graph=True, allow_unused=True)
-                    g_s = torch.autograd.grad(sem_loss, lora_params,
+                    g_s = torch.autograd.grad(sem_loss_combined, lora_params,
                                               retain_graph=True, allow_unused=True)
                     fc = torch.cat([g.flatten() for g in g_c if g is not None])
                     fs = torch.cat([g.flatten() for g in g_s if g is not None])
@@ -933,6 +1181,37 @@ def main():
                             cos_neg += int(c < 0)
                             gnorm_crash += fc.norm().item()
                             gnorm_sem += fs.norm().item()
+
+                    # --per-layer-grads: SAME g_c/g_s lists (no extra backward pass),
+                    # grouped by bucket instead of flattened globally. g_c/g_s are
+                    # positionally aligned with lora_params/lora_param_names (both
+                    # built from the identical filter over the same
+                    # named_parameters() iteration order - asserted equal-length at
+                    # construction).
+                    if layer_stats is not None:
+                        by_bucket = defaultdict(lambda: ([], []))
+                        for name, gc_i, gs_i in zip(lora_param_names, g_c, g_s):
+                            if gc_i is None and gs_i is None:
+                                continue
+                            bucket = _layer_bucket(name)
+                            cs, ss = by_bucket[bucket]
+                            if gc_i is not None:
+                                cs.append(gc_i.flatten())
+                            if gs_i is not None:
+                                ss.append(gs_i.flatten())
+                        for bucket, (cs, ss) in by_bucket.items():
+                            if not cs or not ss:
+                                continue
+                            fcb = torch.cat(cs)
+                            fsb = torch.cat(ss)
+                            cb = (F.cosine_similarity(fcb.unsqueeze(0), fsb.unsqueeze(0)).item()
+                                  if fcb.numel() == fsb.numel() else float("nan"))
+                            entry = layer_stats[bucket]
+                            entry[0] += fcb.norm().item()
+                            entry[1] += fsb.norm().item()
+                            if cb == cb:
+                                entry[2] += cb
+                            entry[3] += 1
                 except RuntimeError as exc:
                     # A freed graph or unused-input edge must not kill an 8-epoch run
                     # over a diagnostic. Report once, then stop trying this epoch.
@@ -940,16 +1219,19 @@ def main():
                         print(f"  [warn] grad-cosine probe disabled this epoch: {exc}")
                     gc_probe_failed = True
 
-            # crash_loss/sem_loss are ALWAYS both computed and logged raw (unweighted) -
-            # crash_weight only controls what reaches the backward pass. At
-            # --crash-weight 0 (Stage A), crash_loss is still a free diagnostic of
+            # crash_loss/sem_loss_combined are ALWAYS both computed and logged raw
+            # (unweighted) - crash_weight only controls what reaches the backward pass.
+            # At --crash-weight 0 (Stage A), crash_loss is still a free diagnostic of
             # whether the frozen head still fits the drifting representation; it
             # just contributes zero gradient.
             loss = (args.crash_weight * crash_loss
-                    + args.semantic_weight * sem_loss) / args.grad_accum
+                    + args.semantic_weight * sem_loss_combined) / args.grad_accum
             loss.backward()
             total_crash += crash_loss.item()
-            total_sem += sem_loss.item()
+            total_sem += sem_loss_combined.item()
+            if pooled_head is not None:
+                total_sem_patch += sem_loss.item()
+                total_sem_pooled += sem_loss_pooled.item()
             n += 1
             pending += 1
             if pending == args.grad_accum:
@@ -978,12 +1260,17 @@ def main():
             val_vids=val_bank_vids, log_tau=log_tau, full_bank=train_bank,
             retrieval_tolerance=args.retrieval_tolerance,
             dump_scores_path=(out_dir / f"val_scores_ep{epoch:02d}.jsonl")
-                if args.dump_val_scores else None)
+                if args.dump_val_scores else None,
+            pooled_head=pooled_head, log_tau_pooled=log_tau_pooled,
+            sem_patch_weight=args.sem_patch_weight,
+            sem_pooled_weight=args.sem_pooled_weight)
         now = time.time()
         epoch_s = now - epoch_t0
         elapsed = now - t0
         avg_crash = total_crash / n if n else float("nan")
         avg_sem = total_sem / n if n else float("nan")
+        avg_sem_patch = (total_sem_patch / n if n else float("nan")) if pooled_head is not None else None
+        avg_sem_pooled = (total_sem_pooled / n if n else float("nan")) if pooled_head is not None else None
         # combined train/val loss, same weighting as the actual optimized objective -
         # this (not crash_loss alone) is what "train vs val gap" should compare, since
         # for B the model is optimizing crash+semantic jointly.
@@ -1043,15 +1330,45 @@ def main():
         def _j(x):
             return None if isinstance(x, float) and x != x else x
 
+        # --per-layer-grads epoch summary: bucket key (encoder layer int, or
+        # "predictor_stack") -> averaged {crash_grad_norm, sem_grad_norm, cos, n}.
+        # None (not {}) when the flag is off, so its absence in the log is
+        # unambiguous rather than an empty-looking dict.
+        per_layer_grads = None
+        if layer_stats is not None:
+            per_layer_grads = {
+                str(bucket): {
+                    "crash_grad_norm": _j(cn / n_s) if n_s else None,
+                    "sem_grad_norm": _j(sn / n_s) if n_s else None,
+                    "cos": _j(cs / n_s) if n_s else None,
+                    "n_sampled": n_s,
+                }
+                for bucket, (cn, sn, cs, n_s) in sorted(
+                    layer_stats.items(),
+                    key=lambda kv: (isinstance(kv[0], str), kv[0]))
+            }
+
         with open(out_dir / "epoch_metrics.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "epoch": epoch,
                 "crash_loss": _j(avg_crash), "sem_loss": _j(avg_sem),
+                # sub-components of sem_loss when --sem-pooled-weight > 0 (both are
+                # null, not just 0, unless pooled_head exists - see --sem-pooled-weight's
+                # help). sem_loss above is sem_patch_weight*sem_loss_patch +
+                # sem_pooled_weight*sem_loss_pooled, so these are diagnostic only.
+                "sem_loss_patch": _j(avg_sem_patch) if avg_sem_patch is not None else None,
+                "sem_loss_pooled": _j(avg_sem_pooled) if avg_sem_pooled is not None else None,
                 "val_crash_loss": _j(val_crash_loss), "val_sem_loss": _j(val_sem_loss),
                 "train_total_loss": _j(train_total_loss),
                 "val_total_loss": _j(val_total_loss),
                 "train_val_gap": _j(train_val_gap),
                 "val_ap": _j(val_ap),
+                # prevalence floor for val_ap - see evaluate_val()'s WARN (project
+                # review 2026-09-06 §4.3): a val_ap below this is worse than
+                # guessing the majority class, not just "a low score".
+                "val_prevalence": _j(retrieval_stats.get("val_prevalence", float("nan"))),
+                "val_n_pos_clips": retrieval_stats.get("val_n_pos_clips", 0),
+                "val_n_clips": retrieval_stats.get("val_n_clips", 0),
                 "select_by": args.select_by, "sel_value": _j(sel_value),
                 # Retrieval + embedding-health stats (empty dict under cosine loss,
                 # or before a Predictor exists at all - see evaluate_val()'s
@@ -1073,6 +1390,7 @@ def main():
                 "grad_norm_crash": _j(grad_norm_crash),
                 "grad_norm_sem": _j(grad_norm_sem),
                 "grad_cos_n_sampled": cos_n,
+                "per_layer_grads": per_layer_grads,
                 "n_failed": n_failed, "n_val_failed": n_val_failed,
                 # epoch_s = THIS epoch; elapsed_s = cumulative since run start.
                 # Only the cumulative one existed before, logged under a name that
@@ -1088,6 +1406,8 @@ def main():
         badas.nn_model.save_pretrained(str(ep_dir / "lora_adapter"))
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
+        if pooled_head is not None:
+            torch.save(pooled_head.state_dict(), ep_dir / "pooled_head.pt")
         if head_params:
             torch.save(badas.head_state_dict(), ep_dir / "head_state.pt")
         # Optimizer state per epoch, so an interrupted run can resume on the SAME
@@ -1180,6 +1500,20 @@ def main():
         adapter_sd = load_file(str(out_dir / f"epoch_{epoch:02d}" / "lora_adapter"
                                    / "adapter_model.safetensors"))
         set_peft_model_state_dict(badas.nn_model, adapter_sd)
+        # --unfreeze-head (project review 2026-09-06 §4.1): the head is mutated
+        # in-process across training, so without this reload, scoring epoch k's
+        # adapter after N epochs pairs it with epoch N's head - only the LAST
+        # checkpoint would be self-consistent. head_state.pt is written next to
+        # lora_adapter/ whenever head_params is non-empty (see the epoch-save
+        # loop above); hard-fail rather than silently score against the wrong
+        # head (set_peft_model_state_dict's own strict=False would let that pass).
+        if head_params:
+            head_path = out_dir / f"epoch_{epoch:02d}" / "head_state.pt"
+            if not head_path.exists():
+                raise FileNotFoundError(
+                    f"--unfreeze-head was set but {head_path} is missing - cannot "
+                    f"score epoch {epoch}'s adapter against the correct head state.")
+            badas.load_head_state(head_path)
         badas.nn_model.eval()
         yt, ys, grp = [], [], []
         n_failed = 0
@@ -1219,7 +1553,9 @@ def main():
                        "selection_value": (None if sv != sv else round(sv, 4)), **m}, f, indent=2)
         per = m.get("per_tte_ap", {})
         print(f"       test_AP={m['ap']}  AUC={m['auc_roc']}  F1={m['f1']} "
-              f"(F1*={m['f1_optimal']}@{m['optimal_threshold']})  "
+              # oracle stat: threshold fit on this SAME test array, not achievable
+              # in deployment - see metrics_core.py's docstring / project review §4.4
+              f"(F1@oracle-thr(same split)={m['f1_optimal']}@{m['optimal_threshold']})  "
               f"recall={m['recall_sensitivity_tpr']}  spec={m['specificity_tnr']}  "
               f"acc={m['accuracy']}  Brier={m['brier']}  ECE={m['ece']}")
         print(f"       per-TTE AP: " +
