@@ -10,15 +10,29 @@ WHAT IT DOES (per split)
      The loader returns a VJEPAModel wrapper (NOT an nn.Module). The actual
      nn.Module is vjepa.model; the HF AutoVideoProcessor is vjepa.processor.
   2. For each clip: loads the 16 last-window frames as numpy RGB arrays,
-     preprocesses via vjepa.processor (224x224, ImageNet norm), runs the
+     preprocesses via vjepa.processor (see PREPROCESSING below), runs the
      nn.Module -> logits -> temperature scaling T=2.0 -> softmax -> P(collision).
   3. Writes a per-clip JSONL with the Stage-A schema (see OUTPUT SCHEMA).
 
-CONFIRMED from badas_loader.py + badas/core/preprocessing.py (2026-06-24):
-  - img_size = 224  (badas_loader.py: VJEPAModel(img_size=224))
-  - resize  = squash (cv2.resize to (size,size), no crop)
-  - norm    = ImageNet mean/std
-  - temperature = 2.0 before softmax (apply_temperature_scaling in vjepa.py)
+PREPROCESSING — CORRECTED 2026-09-14 (measured, not derived):
+  The 2026-06-24 note here said "resize = squash (cv2.resize to (size,size), no crop)".
+  That described BADAS's released INFERENCE code (badas utils preprocess_video_frames),
+  but this file NEVER implemented it: preprocess_clip() has always passed the raw
+  1280x720 frame straight to the V-JEPA2 AutoVideoProcessor (shortest_edge 292 ->
+  center-crop 256x256). Measured with a coordinate-encoded frame, that "crop" view
+  keeps only source x 321-953, y 42-674 (~49% of width). EVERY run to date (A0, A1,
+  all B arms, SemTest-200, a1fail321) used this crop view.
+  preprocess_clip(mode=...) now makes it explicit:
+    - "crop"        (default, all historical runs): processor defaults, center-crop.
+    - "compress256" : processor resizes the FULL frame to 256x256 (size={height:256,
+                      width:256}, do_center_crop=False) - whole field of view kept,
+                      squeezed sideways. Same resample + normalization code as "crop",
+                      so geometry is the ONLY difference between modes.
+  BADAS papers state only "16 frames at 256x256" (BADAS v1: 2048 patches). BADAS's
+  released training code crops; its released inference code squashes (224, then a
+  ~6%/side trim). See AA.0 v2 plan.
+  - norm    = ImageNet mean/std (processor)
+  - temperature = 2.0 before softmax here (apply_temperature_scaling in vjepa.py)
   - score   = softmax(logits/2.0)[1]  (positive class probability)
 
 WINDOWING: manifests encode the last-16-frame (~2 s) window at stride 4 (7.5fps).
@@ -136,21 +150,40 @@ def load_badas(cfg):
     return vjepa, nn_model, device
 
 
-def preprocess_clip(vjepa, paths):
-    """Preprocess 16 JPEG frames -> (1, T, C, H, W) tensor using BADAS's processor."""
+PREPROCESS_MODES = ("crop", "compress256")
+
+
+def preprocess_clip(vjepa, paths, mode: str = "crop"):
+    """Preprocess 16 JPEG frames -> (1, T, C, H, W) tensor using BADAS's processor.
+
+    mode="crop" (default) reproduces every historical run byte-for-byte: processor
+    defaults, i.e. resize shortest edge to 292 then center-crop 256x256 (keeps the
+    middle ~49% of a 1280x720 frame). mode="compress256" resizes the whole frame to
+    256x256 with no crop. See the module docstring's PREPROCESSING note.
+    """
     import numpy as np
     import torch
 
+    if mode not in PREPROCESS_MODES:
+        raise ValueError(f"preprocess mode {mode!r} not in {PREPROCESS_MODES}")
     frames_np = [np.array(Image.open(p).convert("RGB")) for p in paths]
 
     if vjepa.processor is not None:
-        # Official HF AutoVideoProcessor (handles resize + norm correctly)
-        inputs = vjepa.processor(videos=frames_np, return_tensors="pt")
+        # Official HF AutoVideoProcessor (resize + ImageNet norm). "crop" passes no
+        # overrides at all, so it is identical to the pre-2026-09-14 call.
+        overrides = ({} if mode == "crop"
+                     else {"size": {"height": 256, "width": 256}, "do_center_crop": False})
+        inputs = vjepa.processor(videos=frames_np, return_tensors="pt", **overrides)
         key = "pixel_values_videos" if "pixel_values_videos" in inputs else next(iter(inputs))
         clip = inputs[key]
         if clip.dim() == 4:             # (T, C, H, W) -> (1, T, C, H, W)
             clip = clip.unsqueeze(0)
     else:
+        if mode != "crop":
+            # The albumentations fallback has its own fixed geometry; refusing is safer
+            # than silently producing a third, unrecorded preprocessing variant.
+            raise RuntimeError(f"preprocess mode {mode!r} requires vjepa.processor; "
+                               "the albumentations fallback path is active")
         # Fallback: albumentations transform from vjepa.transform
         frames_t = torch.stack([vjepa.transform(image=f)["image"] for f in frames_np])
         clip = frames_t.unsqueeze(0)    # (1, T, C, H, W)

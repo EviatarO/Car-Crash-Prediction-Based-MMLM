@@ -53,6 +53,7 @@ sys.path.insert(0, str(MMLM_AI))
 OUT = Path(__file__).resolve().parent / "experiments_data.js"
 E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
+A1C = MMLM_AI / "outputs" / "a1_compress256"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 MANIFESTS = MMLM_AI / "dataset" / "manifests"
 TEST_MANIFEST = MANIFESTS / "test_manifest_hires.jsonl"
@@ -84,6 +85,7 @@ EXPECTED_CM = {
     "V10":     dict(n=677, tp=253, fn=85, fp=39, tn=300),
     "V12":     dict(n=677, tp=253, fn=85, fp=39, tn=300),   # build_landing_data.py: "v12"
     "v12shuf": dict(n=677, tp=244, fn=94, fp=36, tn=303),
+    "A1-compress256": dict(n=677, tp=286, fn=52, fp=55, tn=284),
 }
 
 
@@ -334,6 +336,36 @@ ARMS = [
       test=dict(path=E4 / "a1_1761" / "test_results_ep04.jsonl", gt_key="ground_truth",
                 summary=E4 / "a1_1761" / "test_summary.json", epoch=4,
                 source="e4_vjepa_reason/a1_1761 (epoch 4)")),
+
+    A(key="A1-compress256", label="A1-compress256 · Full-frame preprocessing", order=1.5,
+      family="pool1761",
+      tagline="A1's identical recipe, but the model sees the WHOLE frame instead of a "
+              "center crop that discards ~51% of the width.",
+      hypothesis="Every arm to date — A0 through v12shuf — was accidentally trained and "
+                 "scored on a center-cropped view (V-JEPA2's processor default: resize "
+                 "shortest-edge 292, then center-crop 256×256), keeping only source "
+                 "x∈[321,953] of a 1280-wide frame. On A1's own worst-missed crashes, "
+                 "the collision partner sits outside that crop. Feeding the full frame "
+                 "(resized to 256×256, no crop) should recover that lost context.",
+      aim="Test whether A1's recipe, unchanged in every other respect, does better with "
+          "the full field of view — and separately, whether the FROZEN model alone "
+          "(no training) already benefits, to isolate a preprocessing effect from a "
+          "fine-tuning effect.",
+      method="Identical to A1: LoRA r=16, α=32 on query/key/value, crash CE only, lr 2e-4 "
+             "constant, 8 epochs, same 1,761-window pool, same clip-level split "
+             "(split_seed=0). The ONLY change is `--preprocess compress256`: the V-JEPA2 "
+             "processor resizes the full 1280×720 frame to 256×256 with `do_center_crop"
+             "=False`, instead of its default center-crop. Val-selected rank-1 = epoch 2 "
+             "(val_ap=0.9528, vs A1's own best val_ap of 0.9143).",
+      prompt=None,
+      prompt_note="No language supervision — same as A1.",
+      pool="pool1761", train_dir=A1C / "train",
+      arch=dict(semantic=False, loss=True, state={}, note="preprocess=compress256 "
+               "(full frame, no crop) — the only difference from A1"),
+      hyper=A1C / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=A1C / "train" / "test_results_ep02.jsonl", gt_key="ground_truth",
+                summary=A1C / "train" / "test_summary.json", epoch=2,
+                source="a1_compress256/train (epoch 2)")),
 
     A(key="B-v1", label="B-v1 · Crash + semantic (parallel)", order=2, family="pool1761",
       tagline="First joint arm: crash CE and an InfoNCE caption loss trained together.",

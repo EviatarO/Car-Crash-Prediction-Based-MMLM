@@ -471,6 +471,12 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
+    ap.add_argument("--preprocess", default="crop", choices=["crop", "compress256"],
+                     help="frame preprocessing, applied identically to train, val and test "
+                          "(AA.0 v2, 2026-09-14). 'crop' (default) = every historical run: "
+                          "V-JEPA2 processor defaults, center-crop 256x256 keeping only the "
+                          "middle ~49%% of a 1280x720 frame. 'compress256' = the full frame "
+                          "resized to 256x256, no crop. Recorded in train_metrics.json args.")
     ap.add_argument("--crash-weight", type=float, default=1.0,
                      help="weight on the crash CE term in the optimized loss (default 1.0, "
                           "matching every prior run). 0.0 = Stage A of the P1 two-stage design "
@@ -809,6 +815,7 @@ def main():
         stagea_cfg, lora_target_modules=target_modules,
         lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         unfreeze_module_substrings=["temporal_processor", "classifier"] if args.unfreeze_head else None,
+        preprocess_mode=args.preprocess,
     )
     # peft's save_pretrained() auto-generates a model card BEFORE writing any
     # adapter weights, and assumes base_model.config supports `in` (a HF

@@ -180,9 +180,16 @@ class TrainableBadasWrapper:
 
     def __init__(self, stagea_cfg: dict, lora_target_modules: list | None = None,
                  lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
-                 unfreeze_module_substrings: list | None = None):
-        from e4_stageA_badas_open_eval import load_badas, preprocess_clip
+                 unfreeze_module_substrings: list | None = None,
+                 preprocess_mode: str = "crop"):
+        from e4_stageA_badas_open_eval import load_badas, preprocess_clip, PREPROCESS_MODES
+        if preprocess_mode not in PREPROCESS_MODES:
+            raise ValueError(f"preprocess_mode {preprocess_mode!r} not in {PREPROCESS_MODES}")
         self._preprocess_clip = preprocess_clip
+        # "crop" = every historical run; "compress256" = full frame squashed to 256x256.
+        # Applied identically in forward() and prefetch_clips(), i.e. train, val and test.
+        self.preprocess_mode = preprocess_mode
+        print(f"  [wrapper] preprocess mode: {preprocess_mode}")
         self.vjepa, self.nn_model, self.device = load_badas(stagea_cfg)
 
         probe = getattr(self.nn_model, "temporal_processor", None)
@@ -315,7 +322,8 @@ class TrainableBadasWrapper:
         print(f"  [wrapper] loaded head state: {len(sd)} params from {path}")
 
     def forward(self, frame_paths: list):
-        clip = self._preprocess_clip(self.vjepa, frame_paths).to(self.device)
+        clip = self._preprocess_clip(self.vjepa, frame_paths,
+                                     mode=self.preprocess_mode).to(self.device)
         return self.forward_clip(clip)
 
     def forward_clip(self, clip):
@@ -363,7 +371,8 @@ class TrainableBadasWrapper:
 
         def _one(ex):
             try:
-                return self._preprocess_clip(self.vjepa, ex[key]), None
+                return self._preprocess_clip(self.vjepa, ex[key],
+                                             mode=self.preprocess_mode), None
             except (OSError, RuntimeError) as e:
                 return None, e
 
@@ -388,6 +397,98 @@ class TrainableBadasWrapper:
                     futures[next_submit] = pool.submit(_one, examples[next_submit])
                     next_submit += 1
                 yield i, examples[i], clip, err
+
+
+# =============================================================================
+# LoRA topology from a run's own config + checked adapter loading (AA.0, 2026-09-14)
+# =============================================================================
+# The scorers used to hardcode query,key,value / r=16 / alpha=32. peft's
+# set_peft_model_state_dict() loads with strict=False, so an adapter trained with a
+# different topology (e.g. the encoder-only regex that is now semsup_train.py's
+# default) would load partially and SILENTLY score a different model.
+
+LEGACY_LORA_TOPOLOGY = {"lora_target_modules": "query,key,value",
+                        "lora_r": 16, "lora_alpha": 32, "lora_dropout": 0.05}
+
+
+def parse_lora_target_modules(spec):
+    """semsup_train.py's CLI convention: 're:<regex>' -> regex string for peft,
+    otherwise a comma-separated list of module-name substrings."""
+    if isinstance(spec, (list, tuple)):
+        return list(spec)
+    spec = str(spec)
+    if spec.startswith("re:"):
+        return spec[3:]
+    return [s.strip() for s in spec.split(",") if s.strip()]
+
+
+def find_train_metrics(adapter_path):
+    """train_metrics.json for an adapter at <run>/epoch_XX/lora_adapter[/file]."""
+    p = Path(adapter_path)
+    if p.suffix == ".safetensors":
+        p = p.parent
+    for cand in (p.parent.parent / "train_metrics.json", p.parent / "train_metrics.json"):
+        if cand.exists():
+            return cand
+    return None
+
+
+def resolve_lora_topology(adapter_path=None, overrides=None):
+    """Topology the adapter was TRAINED with: read from its run's train_metrics.json
+    ["args"], falling back per-key to the legacy literals (e.g. A1_1761's args predate
+    --lora-dropout). Explicit non-None overrides win. Returns (topology, source)."""
+    topo = dict(LEGACY_LORA_TOPOLOGY)
+    source = "legacy default"
+    tm = find_train_metrics(adapter_path) if adapter_path else None
+    if tm is not None:
+        run_args = json.load(open(tm, encoding="utf-8")).get("args", {})
+        taken = [k for k in topo if run_args.get(k) is not None]
+        for k in taken:
+            topo[k] = run_args[k]
+        source = f"{tm} (keys: {taken}; others legacy)"
+    for k, v in (overrides or {}).items():
+        if v is not None:
+            topo[k] = v
+            source += f" + CLI override {k}"
+    return topo, source
+
+
+def load_lora_adapter_checked(nn_model, adapter_path, strict: bool = True):
+    """Load a peft LoRA adapter and VERIFY it matches the model's adapter set.
+
+    unexpected (in file, no module in model) -> tensors would be silently dropped:
+        raise when strict, else warn.
+    missing (module in model, absent from file) -> those adapters keep lora_B=0,
+        i.e. contribute nothing: always warn.
+    """
+    from safetensors.torch import load_file
+    from peft.utils import set_peft_model_state_dict
+    p = Path(adapter_path)
+    sft = p / "adapter_model.safetensors" if p.is_dir() else p
+    if not sft.exists():
+        raise FileNotFoundError(f"adapter not found: {sft}")
+    sd = load_file(str(sft))
+
+    def _norm(k):
+        return k.replace(".default", "")
+
+    file_keys = {_norm(k) for k in sd}
+    model_keys = {_norm(k) for k in nn_model.state_dict() if "lora_" in k}
+    unexpected = sorted(file_keys - model_keys)
+    missing = sorted(model_keys - file_keys)
+    if unexpected:
+        msg = (f"{len(unexpected)} tensors in {sft} match no LoRA module in the model "
+               f"(e.g. {unexpected[:2]}) - topology mismatch, they would be silently dropped")
+        if strict:
+            raise RuntimeError(msg)
+        print(f"  [WARN] {msg}")
+    if missing:
+        print(f"  [WARN] {len(missing)} LoRA tensors in the model are absent from {sft} "
+              f"(e.g. {missing[:2]}) - those adapters stay at init and contribute nothing")
+    set_peft_model_state_dict(nn_model, sd)
+    print(f"  [load] adapter {sft}: {len(file_keys)} tensors, "
+          f"{len(missing)} missing, {len(unexpected)} unexpected")
+    return sft
 
 
 def dry_run_modules(cfg_path: str, out_path: str):

@@ -1,5 +1,90 @@
 # Project State
 
+## ⚠️ 2026-09-14 status update — NEW CHAMPION, read this first
+
+**Every arm in this file (A0=0.853 through every semantic-supervision arm below) was
+measured under a preprocessing bug: the model saw only the center ~49% of each frame's
+width, not the full frame.** Fixed. The straightforward fix alone — no architecture change,
+no new data — beats every semantic-supervision effort in this document's entire history.
+
+**What happened.** `preprocess_clip()` (`e4_stageA_badas_open_eval.py`) has, since its first
+working version (2026-06-24), passed the raw 1280×720 frame straight into V-JEPA2's
+`AutoVideoProcessor`, which by default **resizes the shortest edge to 292 then center-crops
+256×256** — keeping only source `x∈[321,953]` of a 1280-wide frame (~49% of width, 88% of
+height). Docs across this repo (`ARCHITECTURE.md`, `StageA_scorer/StageA_summary.md`, the
+scorer's own docstring) claimed the opposite — "squash-resize, no crop" — describing BADAS's
+released *inference* code, which the project never actually ran; the *training* code path
+(which this repo does use) crops. Discovered while investigating why A1 misses cut-ins: its
+two worst-missed real crashes both have the collision partner physically outside the crop.
+
+**The fix and the result.** Added `--preprocess {crop, compress256}` to `preprocess_clip`,
+the model wrapper, `semsup_train.py`, and all three scorers (`crop` = default, byte-identical
+to every historical run — verified). Retrained A1's *exact* recipe (same 1,761-window pool,
+same split, same hyperparameters, only `--preprocess compress256`) →
+**`A1-compress256`: test AP 0.9128 (private) / 0.9096 (public)**, beating A1's 0.900/0.908.
+**A1-compress256 is now the champion**, and `compress256` is now the project default for all
+future work.
+
+**Evidence, cleanest first:**
+| Comparison | ΔAP | 95% CI | Verdict |
+|---|---|---|---|
+| A0 (frozen, **zero training**), crop vs compress256, private (677) | +0.0532 | [0.0356, 0.0727] | **excludes zero** |
+| A0 (frozen), crop vs compress256, public (667) | +0.0331 | [0.0133, 0.0547] | **excludes zero, replicated** |
+| A1-compress256 vs A1-recorded, private | +0.0137 | [-0.0015, 0.0292] | crosses zero, P=96.1% |
+| A1-compress256 vs A1-crop, pooled private+public (1344) | +0.0071 | [-0.0034, 0.0180] | crosses zero, P=90.5-94.9% |
+
+The A0 comparison (same frozen weights, zero training, one variable changed) is the
+load-bearing evidence — clean, single-variable, both splits replicate. The fine-tuned
+comparisons are directionally consistent everywhere and never once favour crop, but are
+individually underpowered at n<1400 for a ~0.7-1.4pp effect — expected, not concerning.
+
+**A planned same-environment control run (`A1-crop-rerun`) was started then deliberately
+cancelled** (pod was paused mid-run; on review, it didn't gate the decision — the plan's own
+fallback rule already said "adopt compress256 anyway" in the tie case, and **G1** — re-scoring
+A1's *existing* checkpoint on this pod, ΔAP=0.0009 vs its historical number — already showed
+this pod's environment doesn't inflate results). Full reasoning in
+`outputs/a1_compress256/summary.md`.
+
+**A correctness bug was found and fixed in the same session**:
+`score_checkpoints_on_test.py`'s `NAME=NONE` ("frozen baseline") only skipped loading a new
+adapter — it never reset the *previous* one. Scoring a real adapter then `NONE` in one
+process silently re-scored the real adapter under the baseline's name (caught because A0
+came back bit-identical to A1 — impossible). Fixed by snapshotting the zero-init LoRA state
+and restoring it for every `NONE` arm (mirrors the pre-existing head-restore pattern).
+Verified in isolation before use. **Any historical use of this script scoring a real adapter
+alongside `NAME=NONE` in the same invocation should be treated as suspect** — check whether
+the baseline number in that run matches a known-good frozen baseline before trusting it.
+
+**Also resolved, in passing: the 2560-vs-2048 token question, open since August.**
+Measured directly on the loaded `badas_open.pth`: `backbone.encoder` outputs 2048 real
+tokens (8×16×16, confirmed via flatten-order + tubelet-grouping probes); BADAS's own
+`backbone.predictor` is then called with those 2048 + 512 appended mask-tokens (2560 in) and
+returns 512 predicted "future" tokens with no fixed pixel location, concatenated back to
+`[2048 real, 512 predicted] = 2560` for the crash head. Both historical numbers were
+correct, for different modules. **Not yet verified: the concat order** (real-then-predicted
+assumed, not proven) — needed before any token-index-based masking (Stage AA) is built.
+
+**What does NOT change**: the semantic-supervision null result itself. The crop bug was
+common-mode across A0, A1, and every B-arm/semantic-supervision comparison in this document
+(same logic as the already-documented 108-vs-72-adapter waste) — it shifted all of them
+together, so it cannot explain the A-vs-B gap those experiments measured. A future semantic-
+supervision arm, if one is ever run again, should now be built on `compress256`.
+
+**Not done in this pass**: public-test support in the website's experiments detail page
+(A1-compress256's public number exists but isn't surfaced there — pre-existing gap, not
+introduced now); the concat-order verification above; `docs_agents/NEXT_LORA_PLACEMENT.md`
+and `ARCHITECTURE_BLOCKS.md` need the 2560 resolution folded in.
+
+Full record: `outputs/a1_compress256/summary.md` (all numbers, all bootstrap JSONs, the
+cancelled-rerun reasoning). Plans:
+`~/.claude/plans/CCP based BADAS/2026-09-13_Father-Plan-Stage-AA-BB.md` (the detection-guided
+supervision program this gate unblocks) and its child plan
+`2026-09-14_Child-Plan-Gate-AA0-v2-crop-vs-compress256.md`.
+
+**Pod**: reconnect with a fresh IP/port each session (ask the user) — the persistent volume
+(`/workspace/MMLM_AI`) survives pauses/resumes with all checkpoints intact; the Python
+environment does not (reinstall every time, see the standing pod-state section below).
+
 ## ⚠️ 2026-09-09 status update (read this first — the rest of this file predates it)
 
 A `/project-review`-style audit ran 2026-09-06 (`reports/project_reviews/

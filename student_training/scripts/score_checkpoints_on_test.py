@@ -57,7 +57,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 
-from semsup_common import TrainableBadasWrapper  # noqa: E402
+from semsup_common import (  # noqa: E402
+    TrainableBadasWrapper, resolve_lora_topology, parse_lora_target_modules,
+    load_lora_adapter_checked,
+)
 from metrics_core import metrics_from_arrays  # noqa: E402
 
 # The two module-name substrings that make up the crash head - see
@@ -95,6 +98,16 @@ def main():
                           "e4_stageA_badas_open_eval.py's A0 convention - only needed for "
                           "a directly A0-comparable Brier/ECE; AP/AUC/CM are invariant to "
                           "this (see module docstring).")
+    ap.add_argument("--preprocess", default="crop", choices=["crop", "compress256"],
+                     help="frame preprocessing - MUST match how the adapter was trained "
+                          "('crop' = every historical run; 'compress256' = full frame "
+                          "resized to 256x256). Written into each metrics JSON.")
+    ap.add_argument("--lora-target-modules", default=None,
+                     help="override. Default: read from each adapter's run "
+                          "train_metrics.json (legacy query,key,value if absent).")
+    ap.add_argument("--lora-r", type=int, default=None, help="override; see --lora-target-modules")
+    ap.add_argument("--lora-alpha", type=int, default=None, help="override; see --lora-target-modules")
+    ap.add_argument("--lora-dropout", type=float, default=None, help="override; see --lora-target-modules")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--deterministic", action="store_true", default=True,
@@ -144,9 +157,31 @@ def main():
                           f"e.g. {missing[0]['video_id']} -> {missing[0]['frame_paths'][0]}")
     print(f"[verify] all {len(records_wp)} records have every frame present on disk")
 
-    print("[setup] LoRA topology: query,key,value (r=16, alpha=32, dropout=0.05)")
-    badas = TrainableBadasWrapper(cfg, lora_target_modules=["query", "key", "value"],
-                                   lora_r=16, lora_alpha=32, lora_dropout=0.05)
+    # One wrapper serves every adapter in this invocation, so all adapters must share
+    # one topology. Resolve it from each adapter's own train_metrics.json and refuse to
+    # mix topologies (score those in separate invocations).
+    overrides = {"lora_target_modules": args.lora_target_modules, "lora_r": args.lora_r,
+                 "lora_alpha": args.lora_alpha, "lora_dropout": args.lora_dropout}
+    topologies = {}
+    for spec in args.adapters:
+        name, path = spec.split("=", 1) if "=" in spec else (spec, None)
+        if path and path.upper() != "NONE":
+            topologies[name] = resolve_lora_topology(path, overrides)
+    if topologies:
+        first_name, (topo, source) = next(iter(topologies.items()))
+        for name, (t, s) in topologies.items():
+            if t != topo:
+                raise SystemExit(f"adapters {first_name} and {name} were trained with different "
+                                 f"LoRA topologies ({topo} vs {t}); score them in separate "
+                                 f"invocations")
+    else:
+        topo, source = resolve_lora_topology(None, overrides)
+    print(f"[setup] LoRA topology {topo}  <- {source}")
+    print(f"[setup] preprocess: {args.preprocess}")
+    badas = TrainableBadasWrapper(cfg, lora_target_modules=parse_lora_target_modules(topo["lora_target_modules"]),
+                                   lora_r=topo["lora_r"], lora_alpha=topo["lora_alpha"],
+                                   lora_dropout=topo["lora_dropout"],
+                                   preprocess_mode=args.preprocess)
     badas.nn_model.eval()
 
     # Snapshot the ORIGINAL frozen head weights before scoring anything, so any arm
@@ -157,8 +192,18 @@ def main():
                      if any(sub in k for sub in HEAD_SUBSTRINGS)}
     print(f"[setup] snapshotted {len(orig_head_sd)} original head-param tensors for restore")
 
-    from safetensors.torch import load_file
-    from peft.utils import set_peft_model_state_dict
+    # SAME bug class for LoRA weights, and it is NOT hypothetical - it silently fired the
+    # first time this script scored a real adapter and NAME=NONE in one invocation (AA.0,
+    # 2026-09-14): "NONE" only skipped loading a new adapter, it never reset the PREVIOUS
+    # one, so the "frozen baseline" silently inherited whatever adapter was scored just
+    # before it (A1=... A0=NONE -> A0 scored bit-identical to A1: AP/AUC/every TP-FN-FP-TN
+    # matched exactly - impossible for a real frozen-vs-tuned comparison, and it would have
+    # gone unnoticed if the two numbers had merely been close instead of identical). LoRA's
+    # lora_B is zero-init, so this snapshot IS the true frozen-baseline state; restoring it
+    # for every NAME=NONE arm makes "NONE" mean "no adapter", not "whatever loaded last".
+    orig_lora_sd = {k: v.detach().clone() for k, v in badas.nn_model.state_dict().items()
+                    if "lora_" in k}
+    print(f"[setup] snapshotted {len(orig_lora_sd)} original (zero-init) LoRA tensors for restore")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -169,17 +214,25 @@ def main():
         name, path = spec.split("=", 1)
 
         if path.upper() == "NONE":
-            print(f"\n[score] {name}: frozen baseline, no adapter attached")
+            # Restore the zero-init LoRA state - see orig_lora_sd's comment above. Without
+            # this, "NONE" scored after a real adapter in the same invocation silently
+            # scores that PREVIOUS adapter again, not the frozen baseline.
+            if orig_lora_sd:
+                badas.nn_model.load_state_dict(orig_lora_sd, strict=False)
+            print(f"\n[score] {name}: frozen baseline, no adapter attached "
+                  f"({len(orig_lora_sd)} LoRA tensors reset to zero-init)")
             sibling_head = None
         else:
             adapter_path = Path(path)
             sft = (adapter_path / "adapter_model.safetensors") if adapter_path.is_dir() else adapter_path
             if not sft.exists():
                 raise SystemExit(f"{name}: adapter not found at {sft}")
-            # Every adapter here shares the same topology, so this fully overwrites the
-            # previous checkpoint's lora_A/lora_B - no residue carries between arms.
-            set_peft_model_state_dict(badas.nn_model, load_file(str(sft)))
-            print(f"\n[score] {name}: loaded {sft}")
+            print(f"\n[score] {name}:")
+            # Every adapter here shares the same (verified) topology, so this fully
+            # overwrites the previous checkpoint's lora_A/lora_B - no residue carries
+            # between arms. strict=True: a mismatched adapter raises instead of loading
+            # partially.
+            load_lora_adapter_checked(badas.nn_model, sft, strict=True)
             # sibling head_state.pt convention (semsup_train.py writes both under the
             # same epoch_XX/ dir): adapter_path is .../epoch_XX/lora_adapter, so the
             # sibling is adapter_path.parent / "head_state.pt".
@@ -250,6 +303,9 @@ def main():
         metrics_path = out_dir / f"{name}.metrics.json"
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump({"arm": name, "temperature": args.temperature,
+                       "preprocess": args.preprocess,
+                       "lora_topology": None if path.upper() == "NONE" else topo,
+                       "test_manifest": args.test_manifest,
                        "head_state": head_state_map.get(name), **m}, f, indent=2)
         print(f"  {name}: n={m['n_total']}  AP={m['ap']}  AUC={m['auc_roc']}  "
               f"acc@0.5={m['accuracy']}  tp={m['tp']} fn={m['fn']} fp={m['fp']} tn={m['tn']}  "

@@ -38,6 +38,7 @@ SELECTION = MMLM_AI / "outputs" / "a1fail321" / "selection_a1fail321.jsonl"
 E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 
 A1F = MMLM_AI / "outputs" / "a1fail321"
+A1C = MMLM_AI / "outputs" / "a1_compress256"
 
 # A1 deliberately reads its ORIGINAL evaluation (a1_1761, epoch 4 - the run the published
 # 0.900 came from), not the a1fail321 re-score of the same weights. The two differ: the
@@ -63,6 +64,10 @@ EXPERIMENTS = [
          path=E4 / "a1_1761" / "test_results_ep04.jsonl",
          gt_key="ground_truth", summary=E4 / "a1_1761" / "test_summary.json", epoch=4,
          source="e4_vjepa_reason/a1_1761 (epoch 4)"),
+    dict(order=1.5, arm="A1-compress256", label="A1-compress256 · Full-frame preprocessing",
+         path=A1C / "train" / "test_results_ep02.jsonl",
+         gt_key="ground_truth", summary=A1C / "train" / "test_summary.json", epoch=2,
+         source="a1_compress256/train (epoch 2)"),
     dict(order=2, arm="B-v1", label="B-v1 · Crash + semantic (V10 captions)",
          path=E4 / "b_1761_par" / "test_results_ep04.jsonl",
          gt_key="ground_truth", summary=None,
@@ -103,6 +108,7 @@ SEMANTIC_LAMBDA = 0.2   # current --semantic-weight; a landing-page field, not b
 EXPECTED = {
     "A0":     dict(n=677, tp=308, fn=30, fp=130, tn=209),
     "A1":     dict(n=677, tp=320, fn=18, fp=123, tn=216),
+    "A1-compress256": dict(n=677, tp=286, fn=52, fp=55, tn=284),
     "B-v1":   dict(n=677, tp=317, fn=21, fp=130, tn=209),
     "B-v2":   dict(n=677, tp=285, fn=53, fp=76, tn=263),
     "B-v3":   dict(n=677, tp=267, fn=71, fp=55, tn=284),

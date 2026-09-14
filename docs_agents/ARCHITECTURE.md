@@ -57,10 +57,14 @@ match" which describes cosine, not the current InfoNCE default).
   2,801,664 / 334,355,842 params (0.84%).
   Note: the same substring also matches 12 V-JEPA2 predictor-layer attention blocks — still
   undecided whether to restrict to encoder-only (see DECISIONS.md).
-- Frames on disk are **HiRes (1280×720)** and that is correct/intended: BADAS's own
-  `AutoVideoProcessor` squash-resizes to 224×224 + ImageNet norm inside `preprocess_clip()`.
-  Feeding pre-squashed 256×256 frames would cause a lossy double-resize. A0's validated 0.853
-  used the HiRes→224 single-resize path.
+- Frames on disk are **HiRes (1280×720)**. **Corrected 2026-09-14 (measured):** the V-JEPA2
+  `AutoVideoProcessor` does NOT squash here — it resizes the shortest edge to 292 and
+  **center-crops 256×256**, so every run to date (A0 0.853, A1 0.900, all B arms, SemTest-200,
+  a1fail321) saw only source **x 321–953, y 42–674 (~49% of width)**. The earlier "squash to
+  224×224" note described BADAS's released inference code, which this repo never implemented.
+  `preprocess_clip(mode=...)` / `--preprocess {crop, compress256}` now makes it explicit; `crop`
+  stays the default and is byte-identical to the historical path. `compress256` resizes the full
+  frame to 256×256 (one token = 80×45 source px). Decision pending: AA.0 v2 plan.
 - SigLIP text embedding dim **Dt = 768** (`google/siglip-base-patch16-224`). Its tokenizer
   needs both `sentencepiece` and `protobuf`.
 - Patch-grid / Predictor dtype mismatch: BADAS may run fp16, Predictor is fp32. Cast with

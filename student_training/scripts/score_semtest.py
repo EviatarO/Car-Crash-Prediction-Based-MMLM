@@ -33,7 +33,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 
-from semsup_common import TrainableBadasWrapper, load_training_examples  # noqa: E402
+from semsup_common import (  # noqa: E402
+    TrainableBadasWrapper, load_training_examples, resolve_lora_topology,
+    parse_lora_target_modules, load_lora_adapter_checked,
+)
 
 
 def main():
@@ -50,6 +53,9 @@ def main():
                      help="SemTest-200 caption file with explicit frames_dir per row "
                           "(load_training_examples uses it as-is).")
     ap.add_argument("--arm-name", required=True, help="written into every output row")
+    ap.add_argument("--preprocess", default="crop", choices=["crop", "compress256"],
+                     help="must match how the adapter was trained ('crop' = every "
+                          "historical run; 'compress256' = full frame resized to 256x256)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -57,20 +63,19 @@ def main():
     cfg = yaml.safe_load(open(args.config))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"[setup] LoRA topology: query,key,value")
-    badas = TrainableBadasWrapper(cfg, lora_target_modules=["query", "key", "value"],
-                                   lora_r=16, lora_alpha=32, lora_dropout=0.05,
+    topo, source = resolve_lora_topology(args.lora_adapter)
+    print(f"[setup] LoRA topology {topo}  <- {source}  |  preprocess: {args.preprocess}")
+    badas = TrainableBadasWrapper(cfg, lora_target_modules=parse_lora_target_modules(topo["lora_target_modules"]),
+                                   lora_r=topo["lora_r"], lora_alpha=topo["lora_alpha"],
+                                   lora_dropout=topo["lora_dropout"],
                                    unfreeze_module_substrings=(
                                        ["temporal_processor", "classifier"]
-                                       if args.head_state else None))
+                                       if args.head_state else None),
+                                   preprocess_mode=args.preprocess)
 
     if args.lora_adapter:
-        from safetensors.torch import load_file
-        from peft.utils import set_peft_model_state_dict
-        adapter_path = Path(args.lora_adapter)
-        sft = adapter_path / "adapter_model.safetensors" if adapter_path.is_dir() else adapter_path
-        set_peft_model_state_dict(badas.nn_model, load_file(str(sft)))
-        print(f"[load] {args.arm_name}: LoRA weights from {sft}")
+        load_lora_adapter_checked(badas.nn_model, args.lora_adapter, strict=True)
+        print(f"[load] {args.arm_name}: LoRA weights from {args.lora_adapter}")
     else:
         print(f"[load] {args.arm_name}: frozen baseline, no LoRA adapter attached")
 

@@ -44,6 +44,7 @@ from build_pool1761_comparison import clip_level_split  # noqa: E402
 OUT = Path(__file__).resolve().parent / "compare_data.js"
 E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
+A1C = MMLM_AI / "outputs" / "a1_compress256"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 TEST_MANIFEST = MMLM_AI / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 
@@ -58,6 +59,7 @@ GROUP_LABEL = {0: "tte_0.5s", 1: "tte_1.0s", 2: "tte_1.5s"}
 TEST_SCORES = {
     "A0":   (E4 / "StageA_scorer" / "badas_open_private.jsonl", "ground_truth"),
     "A1":   (E4 / "a1_1761" / "test_results_ep04.jsonl", "ground_truth"),
+    "A1-compress256": (A1C / "train" / "test_results_ep02.jsonl", "ground_truth"),
     "B-v1": (E4 / "b_1761_par" / "test_results_ep04.jsonl", "ground_truth"),
     "B-v2": (E4 / "b_v2_1761" / "test_results_ep02.jsonl", "ground_truth"),
     "B-v3": (E4 / "b_v3_1761" / "test_results_ep10.jsonl", "ground_truth"),
@@ -67,7 +69,7 @@ TEST_SCORES = {
     "V10":     (A1F / "test_scores" / "v10_ep10.jsonl", "gt_verdict"),
     "v12shuf": (A1F / "test_scores" / "v12shuf_ep10.jsonl", "gt_verdict"),
 }
-POOL1761_ARMS = ["A0", "A1", "B-v1", "B-v2", "B-v3", "P1"]
+POOL1761_ARMS = ["A0", "A1", "A1-compress256", "B-v1", "B-v2", "B-v3", "P1"]
 # a1cont is the crash-only control started from the identical A1 weights - it is what V10
 # and V12 must be read against, so it is offered here even though it is not one of the
 # eight headline arms.
