@@ -1395,3 +1395,61 @@ to beat v12shuf, not A0.
 
 Website: all ten arms now appear in the landing results table, the Cross-Experiment
 Comparison test-set arm list, and the detail view.
+
+## A1-compress256 — full-frame preprocessing, NEW CHAMPION (2026-09-14)
+
+Separate thread from the semantic-supervision work above — see PROJECT_STATE.md's
+top status block for the full evidence table and decision reasoning; this entry is the
+experiment-log summary.
+
+**Finding**: every arm above (A0 through v12shuf) was trained/scored on a preprocessing bug
+- BADAS's V-JEPA2 processor center-crops to 256x256 by default, keeping only source
+`x∈[321,953]` of a 1280-wide frame (~49% of width). Fix: `--preprocess compress256` (full
+frame resized to 256x256, no crop) added to `preprocess_clip()` and threaded through the
+trainer/scorers; `crop` stays default, verified byte-identical to every historical run.
+
+| Arm | Preprocess | Recipe | Private AP | Public AP |
+|---|---|---|---|---|
+| A0 | crop | frozen, no training | 0.8535 | 0.8711 |
+| **A0-compress256** | compress256 | frozen, no training | **0.9067** | **0.9042** |
+| A1 | crop | LoRA r16/a32 q,k,v, crash CE only, 8ep | 0.8995 (this session's re-score) | 0.9083 |
+| **A1-compress256** | compress256 | **identical recipe to A1**, only preprocess changed | **0.9128** | **0.9096** |
+
+Bootstrap comparisons (`paired_bootstrap_ab.py`, 5000 resamples):
+- A0 crop vs compress256, private: ΔAP +0.0532, 95% CI [0.0356, 0.0727] — **excludes zero**
+- A0 crop vs compress256, public: ΔAP +0.0331, 95% CI [0.0133, 0.0547] — **excludes zero**
+- A1-compress256 vs A1-recorded, private: ΔAP +0.0137, CI [-0.0015, 0.0292] — crosses zero
+- A1-compress256 vs A1-crop, pooled private+public (n=1344): ΔAP +0.0071, CI [-0.0034, 0.0180]
+
+**A1-compress256 is the new champion.** `compress256` is now the project default. Outputs:
+`outputs/a1_compress256/` (train dir, all score files, bootstrap JSONs, `summary.md`,
+`RUNBOOK_pod.md` — all gitignored, not in git history). Website: `A1-compress256` registered
+in all three builders and `POOL1761_ARMS`.
+
+A planned same-environment control run (`A1-crop-rerun`) was started then deliberately
+cancelled when the pod was paused mid-run — see DECISIONS.md for why that was the right call,
+not a loose end.
+
+## Stage AA.1 — detection pipeline smoke test, IN PROGRESS (2026-09-14)
+
+`student_training/scripts/aa1_detect_track_rank.py`, run locally (RTX 1000 Ada, 6GB).
+Grounding DINO (`IDEA-Research/grounding-dino-tiny`) → NMS → BoT-SORT
+(`minimum_consecutive_frames=1`, `high_conf_det_threshold=0.30`) → virtual-corridor
+kinematics → threat ranking.
+
+**Run so far: clip 00687 only** (1 of the 18 `val_e3a` smoke-test clips), repeated several
+times while diagnosing two tracking bugs (see DECISIONS.md/ARCHITECTURE.md for the fixes).
+Decode window `[15.48, 18.48]s` at 30.6fps = 93 raw frames. Detection: ~0.6-0.9s/frame warm.
+
+**Final state on this clip**: the actual cut-in vehicle IS now correctly tracked, continuously,
+across all 93 frames (verified visually — box grows from moderate to frame-edge-touching,
+matching its real approach). Its computed threat score is **0.197** (looming-only; the
+lateral/corridor term evaluates to 0 for it), which does **not** rank #1 — several other,
+non-hazardous tracked objects score higher. Diagnosed cause: the virtual-corridor fallback
+is too narrow/mis-shaped for this scene (a wide intersection), not a tracking failure. This
+is the open item in PROJECT_STATE.md - not yet resolved, three options on the table (A/B/C),
+no run of the remaining 17 clips yet.
+
+Outputs so far: `outputs/aa1_smoke/00687.json` (full per-track record including
+`all_tracks_debug`), `00687_overlay.mp4`, and several ad-hoc diagnostic JPEGs in the same
+directory (not part of the pipeline's normal output, made while diagnosing).

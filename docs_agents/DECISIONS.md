@@ -329,8 +329,40 @@
   which semantics could possibly help. `a1cont` **is** the limiting case of full weight
   separation.
 
+### AA.0 preprocessing gate + AA.1 detection pipeline (2026-09-14)
+- **Run the `A1-crop-rerun` control (same-environment retrain on `crop`) after
+  A1-compress256 scored 0.9128 vs A1-recorded's 0.900 (CI crosses zero)** → started per the
+  father plan's pre-registered rule, then deliberately cancelled when the pod was
+  paused/resumed mid-run. On review: the plan's own fallback already said "adopt
+  compress256 anyway" in the tie case, so the rerun's outcome couldn't change the action
+  either way — and **G1** (re-scoring A1's *existing* checkpoint on this same pod,
+  reproducing it within noise) already ruled out the one scenario where the rerun would
+  have mattered (this pod's training environment itself inflating results). Not a loose
+  end — a considered call, not an accident of the pause. See PROJECT_STATE.md/EXPERIMENTS.md.
+- **Raise `BoTSORTTracker`'s `minimum_iou_threshold_first_assoc` (0.2→0.55) to fix a
+  cut-in vehicle never getting its own track** → tried first, produced more tracks (3→6 on
+  clip 00687) but not the correct one; traced further and found NOT the actual cause. The
+  real cause was `high_conf_det_threshold` (see ARCHITECTURE.md). Reverted before landing on
+  the real fix — don't re-try the IoU-threshold route for this symptom.
+- **Assume a giant, edge-touching detection box is noisy/unstable and needs pre-tracking
+  smoothing** → this was the working hypothesis before the actual cause (the tracker's
+  confidence-tiered track-creation logic) was found by tracing the exact box coordinates at
+  every pipeline stage. The box itself was stable and correctly localized throughout —
+  visually confirmed at full resolution. Don't reach for box-smoothing as the fix for "a
+  real object never gets a track" without first checking whether its detection confidence
+  ever crosses the tracker's OWN internal high-confidence threshold.
+
 ## Unresolved design questions
 
+- **How should Stage AA.1's virtual-corridor threat ranking handle a wide-intersection scene
+  where the crude fixed-trapezoid corridor is too narrow to flag a correctly-tracked, real
+  cut-in vehicle as the top threat?** (2026-09-14, open, not yet decided by the user) Three
+  options on the table, tradeoffs stated but no default chosen: (A) widen/recalibrate the
+  virtual corridor - cheap, still a crude proxy; (B) add an independent size/growth/
+  proximity threat signal that doesn't route through corridor overlap at all - cheap, targets
+  this exact failure mode; (C) skip ahead to real lane detection (CLRerNet) now rather than
+  keep iterating the fallback. See PROJECT_STATE.md's Stage AA.1 section for the full
+  diagnosis this question comes from.
 - ~~Do the captions still carry class-discriminating information, and is that why the semantic
   arms lose on positives?~~ **REFUTED 2026-08-27** — see DECISIONS.md's new rejected-options
   entry above and PROJECT_STATE.md's correction. Class separation is flat-to-higher for B-v3,

@@ -787,3 +787,114 @@ badas.nn_model.create_or_update_model_card = lambda *a, **k: None
 ```
 `peft`'s `save_pretrained()` builds a model card before writing weights and assumes
 `base_model.config` is dict-like; BADAS's `ModelArgs` isn't, so every checkpoint save crashed.
+
+## Stage AA — detection pipeline (2026-09-14, new, separate from the student model above)
+
+A different subsystem from everything above: no BADAS, no LoRA, no student training. Its
+job is to produce per-object kinematic signals from raw dashcam video, for the father plan's
+detection-guided auxiliary supervision program
+(`~/.claude/plans/CCP based BADAS/2026-09-13_Father-Plan-Stage-AA-BB.md`). Currently at the
+AA.1 smoke-test stage (1 of 18 clips run so far, iterating on the geometry/ranking step — see
+PROJECT_STATE.md for exactly what's unresolved).
+
+**Pipeline**: raw MP4 (full native fps, not the 16-frame extracted JPEGs) → decode a time
+window → Grounding DINO (per-frame object detection, open-vocabulary text prompt) → NMS →
+BoT-SORT (multi-object tracking across frames) → per-track kinematics (looming rate, virtual-
+corridor overlap) → threat score → ranking.
+
+**Runs locally** (a laptop RTX 1000 Ada, 6GB), not the pod — this required installing a
+CUDA-enabled PyTorch locally this session (`torch==2.11.0+cu128`, replacing what had been a
+CPU-only local build). Measured detection speed: ~0.6-0.9s/frame warm. This rate makes the
+eventual full run (AA.2, ~200k frames across the 4,446-window pool) infeasible on this GPU —
+that pass will need to run on a pod, per the father plan's D3.
+
+### Files that matter
+
+| Path | Purpose |
+|---|---|
+| `student_training/scripts/aa1_detect_track_rank.py` | The whole AA.1 pipeline: decode, detect, track, geometry, threat ranking, overlay rendering. Single file for now. |
+
+### Key design choices, and why
+
+- **Detector = Grounding DINO via `transformers`** (`IDEA-Research/grounding-dino-tiny`,
+  `AutoModelForZeroShotObjectDetection`), not the original IDEA-Research repo — the original
+  needs a custom CUDA op (Multi-Scale Deformable Attention) compiled, which is painful on
+  Windows. The HF port is pure PyTorch.
+- **Tracker = `trackers.BoTSORTTracker`** (Roboflow's `trackers` package, installed this
+  session; note the class name is `BoTSORTTracker`, capitalized exactly that way — not
+  `BotSortTracker`). `minimum_consecutive_frames=1` (not the package default of 2) so a
+  cut-in vehicle appearing late in a window isn't dropped before it can be tracked at all.
+- **`high_conf_det_threshold=BOX_THRESHOLD` (0.30) is REQUIRED, not optional** — see
+  PROJECT_STATE.md's "the load-bearing fix." Leaving this at the package default (0.6) makes
+  the tracker structurally unable to start a new track from a real object whose confidence
+  sits in the 0.3-0.6 band, no matter how many consecutive frames it's correctly detected in.
+- **NMS is applied manually before tracking** (`sv.Detections.with_nms(threshold=0.5,
+  class_agnostic=True)`) — `post_process_grounded_object_detection` does not do this itself,
+  and without it, multiple overlapping candidate boxes per real object get fed to the tracker
+  every frame.
+- **No real lane detection yet.** The lateral-threat signal uses a hand-specified virtual
+  corridor (`corridor_bounds()` — a fixed trapezoid from bottom-center toward an assumed
+  horizon), the father plan's own documented fallback for when CLRerNet isn't wired up. This
+  is the CURRENT bottleneck (see PROJECT_STATE.md) — it's too narrow/mis-shaped for at least
+  one real intersection scene tested so far.
+- **Windowing**: positives decode `[event_time - 3.5s, event_time - 0.5s]`; negatives decode
+  around the clip's own midpoint at the `MID-10/-8/-4` convention (`build_train4500_manifest.py`'s
+  bucket scheme), both floored at `T_FLOOR=2.0`.
+
+### APIs / functions — `aa1_detect_track_rank.py` (2026-09-14, signatures only)
+
+```python
+# constants
+BOX_THRESHOLD = 0.30            # G-DINO detection confidence cutoff
+TEXT_THRESHOLD = 0.25
+MIN_BOX_SIDE_PX = 15            # drop boxes smaller than this on either side
+NMS_IOU_THRESHOLD = 0.5
+VP_Y_FRAC = 0.42                 # virtual-corridor horizon, fraction of frame height
+BOTTOM_HALF_WIDTH_FRAC = 0.16    # virtual-corridor half-width at the frame bottom
+PROMPT = "car. truck. bus. motorcycle. bicycle. person."
+
+def corridor_bounds(y: float, w=FRAME_W, h=FRAME_H) -> tuple[float, float]:
+    """Virtual ego-lane corridor [x_left, x_right] at image row y. THE geometry bottleneck
+    (see PROJECT_STATE.md) - not yet informed by any real lane detector."""
+
+def decode_span(video_id: str) -> tuple[float, float, bool]:
+    """(t_start, t_end, is_positive) - which raw-video time window to decode, from
+    dataset/train.csv's time_of_event (positives) or the clip's own duration (negatives)."""
+
+def decode_frames(video_id, t_start, t_end) -> tuple[list[np.ndarray], list[float], float]:
+    """Decodes every raw frame in [t_start, t_end] at the video's OWN native fps (not 16
+    extracted frames). Returns (frames_bgr, timestamps_sec, fps)."""
+
+class Detector:
+    def __init__(self, model_id="IDEA-Research/grounding-dino-tiny", device="cuda"): ...
+    def detect(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Returns (xyxy (N,4) float32, scores (N,)) in ORIGINAL frame pixel coordinates,
+        already past BOX_THRESHOLD and the MIN_BOX_SIDE_PX size filter. No NMS yet - see
+        track_clip()."""
+
+def track_clip(detector, frames, timestamps, fps) -> tuple[dict[int, list], list[int]]:
+    """Runs detection (+ NMS) then BoT-SORT frame by frame. Returns
+    (tracks: dict[track_id] -> list of (t_sec, xyxy, confidence), per_frame_det_count_list).
+    See ARCHITECTURE.md's design-choices list above for why high_conf_det_threshold and NMS
+    are set the way they are - both are load-bearing, not defaults left in place."""
+
+def track_geometry(track, t_window_end, frame_w=FRAME_W, frame_h=FRAME_H, fit_span=1.0) -> dict | None:
+    """One object's track -> kinematics, fit over the last `fit_span` seconds. Returns
+    dict(alpha, overlap_end, overlap_rate, ttc_lat_inv, lateral_drift, lane_state, threat,
+    n_samples, any_edge_touch, last_box, last_t), or None if fewer than 2 usable points.
+    threat = max(alpha, 0, ttc_lat_inv) - the dominant mechanism, not a sum. This is the
+    function whose OUTPUT is currently under-ranking the correctly-tracked dangerous object
+    in the one clip tested so far (see PROJECT_STATE.md)."""
+
+def render_overlay(video_id, frames, timestamps, tracks, geoms, out_path, fps) -> None:
+    """Writes an annotated .mp4: boxes colored/labeled by threat rank, plus the virtual
+    corridor drawn as tick marks."""
+
+def run_clip(detector, video_id, out_dir: Path) -> dict:
+    """One clip end to end. Writes <out_dir>/<video_id>.json (full record, including
+    all_tracks_debug - EVERY track before the recency filter, useful for exactly the kind
+    of diagnosis this file describes) and <video_id>_overlay.mp4."""
+```
+
+Usage: `python aa1_detect_track_rank.py --clip 00687 --out-dir ../../outputs/aa1_smoke` (one
+clip) or `--all` (all 18 `val_e3a` clips, not yet run this way).

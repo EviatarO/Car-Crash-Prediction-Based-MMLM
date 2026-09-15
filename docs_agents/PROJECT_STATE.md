@@ -85,6 +85,62 @@ supervision program this gate unblocks) and its child plan
 (`/workspace/MMLM_AI`) survives pauses/resumes with all checkpoints intact; the Python
 environment does not (reinstall every time, see the standing pod-state section below).
 
+## Stage AA.1 — detection pipeline smoke test, IN PROGRESS (2026-09-14, same day, later)
+
+Father plan's Stage AA.1 (detection → tracking → geometry → threat ranking on the 18
+`val_e3a` clips, before committing to the full 4,446-window pass). Built and iterating
+**locally** (not the pod) — a local CUDA-enabled PyTorch was installed this session
+specifically for this (`torch==2.11.0+cu128`, replacing a CPU-only build; local GPU is an
+RTX 1000 Ada, 6GB, ~0.6-0.9s/frame for detection — this measured rate is what informs the
+full-run cost estimate in the father plan's D3).
+
+**Script**: `student_training/scripts/aa1_detect_track_rank.py` (new). Stack: Grounding DINO
+via `transformers` (`IDEA-Research/grounding-dino-tiny` — chosen specifically to avoid the
+original repo's custom CUDA-op compilation) → `trackers.BoTSORTTracker` (Roboflow) → a
+virtual-corridor geometry fallback (no CLRerNet wired up yet — see father plan's decision
+D-lane, still open). See ARCHITECTURE.md for the module's functions/constants.
+
+**Tested on 1 of 18 clips so far (00687, the known cut-in case) — repeated diagnosis, not yet
+run on the other 17.** Two real bugs found and fixed along the way (both now in the script,
+not just noted):
+1. G-DINO's `post_process_grounded_object_detection` returns multiple overlapping candidate
+   boxes per real object with no built-in NMS — added `sv.Detections.with_nms(threshold=0.5,
+   class_agnostic=True)` before tracking.
+2. **The load-bearing fix**: `BoTSORTTracker`'s default `high_conf_det_threshold=0.6` only
+   lets high-confidence detections spawn brand-new tracks; lower-confidence ones may only
+   extend an existing track. The actual cut-in vehicle on clip 00687 scored 0.39-0.65 across
+   ~36 consecutive frames (visually confirmed correct, stable boxing throughout) and never
+   got a track under the default — set `high_conf_det_threshold=BOX_THRESHOLD` (0.30, matching
+   our own detector's cutoff) and it immediately started tracking correctly, continuously,
+   for the full 93-frame window.
+   - **A red herring on the way there, now reverted**: raising
+     `minimum_iou_threshold_first_assoc` to 0.55 (from BoTSORT's default 0.2) was tried first,
+     produced more tracks (3→6) but not the right one, and was traced to not be the actual
+     cause — reverted before landing on the real fix above. Don't re-try that path.
+
+**Current live issue, unresolved — the reason to read this before continuing**: with both
+fixes, the dangerous object IS now tracked correctly and continuously, but still does **not**
+rank #1 by threat (scores 0.197, well below the top of the list). Diagnosed cause: the virtual
+corridor (a fixed trapezoid, ~154px wide near frame-bottom at this resolution) is too narrow
+for this scene (a wide intersection) — the object's box only clips 51px into it, and because
+the box already straddles the corridor boundary throughout the fit window (never approaches it
+from clearly outside), the `ttc_lat_inv` closing-rate signal never triggers. The only
+surviving signal is looming (`alpha=0.197`), not enough to rank above other objects. **This is
+a geometry/ranking gap, not a detection or tracking gap** — those are now confirmed working.
+
+**Decision needed from the user, not yet made** — three ways forward, presented but not
+chosen:
+- (A) Widen/recalibrate the virtual corridor (cheap, still a crude proxy)
+- (B) Add an independent size/growth/proximity threat signal, not routed through corridor
+  overlap at all (cheap, targets exactly this failure mode)
+- (C) Skip ahead to real lane detection (CLRerNet) now instead of iterating the fallback
+
+**Next step when resuming**: get the user's choice of A/B/C, apply it, confirm 00687's
+acceptance test passes (true collision partner ranks #1), THEN run the smoke test on the
+remaining 17 `val_e3a` clips (only 1 of 18 done), and only then proceed to AA.2 (the full
+4,446-window pass, on the pod, given the measured ~0.7s/frame local rate makes that pass
+infeasible on this laptop GPU).
+
 ## ⚠️ 2026-09-09 status update (read this first — the rest of this file predates it)
 
 A `/project-review`-style audit ran 2026-09-06 (`reports/project_reviews/
