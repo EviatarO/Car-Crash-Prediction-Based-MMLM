@@ -352,17 +352,58 @@
   real object never gets a track" without first checking whether its detection confidence
   ever crosses the tracker's OWN internal high-confidence threshold.
 
+### AA.1 v2 redesign (2026-09-15)
+- **Horizon-fitted virtual corridor with physics lane width (v1)** → assumes a centred, level,
+  ~1.3 m camera. The horizon fit fell back on 6/18 clips and made the geometry INVALID on 3 of 9
+  positives. Nexar cameras vary in offset, pitch and roll (01153/01552 are rolled ~20°).
+  Replaced by per-frame YOLOPv2 drivable/lane path tracing.
+- **Hardcoded horizon fallback (0.6·H) and a 30–85% range sanity rule** → the rule rejected correct
+  fits on up-pitched/down-pitched cameras (00077 at 21%, 00283 at 27%); the fallback put every car
+  above the horizon.
+- **Hood line from per-row temporal variance or static-pixel fraction** → fails when the ego is
+  stopped, at night, with moving hood reflections, and snaps to Nexar's blurred bottom band
+  (checked on 18 clips).
+- **UFLD v1/v2 lane detectors** → official weights are Google-Drive-only (not scriptable here);
+  PINTO ONNX bundles are 2.9 / 4.8 GB. The one HF re-upload (`Aniket200325/ultrafast_lane_detection_culane_res18`,
+  825 MB vs ~100 MB expected, empty card) is an unverified pickle — not loaded.
+- **CLRerNet** → needs mmdet/mmcv custom CUDA ops, heavy on Windows.
+- **Classical lane repos** (`adamczykpiotr/SemiAutonomousLaneKeepingSystem`,
+  `adityagandhamal/road-lane-detection`) → Hough pipelines with a fixed centred ROI and fixed
+  brightness threshold (fails at night), straight lines only; the second has 1080p-hardcoded ROI
+  rows and no left/right lane separation.
+- **YOLOPv3 (`jiaoZ7688/YOLOPv3`)** → Baidu-Pan-only weights, code never fully released, paper not
+  published, only marginal gains over YOLOPv2.
+- **Video Depth Anything / Depth-Anything-V2 as a default component** → not needed: looming gives
+  time-to-contact, lane lines give lateral position. ~6.8 GB VRAM. Kept as a contingency only if
+  Stage 3 fails on turning/U-turn vehicles, where box size misleads.
+- **G-DINO as the default detector** → 12–30× slower than YOLOPv2, which finds 78% of its boxes and
+  never boxes the ego hood. Kept as a fallback (person/bicycle).
+- **A drawn fixed-size "ego box"** → not measured from anything; proximity and lane overlap come from
+  the traced path instead.
+- **K = 1 aux object (only the partner / top-threat object)** → a ranking error sends all aux
+  gradient to the wrong object, it removes object-level contrast (parked/parallel cars), and
+  negatives have no defined target. Use K = 5.
+- **Threat-weighted `a_i`** → under-weights the low-threat end of the kinematic scale. Flat
+  weights first (father plan D6 ablation later).
+- **Fitting threat to the clip crash label** → re-injects the label into the aux target (leakage).
+  Fitted selectors may use GT partner IDs only.
+- **Mask placement from GT partner on positives but heuristic on negatives** → the selection
+  procedure itself would leak the label. Use the same procedure for both classes.
+- **Entry-rate ratio `s_rate/(0.5−s)` as an AA.4 target** → blows up near s = 0.5 (denominator
+  floor 0.05). Use `s_rate`; the ratio is for ranking only.
+- **Drawing traced ego-lane edges as polylines in report figures** → row-to-row joins create
+  horizontal jump segments that mislead non-specialists. Show masks + boxes only.
+- **Treating the aux path as "4 versions"** → the v2 diagram is one pipeline whose components answer
+  different questions. The only comparisons are YOLOPv2 vs G-DINO (Stage 1/2) and v2 vs v1 (Stage 3).
+
 ## Unresolved design questions
 
-- **How should Stage AA.1's virtual-corridor threat ranking handle a wide-intersection scene
-  where the crude fixed-trapezoid corridor is too narrow to flag a correctly-tracked, real
-  cut-in vehicle as the top threat?** (2026-09-14, open, not yet decided by the user) Three
-  options on the table, tradeoffs stated but no default chosen: (A) widen/recalibrate the
-  virtual corridor - cheap, still a crude proxy; (B) add an independent size/growth/
-  proximity threat signal that doesn't route through corridor overlap at all - cheap, targets
-  this exact failure mode; (C) skip ahead to real lane detection (CLRerNet) now rather than
-  keep iterating the fallback. See PROJECT_STATE.md's Stage AA.1 section for the full
-  diagnosis this question comes from.
+- ~~How should Stage AA.1's virtual-corridor threat ranking handle wide intersections (A: widen corridor, B: size/proximity signal, C: CLRerNet)?~~ **RESOLVED 2026-09-15: none of the three** — the corridor was replaced by per-frame YOLOPv2 drivable/lane path tracing (see rejected options above).
+- **Smooth the frame-to-frame flicker of traced lane bounds before building Stage 3, or proceed and see whether a ~1 s collision-check integration averages it out?** Open, user decision.
+- **Pedestrians/cyclists:** YOLOPv2 is vehicle-only. Add G-DINO (person/bicycle prompt) to the detection pass, or accept vehicle-only targets for Stage AA? Open.
+- **Are the 358 Stage-1 stitch merges correct?** Gate constants were set from 00319/00687 only; several merges sit near thresholds. Verify against GT/visual review before AA.2, or tighten gates? Open.
+- **Open lots without lane structure (01552):** accept weak path tracing, or add an optical-flow heading fallback? Open.
+- **Ground-truth partner table for the 9 positive `val_e3a` clips** (object, time visible, mechanism) — needed for Stage 3 acceptance; to be supplied by the user.
 - ~~Do the captions still carry class-discriminating information, and is that why the semantic
   arms lose on positives?~~ **REFUTED 2026-08-27** — see DECISIONS.md's new rejected-options
   entry above and PROJECT_STATE.md's correction. Class separation is flat-to-higher for B-v3,

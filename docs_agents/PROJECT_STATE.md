@@ -85,61 +85,70 @@ supervision program this gate unblocks) and its child plan
 (`/workspace/MMLM_AI`) survives pauses/resumes with all checkpoints intact; the Python
 environment does not (reinstall every time, see the standing pod-state section below).
 
-## Stage AA.1 — detection pipeline smoke test, IN PROGRESS (2026-09-14, same day, later)
+## Stage AA.1 — detection pipeline v2b: Stages 0–2 DONE, Stage 3 next (2026-09-15)
 
-Father plan's Stage AA.1 (detection → tracking → geometry → threat ranking on the 18
-`val_e3a` clips, before committing to the full 4,446-window pass). Built and iterating
-**locally** (not the pod) — a local CUDA-enabled PyTorch was installed this session
-specifically for this (`torch==2.11.0+cu128`, replacing a CPU-only build; local GPU is an
-RTX 1000 Ada, 6GB, ~0.6-0.9s/frame for detection — this measured rate is what informs the
-full-run cost estimate in the father plan's D3).
+Father plan Stage AA.1: detection → tracking → ego path → per-object geometry → threat ranking on
+the 18 held-out `val_e3a` clips (9 pos / 9 neg). Active child plan:
+`~/.claude/plans/CCP based BADAS/2026-09-15_Child-Plan-AA1-v2b-YOLOPv2-lanes-tracking.md`
+(supersedes `2026-09-15_Child-Plan-AA1-v2-scene-models-tracking.md` and
+`2026-09-14_Child-Plan-AA1-threat-ranking-ego-reference.md`). Runs locally (RTX 1000 Ada 6 GB,
+`torch 2.11.0+cu128`). STOP for user review after each stage.
 
-**Script**: `student_training/scripts/aa1_detect_track_rank.py` (new). Stack: Grounding DINO
-via `transformers` (`IDEA-Research/grounding-dino-tiny` — chosen specifically to avoid the
-original repo's custom CUDA-op compilation) → `trackers.BoTSORTTracker` (Roboflow) → a
-virtual-corridor geometry fallback (no CLRerNet wired up yet — see father plan's decision
-D-lane, still open). See ARCHITECTURE.md for the module's functions/constants.
+**v1 = baseline, superseded, do not extend** (`aa1_detect_track_rank.py`, commit `812e884`,
+outputs `outputs/aa1_smoke_18clips/`): G-DINO + BoT-SORT + horizon-fitted virtual corridor. Its
+horizon fit fell back on 6/18 clips, which made the lateral geometry INVALID (threat 0) on positives
+00319/00077/00283. Why it was replaced: DECISIONS.md.
 
-**Tested on 1 of 18 clips so far (00687, the known cut-in case) — repeated diagnosis, not yet
-run on the other 17.** Two real bugs found and fixed along the way (both now in the script,
-not just noted):
-1. G-DINO's `post_process_grounded_object_detection` returns multiple overlapping candidate
-   boxes per real object with no built-in NMS — added `sv.Detections.with_nms(threshold=0.5,
-   class_agnostic=True)` before tracking.
-2. **The load-bearing fix**: `BoTSORTTracker`'s default `high_conf_det_threshold=0.6` only
-   lets high-confidence detections spawn brand-new tracks; lower-confidence ones may only
-   extend an existing track. The actual cut-in vehicle on clip 00687 scored 0.39-0.65 across
-   ~36 consecutive frames (visually confirmed correct, stable boxing throughout) and never
-   got a track under the default — set `high_conf_det_threshold=BOX_THRESHOLD` (0.30, matching
-   our own detector's cutoff) and it immediately started tracking correctly, continuously,
-   for the full 93-frame window.
-   - **A red herring on the way there, now reverted**: raising
-     `minimum_iou_threshold_first_assoc` to 0.55 (from BoTSORT's default 0.2) was tried first,
-     produced more tracks (3→6) but not the right one, and was traced to not be the actual
-     cause — reverted before landing on the real fix above. Don't re-try that path.
+| Stage | What | Status |
+|---|---|---|
+| 0 | YOLOPv2 wrapper (`aa1_scene.py`) + per-frame raw cache for the 18 clips (`aa1_yolop_cache.py`) | done |
+| 1 | BoT-SORT (3 s buffer) + offline fragment stitching + ego-hood filter (`aa1_tracks.py`, driver `aa1_track_stage1.py`) | done |
+| 2 | Per-frame ego-path tracing from drivable+lane masks + per-object geometry (`aa1_lanes.py`, driver `aa1_stage2.py`) | done — 0 INVALID of 982 object-window geometries |
+| 3 | Collision check / threat ranking per window, top-5 | **not started** |
+| 4 | AA.4 target redefinition + curves | not started |
 
-**Current live issue, unresolved — the reason to read this before continuing**: with both
-fixes, the dangerous object IS now tracked correctly and continuously, but still does **not**
-rank #1 by threat (scores 0.197, well below the top of the list). Diagnosed cause: the virtual
-corridor (a fixed trapezoid, ~154px wide near frame-bottom at this resolution) is too narrow
-for this scene (a wide intersection) — the object's box only clips 51px into it, and because
-the box already straddles the corridor boundary throughout the fit window (never approaches it
-from clearly outside), the `ttc_lat_inv` closing-rate signal never triggers. The only
-surviving signal is looming (`alpha=0.197`), not enough to rank above other objects. **This is
-a geometry/ranking gap, not a detection or tracking gap** — those are now confirmed working.
+After Stage 4: AA.2 (full training-pool detection — feasible locally in hours at YOLOPv2 speed) →
+AA.4 masks/targets → AA.5 training (AA-1 aux fit, AA-2 LoRA, matched AA-ctrl), warm-started from
+A1-compress256.
 
-**Decision needed from the user, not yet made** — three ways forward, presented but not
-chosen:
-- (A) Widen/recalibrate the virtual corridor (cheap, still a crude proxy)
-- (B) Add an independent size/growth/proximity threat signal, not routed through corridor
-  overlap at all (cheap, targets exactly this failure mode)
-- (C) Skip ahead to real lane detection (CLRerNet) now instead of iterating the fallback
+**Settled design** (rejected alternatives in DECISIONS.md):
+- K = 5 objects per window, flat weights `a_i = 1/K_clip`.
+- Mask placement uses the same selection procedure for positives and negatives. GT partner IDs are
+  used only to fit/validate the ranker; threat is never fit to the crash label.
+- Aux tap = `backbone.encoder` output (2048 tokens). Masks index tokens 0–2047 only; the predictor's
+  512 tokens are never masked; the crash head still reads all 2560.
+- compress256 preprocessing: box → token grid via x·256/1280, y·256/720, then /16.
+- AA.4 lateral target = `s_rate` (lane-overlap rate), not the capped entry ratio.
 
-**Next step when resuming**: get the user's choice of A/B/C, apply it, confirm 00687's
-acceptance test passes (true collision partner ranks #1), THEN run the smoke test on the
-remaining 17 `val_e3a` clips (only 1 of 18 done), and only then proceed to AA.2 (the full
-4,446-window pass, on the pod, given the measured ~0.7s/frame local rate makes that pass
-infeasible on this laptop GPU).
+**Open TODOs:**
+- GT partner table for the 9 positives (object, time visible, mechanism) — requested from the user,
+  not yet provided. Needed for Stage 3 acceptance.
+- Decide whether to smooth the frame-to-frame flicker of traced lane bounds before Stage 3 — user
+  decision pending.
+- Build Stage 3: looming TTC + lateral entry in lane widths → constant-velocity collision check,
+  causal per window, top-5. Overlay shows per-frame threat labels; `target_curves.png` threat panel
+  populated.
+- Pedestrians/cyclists: YOLOPv2 detects vehicles only (class id 3 on every frame of all 18 clips).
+  Add G-DINO for person/bicycle, or accept?
+- `track_geometry_v2` looming is horizon-free (area/width/height by clean edges). v1's
+  occlusion-aware looming (bottom hidden by hood/blur band) is not ported.
+- Negative clips still decode one ~8 s block, including a ~2 s gap no window uses. Fix before AA.2.
+- User-stated target: first training results next week (~2026-09-22). Tight: Stage 3, Stage 4,
+  AA.2 and two training phases all remain.
+
+**Known issues:**
+- Traced ego-path bounds flicker frame to frame (each frame traced independently): `lane_state`
+  flips and `s` spikes for objects near a boundary (e.g. `00687_target_curves.png`).
+- Open parking lot (01552): no lane structure, so path tracing is weak.
+- 358 stitch merges not individually verified. Several sit near the gate thresholds (e.g. gap
+  1.03 s, hist-sim 0.59); stitch constants are provisional.
+- 02104 (short clip): MID-10 and MID-8 both floor to `T_FLOOR=2.0` s → 0 objects in those windows.
+- 01737: near-empty dark highway at 2:51 AM; both detectors find almost nothing.
+
+**Reporting:** professor report `reports/progress_reports/2026_09_15_progress_report.docx` (build:
+`python reports/_scripts/_build_progress_report.py`; figures in
+`reports/progress_reports/figures_2026_09_15/`). Covers the compress256 champion, the move to
+object-level supervision, and the detection pipeline.
 
 ## ⚠️ 2026-09-09 status update (read this first — the rest of this file predates it)
 
@@ -473,45 +482,42 @@ python student_training/scripts/add_vs_a1_summary_sheet.py \
 # SemTest-200 results workbook + curves (all local, no pod needed)
 python student_training/scripts/build_semtest200_comparison.py
 python student_training/scripts/plot_semtest200_curves.py
+# AA.1 v2b detection pipeline (run from student_training/scripts/, local GPU)
+python aa1_scene.py                                   # YOLOPv2 sanity check on 00687
+python aa1_yolop_cache.py --all --out-dir ../../outputs/aa1_v2_18clips   # Stage 0 cache + recall vs v1 G-DINO (~1 min)
+python aa1_track_stage1.py                            # Stage 1: tracks_v2.json, overlay_v2.mp4, grid16_v2.jpg, timeline_v2.png
+python aa1_stage2.py                                  # Stage 2: geometry_v2.json, overlay_lanes.mp4, grid16_lanes.jpg, target_curves.png/csv
+# v1 baseline (G-DINO, ~0.7 s/frame; do not extend)
+python aa1_detect_track_rank.py --all --out-dir ../../outputs/aa1_smoke_18clips [--from-cache]
+# YOLOPv2 weights (official release, 156 MB, gitignored) if missing
+curl -sL https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt -o third_party/yolopv2_ref/weights/yolopv2.pt
+# Professor progress report (docx + figures)
+python reports/_scripts/_build_progress_report.py
 ```
 
 ## Git state
-Branch `main`. Local commits since `5b40076`: `f91b4a6` (P11 hypothesis + docs), then a run of
-website commits this session (`a42ebfc`, `8503609`, `54a962c`) — **only `website/` was
-committed/pushed this session**; ask the parent session for exact push status if unsure.
-**All of the A1-failure-recovery + SemTest-200-v2 infrastructure work is still uncommitted**:
-`semsup_train.py`/`semsup_common.py` (`--unfreeze-head`, `--val-video-ids`, `--dump-val-scores`,
-param-group optimizer, plus this session's `--head-lr-schedule {cosine,constant}`,
-`--bank-captions`, and an unrelated pre-existing argparse `%%`-escaping fix),
-`semsup_caption_promptbakeoff.py` (v13 prompt wiring, `--provider-order`, `--token-cap`,
-`DEFAULT_MODEL` fix), new prompt `prompts/PROMPT_SEMSUP_V13_CAUSAL.py`, and ~20 new
-`student_training/scripts/*.py`/`*.sh` files from this session — selection/merge/scoring/
-plotting/presentation scripts for SemTest-200-v2 and A1-failure-recovery (`select_a1fail321.py`,
-`run_a1fail321_4arms.sh`, `build_a1fail321_comparison.py`, `build_a1fail_presentation.py`,
-`score_checkpoints_on_test.py`, `score_semtest.py`, `select_semtest200_recovery.py`,
-`select_semtest200_easy.py`, `merge_semtest200_v2.py`, `merge_semtest200_v2_captions.py`,
-`make_semtest200_folds.py`, `make_semtest200_shuffled.py`, `aggregate_semtest200_cv.py`,
-`build_semtest200_comparison.py`, `plot_semtest200_curves.py`, `plot_semtest200_cv_curves.py`,
-`add_vs_a1_summary_sheet.py`, `siglip_bottleneck_probe.py`, `build_pool1761_comparison.py`,
-`score_checkpoints_on_test.py` — see ARCHITECTURE.md's files table for what each does). User
-pushes/commits themselves — do not `git push`; commit only if explicitly asked.
+Branch `main`, in sync with origin at `812e884` (AA.1 v1 pipeline + handoff docs).
+
+Untracked, not committed:
+- `student_training/scripts/aa1_{scene,yolop_cache,tracks,track_stage1,lanes,stage2}.py`
+- `third_party/`: vendored YOLOPv2 `demo.py`/`utils.py`/`requirements.txt` + `__init__.py`. The
+  weights `.pt` are gitignored via `*.pt`.
+- This handoff's `docs_agents/` edits.
+
+The user pushes; commit only when asked.
 
 ## Next step
-**Decision point — do not guess, ask the user.** Immediate fork, unchanged from before this
-session (not resolved yet):
-1. **Fix V13's opener-template-collapse** (vary sentence structure, kill the copied worked-
-   example opener), re-gate on 15 clips, decide on a full re-run from there. Or:
-2. **Stop the V13 line here** — treat the failed distinctiveness check as a completed negative
-   result reinforcing the literature review's verdict.
+**Resume at Stage 3 of the AA.1 v2b child plan**, after two user inputs:
+1. The GT partner table for the 9 positive clips.
+2. Whether to smooth the lane-bound flicker first.
 
-**Resolved this session**: SemTest-200-v2 with a real head LR has now been run (see above) —
-still a null. The new highest-priority open direction is **concept-head supervision** (predict
-V13's closed-vocab causal-cue fields directly via small classification heads, instead of
-whole-caption InfoNCE retrieval) — pre-registered, falsifiable via the `grad_cos` probe
-(threshold +0.15), not yet run. See "What's genuinely still untested" above and DECISIONS.md.
+Stage 3 = collision check + per-window causal top-5 ranking, rendered with per-frame threat labels
+and a populated threat panel in `target_curves.png`. Acceptance: the partner is in the top-5 in
+every window where it's visible and #1 in most; the 00283 truck and the 00319 car rank #1 near the
+event. STOP and report after Stage 3.
 
-Also outstanding: commit the substantial uncommitted training/analysis-script work (see Git
-state above) — not done yet, user has not asked for it.
+The pre-2026-09-13 V13-caption / concept-head fork is superseded in priority by the father plan
+(Stage AA) and is not being pursued.
 
 ## Known bugs / gotchas (all fixed — don't re-hit these)
 - **`| tail -N` on a backgrounded command masks the real exit code.** Redirect straight to a
