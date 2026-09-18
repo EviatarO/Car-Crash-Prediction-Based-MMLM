@@ -185,6 +185,68 @@ def stitch_fragments(tracks: dict, frames: list, timestamps: list, fps: float,
     return live, merge_log
 
 
+EDGE_PX = 3                 # box touches the frame edge
+EDGE_MAX_GAP_S = 0.3        # frames without a usable edge box before the extension stops
+EDGE_MIN_Y_OVERLAP = 0.3    # vertical overlap with the previous box (share of the shorter box)
+EDGE_MAX_TAKEN_IOU = 0.5    # skip boxes that already belong to another track
+
+
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / max(union, 1e-6)
+
+
+def extend_edge_tracks(tracks: dict, cache: dict, frame_w: int = FRAME_W):
+    """Continue a track that ends touching the left/right frame edge with the cached boxes that
+    follow at the same edge - including low-confidence ones (>= 0.1) the tracker could not attach.
+    BoT-SORT's second-stage match needs IoU >= 0.5 with its constant-velocity prediction, which
+    slides off-frame for a partly visible car; on 00319 the crash car (id3) was then dropped at
+    18.87s while the detector still boxed its headlight at the right edge (conf 0.12-0.28) until
+    the end of the clip. Extends in place; returns (tracks, [(track_id, n_added, side), ...])."""
+    frames = cache["frames"]
+    index = {round(fr["t"], 4): k for k, fr in enumerate(frames)}
+    used: dict[float, list] = {}
+    for pts in tracks.values():
+        for t, box, _ in pts:
+            used.setdefault(round(t, 4), []).append(box)
+    log = []
+    for tid, pts in tracks.items():
+        t_last, cur, _ = pts[-1]
+        if cur[2] >= frame_w - EDGE_PX:
+            side = "right"
+        elif cur[0] <= EDGE_PX:
+            side = "left"
+        else:
+            continue
+        added = 0
+        for fr in frames[index[round(t_last, 4)] + 1:]:
+            t = round(fr["t"], 4)
+            if t - t_last > EDGE_MAX_GAP_S:
+                break
+            best = None
+            for b, s in zip(fr["boxes"], fr["scores"]):
+                if (side == "right" and b[2] < frame_w - EDGE_PX) or (side == "left" and b[0] > EDGE_PX):
+                    continue
+                y_ov = (max(0.0, min(b[3], cur[3]) - max(b[1], cur[1]))
+                        / max(min(b[3] - b[1], cur[3] - cur[1]), 1.0))
+                if y_ov < EDGE_MIN_Y_OVERLAP:
+                    continue
+                if any(_iou(b, u) > EDGE_MAX_TAKEN_IOU for u in used.get(t, [])):
+                    continue
+                if best is None or s > best[1]:
+                    best = (b, s)
+            if best is not None:
+                pts.append((fr["t"], list(best[0]), float(best[1])))
+                used.setdefault(t, []).append(best[0])
+                cur, t_last, added = best[0], t, added + 1
+        if added:
+            log.append((tid, added, side))
+    return tracks, log
+
+
 def is_ego_hood(pts, frame_h: int = FRAME_H) -> bool:
     """Module docstring point 3. pts: [(t, box, conf)]."""
     if len(pts) < HOOD_MIN_SAMPLES:

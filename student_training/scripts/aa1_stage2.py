@@ -32,7 +32,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aa1_detect_track_rank import decode_frames, window_ends  # noqa: E402
-from aa1_lanes import rle_decode, trace_path, fill_vehicle_gaps, path_bounds_at, track_geometry_v2  # noqa: E402
+from aa1_lanes import rle_decode, trace_path, path_bounds_at, track_geometry_v2, estimate_ego_path  # noqa: E402
 from aa1_track_stage1 import VAL_E3A_IDS, PALETTE_HEX, PALETTE_BGR  # noqa: E402
 
 OUT_DIR = REPO / "outputs" / "aa1_v2_18clips"
@@ -40,9 +40,10 @@ N_CURVE_OBJECTS = 5
 
 
 def load_frame_masks(video_id: str) -> dict:
-    """t -> dict(drivable, lane, boxes, path). Decodes every cached YOLOPv2 frame once;
+    """t -> dict(drivable, lane, boxes, path, ego_path). Decodes every cached YOLOPv2 frame once;
     reused across every object/window for this clip - decoding + tracing is not free
-    (~5-10ms/frame), so this must not be repeated per object."""
+    (~5-10ms/frame), so this must not be repeated per object. The ego path is estimated from the
+    lane and drivable masks of the whole clip (aa1_lanes.estimate_ego_path)."""
     with open(OUT_DIR / f"{video_id}_yolop.json", encoding="utf-8") as f:
         cache = json.load(f)
     out = {}
@@ -52,6 +53,10 @@ def load_frame_masks(video_id: str) -> dict:
         boxes = np.array(fr["boxes"], dtype=np.float32).reshape(-1, 4)
         path = trace_path(drivable, lane, vehicle_boxes=boxes)
         out[round(fr["t"], 4)] = dict(drivable=drivable, lane=lane, boxes=boxes, path=path)
+    summary = estimate_ego_path(out)
+    print(f"[{video_id}] ego path: anchor x={summary['anchor']:.0f} ({summary['n_pair_frames']} "
+          f"lane-pair frames), lane-width model={'yes' if summary['lane_width_model'] else 'no'}, "
+          f"sources={summary['sources']}")
     return out, cache["fps"], cache["span"]
 
 
@@ -77,8 +82,7 @@ def render_overlay(video_id, frames, timestamps, frame_masks, tracks, out_dir: P
         vis = frame.copy()
         fm = frame_masks.get(round(t, 4))
         if fm is not None:
-            filled = fill_vehicle_gaps(fm["drivable"], fm["boxes"])
-            vis[filled] = (vis[filled] * 0.65 + np.array([0, 255, 0]) * 0.35).astype(np.uint8)
+            vis[fm["drivable"]] = (vis[fm["drivable"]] * 0.65 + np.array([0, 255, 0]) * 0.35).astype(np.uint8)
             vis[fm["lane"]] = (vis[fm["lane"]] * 0.3 + np.array([0, 0, 255]) * 0.7).astype(np.uint8)
             for y, p in fm["path"].items():
                 cv2.circle(vis, (int(p["x_left"]), y), 2, (255, 255, 0), -1)

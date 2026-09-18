@@ -31,6 +31,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aa1_detect_track_rank import decode_frames, decode_span, load_cache  # noqa: E402
 from aa1_scene import YOLOPv2, CONF_THRES  # noqa: E402
 
+# Cache below the tracker's own track_activation_threshold (0.30, = CONF_THRES) so BoT-SORT's
+# BYTE-style second association stage (trackers/core/botsort/tracker.py: low_mask = confidence
+# in (0.1, high_conf_det_threshold)) has low-confidence boxes available to CONTINUE an existing
+# track through a dip in detector confidence - e.g. a headlight-only night detection. Those boxes
+# can never spawn a new track (that still requires >= track_activation_threshold=0.30), so this
+# does not add track noise. Confirmed 2026-09-17: 00319's crash-car track ended at t=18.87s
+# (0.7s before the clip ends) because the only detections after that point were < 0.30 and were
+# discarded before caching, so the tracker never even saw them to attempt continuation. Matches
+# the tracker's own low-confidence floor (`> 0.1`, hardcoded in the package).
+LOW_CONF_THRES = 0.10
+
 VAL_E3A_IDS = ["00319", "00077", "00687", "00283", "00147", "00529", "00493", "00474",
                "00372", "01153", "01504", "01643", "01281", "01550", "01737", "02104",
                "02117", "01552"]
@@ -61,7 +72,7 @@ def run_clip(yp: YOLOPv2, video_id: str, out_dir: Path):
     t0 = time.time()
     per_frame = []
     for frame, t in zip(frames, timestamps):
-        out = yp.infer(frame)
+        out = yp.infer(frame, conf_thres=LOW_CONF_THRES)
         per_frame.append(dict(
             t=round(t, 4), boxes=out["boxes"].round(1).tolist(), scores=out["scores"].round(4).tolist(),
             drivable_rle=rle_encode(out["drivable"]), lane_rle=rle_encode(out["lane"])))
