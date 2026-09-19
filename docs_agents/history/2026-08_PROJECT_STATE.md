@@ -1,4 +1,3 @@
-<!-- handoff-month: 2026-09 -->
 # Project State
 
 ## ⚠️ 2026-09-14 status update — NEW CHAMPION, read this first
@@ -86,79 +85,70 @@ supervision program this gate unblocks) and its child plan
 (`/workspace/MMLM_AI`) survives pauses/resumes with all checkpoints intact; the Python
 environment does not (reinstall every time, see the standing pod-state section below).
 
-## Stage AA.1 — detection pipeline v2b: Stages 0–3 built, generalization check run (2026-09-19)
+## Stage AA.1 — detection pipeline v2b: Stages 0–2 DONE, Stage 3 next (2026-09-15)
 
-Father plan Stage AA.1: detection → tracking → ego path → object selection (top-5 per window) on
-the 18 held-out `val_e3a` clips (9 pos / 9 neg), plus a 18-clip fresh generalization set. Active
-child plan: `~/.claude/plans/CCP based BADAS/2026-09-15_Child-Plan-AA1-v2b-YOLOPv2-lanes-tracking.md`
-(its Stage 2/3 text is stale — the built design is in ARCHITECTURE.md). Runs locally (RTX 1000 Ada
-6 GB, `torch 2.11.0+cu128`). STOP for user review after each stage.
+Father plan Stage AA.1: detection → tracking → ego path → per-object geometry → threat ranking on
+the 18 held-out `val_e3a` clips (9 pos / 9 neg). Active child plan:
+`~/.claude/plans/CCP based BADAS/2026-09-15_Child-Plan-AA1-v2b-YOLOPv2-lanes-tracking.md`
+(supersedes `2026-09-15_Child-Plan-AA1-v2-scene-models-tracking.md` and
+`2026-09-14_Child-Plan-AA1-threat-ranking-ego-reference.md`). Runs locally (RTX 1000 Ada 6 GB,
+`torch 2.11.0+cu128`). STOP for user review after each stage.
 
 **v1 = baseline, superseded, do not extend** (`aa1_detect_track_rank.py`, commit `812e884`,
-outputs `outputs/aa1_smoke_18clips/`): G-DINO + BoT-SORT + horizon corridor. Still supplies
-`decode_span`/`decode_frames`/`window_ends`/`load_event_row`/`recency_ok`.
+outputs `outputs/aa1_smoke_18clips/`): G-DINO + BoT-SORT + horizon-fitted virtual corridor. Its
+horizon fit fell back on 6/18 clips, which made the lateral geometry INVALID (threat 0) on positives
+00319/00077/00283. Why it was replaced: DECISIONS.md.
 
 | Stage | What | Status |
 |---|---|---|
-| 0 | YOLOPv2 per-frame cache (`aa1_yolop_cache.py`, cached down to conf 0.10) | done, 36 clips |
-| 1 | BoT-SORT (3 s buffer) + stitching + hood filter + edge-track extension (`aa1_tracks.py`, `aa1_track_stage1.py`) | done, 36 clips |
-| 2 | Now only shared loaders `aa1_stage2.load_frame_masks` (masks + ego path) / `load_stitched_tracks`; no driver | done |
-| 3 | Selection score, per-window top-5, overlay, target curves (`aa1_collision.py`, `aa1_stage3.py`) | done, 36 clips; user is still reviewing overlays |
-| 4 | AA.4 target definition + patch masks | **not started** — target dims proposed, user go-ahead pending |
+| 0 | YOLOPv2 wrapper (`aa1_scene.py`) + per-frame raw cache for the 18 clips (`aa1_yolop_cache.py`) | done |
+| 1 | BoT-SORT (3 s buffer) + offline fragment stitching + ego-hood filter (`aa1_tracks.py`, driver `aa1_track_stage1.py`) | done |
+| 2 | Per-frame ego-path tracing from drivable+lane masks + per-object geometry (`aa1_lanes.py`, driver `aa1_stage2.py`) | done — 0 INVALID of 982 object-window geometries |
+| 3 | Collision check / threat ranking per window, top-5 | **not started** |
+| 4 | AA.4 target redefinition + curves | not started |
 
-After Stage 4: AA.2 (full training-pool detection, hours at YOLOPv2 speed) → AA.4 masks/targets →
-AA.5 training (AA-1 aux fit, AA-2 LoRA, matched AA-ctrl), warm-started from A1-compress256.
+After Stage 4: AA.2 (full training-pool detection — feasible locally in hours at YOLOPv2 speed) →
+AA.4 masks/targets → AA.5 training (AA-1 aux fit, AA-2 LoRA, matched AA-ctrl), warm-started from
+A1-compress256.
 
 **Settled design** (rejected alternatives in DECISIONS.md):
-- K = 5 objects per window, flat weights `a_i = 1/K_clip`. The selection score only chooses WHICH
-  5 objects get supervised; it is never a training target and never fit to the crash label.
-- Same selection procedure for positives and negatives.
-- Aux tap = `backbone.encoder` output (2048 tokens); masks index tokens 0–2047 only; the predictor's
-  512 tokens are never masked; the crash head still reads all 2560. compress256 box→token map:
-  x·256/1280, y·256/720, then /16.
-- Proposed Stage 4 targets, all against the ego path: α (looming), g (side gap, box-heights),
-  closing_rate = −ġ (+ = approaching the path), lane state (LEFT/EGO/RIGHT). Drop `s`, `s_rate`, ρ.
-  Box height is NOT a target (near-readable from appearance).
-- Contribution checks planned for AA-2: AA-1 gate first (can the frozen trunk's object tokens predict
-  the targets vs a mean predictor), then controls — λ_aux=0 with the same warm start, shuffled
-  targets, random masks — plus per-epoch val AP and aux-vs-crash gradient ratio.
+- K = 5 objects per window, flat weights `a_i = 1/K_clip`.
+- Mask placement uses the same selection procedure for positives and negatives. GT partner IDs are
+  used only to fit/validate the ranker; threat is never fit to the crash label.
+- Aux tap = `backbone.encoder` output (2048 tokens). Masks index tokens 0–2047 only; the predictor's
+  512 tokens are never masked; the crash head still reads all 2560.
+- compress256 preprocessing: box → token grid via x·256/1280, y·256/720, then /16.
+- AA.4 lateral target = `s_rate` (lane-overlap rate), not the capped entry ratio.
 
 **Open TODOs:**
-- User to review the 36 overlays + new `target_curves.png` (3×2 design) and decide on Stage 4 targets.
-- GT partner labels: dev clips are MY visual drafts (user has not confirmed): 00147 id5, 00283 id2
-  (low confidence — id1 scores 0.39 vs 0.45; user asked which car is hit, unanswered), 00372 id6,
-  00474 id0, 00493 id0, 00529 id3, 00687 id0, 00077 id1, 00319 id3 (car leaves the frame; low).
-  gen18: confirmed-by-eye 00136 id0, 00486 id0, 00505 id9, 00583 id0, 00803 id1; NOT labelled: 00903,
-  00932, 01035; 00195's crash car is never detected.
-- Open ego-path failures (below). Detection misses like 00195 need a different fix (recall).
-- Pedestrians/cyclists: YOLOPv2 detects vehicles only.
-- Negative clips decode one ~8 s block; windows MID-10/-8/-4 leave a ~4 s unused gap (visible in the
-  target-curve plots). Fix or shade before AA.2.
-- User-stated target: first training results ~2026-09-22 — tight (Stage 4, AA.2, two training phases).
+- GT partner table for the 9 positives (object, time visible, mechanism) — requested from the user,
+  not yet provided. Needed for Stage 3 acceptance.
+- Decide whether to smooth the frame-to-frame flicker of traced lane bounds before Stage 3 — user
+  decision pending.
+- Build Stage 3: looming TTC + lateral entry in lane widths → constant-velocity collision check,
+  causal per window, top-5. Overlay shows per-frame threat labels; `target_curves.png` threat panel
+  populated.
+- Pedestrians/cyclists: YOLOPv2 detects vehicles only (class id 3 on every frame of all 18 clips).
+  Add G-DINO for person/bicycle, or accept?
+- `track_geometry_v2` looming is horizon-free (area/width/height by clean edges). v1's
+  occlusion-aware looming (bottom hidden by hood/blur band) is not ported.
+- Negative clips still decode one ~8 s block, including a ~2 s gap no window uses. Fix before AA.2.
+- User-stated target: first training results next week (~2026-09-22). Tight: Stage 3, Stage 4,
+  AA.2 and two training phases all remain.
 
-**Known issues (ego path, `aa1_lanes.estimate_ego_path`):**
-- 00486, 00505: a spare tire on the ego vehicle itself is intermittently classified as lane paint by
-  YOLOPv2 (not a tracked box; persistence 63–100%), so the path points at it. Model-level; unfixed.
-- 01532: a crosswalk at the start produces a plausible "lane pair" that seeds the path wrong; the
-  street after the turn only offers weak single-line data, so the path stays stuck (held).
-- 01478: long `held` stretches after the lines are lost. 01035: user reported a mid-clip new line not
-  updating; not reproduced on 12 sampled frames — needs frame timing.
-- 00493/00529/01552-like scenes with no forward lane paint (dense traffic, crosswalk stripes only):
-  path stays default/held. Not a bug.
-- Fixed this session: 01075 (bad first seed), 00932 (headlight glare inside a van's box), 01552
-  (0→204 lane-pair frames), 00077 (90/90 measured).
-- 358→386 stitch merges not individually verified; 02104 short-clip windows empty; 01737 near-empty scene.
+**Known issues:**
+- Traced ego-path bounds flicker frame to frame (each frame traced independently): `lane_state`
+  flips and `s` spikes for objects near a boundary (e.g. `00687_target_curves.png`).
+- Open parking lot (01552): no lane structure, so path tracing is weak.
+- 358 stitch merges not individually verified. Several sit near the gate thresholds (e.g. gap
+  1.03 s, hist-sim 0.59); stitch constants are provisional.
+- 02104 (short clip): MID-10 and MID-8 both floor to `T_FLOOR=2.0` s → 0 objects in those windows.
+- 01737: near-empty dark highway at 2:51 AM; both detectors find almost nothing.
 
 **Reporting:** professor report `reports/progress_reports/2026_09_15_progress_report.docx` (build:
-`python reports/_scripts/_build_progress_report.py`).
-
-**Commands (run from repo root):**
-```
-python student_training/scripts/aa1_stage3.py                      # 18 dev clips: scores + overlay + curves
-python student_training/scripts/aa1_run_set.py --set gen18 --stages 0,1   # detect+track the gen18 set
-python student_training/scripts/aa1_run_set.py --set gen18 --stages 3     # score gen18
-```
-Outputs: `outputs/aa1_v2_18clips/` (both sets merged, 36 clips).
+`python reports/_scripts/_build_progress_report.py`; figures in
+`reports/progress_reports/figures_2026_09_15/`). Covers the compress256 champion, the move to
+object-level supervision, and the detection pipeline.
 
 ## ⚠️ 2026-09-09 status update (read this first — the rest of this file predates it)
 
@@ -506,23 +496,25 @@ python reports/_scripts/_build_progress_report.py
 ```
 
 ## Git state
-Branch `main`, HEAD `eb08c15` (Stage 3 + ego-path geometry), in sync with origin.
+Branch `main`, in sync with origin at `812e884` (AA.1 v1 pipeline + handoff docs).
 
-Uncommitted:
-- Modified: `student_training/scripts/aa1_{collision,lanes,stage2,stage3,track_stage1}.py`
-  (ego-path fixes, target-curve redesign, removal of grid/overlay/timeline outputs).
-- Untracked: `student_training/scripts/aa1_run_set.py`, `docs_agents/history/`.
+Untracked, not committed:
+- `student_training/scripts/aa1_{scene,yolop_cache,tracks,track_stage1,lanes,stage2}.py`
+- `third_party/`: vendored YOLOPv2 `demo.py`/`utils.py`/`requirements.txt` + `__init__.py`. The
+  weights `.pt` are gitignored via `*.pt`.
 - This handoff's `docs_agents/` edits.
 
 The user pushes; commit only when asked.
 
 ## Next step
-1. Wait for the user's review of the 36 overlays and the new `target_curves.png`; get GT labels for
-   00903/00932/01035 and the 00283 answer (id1 vs id2).
-2. On go-ahead, Stage 4: define the targets (α, g, closing_rate, lane) per selected object, token
-   masks, and per-dimension validity; then decide AA.2 and the deferred negative-decode gap.
-3. Open ego-path failures (spare-tire glare, crosswalk seed) — only with the user's direction; two
-   attempts (slope-sign filter, lower static-pixel threshold) were rejected (DECISIONS.md).
+**Resume at Stage 3 of the AA.1 v2b child plan**, after two user inputs:
+1. The GT partner table for the 9 positive clips.
+2. Whether to smooth the lane-bound flicker first.
+
+Stage 3 = collision check + per-window causal top-5 ranking, rendered with per-frame threat labels
+and a populated threat panel in `target_curves.png`. Acceptance: the partner is in the top-5 in
+every window where it's visible and #1 in most; the 00283 truck and the 00319 car rank #1 near the
+event. STOP and report after Stage 3.
 
 The pre-2026-09-13 V13-caption / concept-head fork is superseded in priority by the father plan
 (Stage AA) and is not being pursued.

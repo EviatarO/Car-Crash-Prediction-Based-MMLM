@@ -788,127 +788,138 @@ badas.nn_model.create_or_update_model_card = lambda *a, **k: None
 `peft`'s `save_pretrained()` builds a model card before writing weights and assumes
 `base_model.config` is dict-like; BADAS's `ModelArgs` isn't, so every checkpoint save crashed.
 
-## Stage AA — detection pipeline v2b (2026-09-19; separate from the student model above)
+## Stage AA — detection pipeline v2b (2026-09-15; separate from the student model above)
 
 Offline subsystem, no BADAS/LoRA: produces per-object kinematic signals from raw dashcam video for
 the father plan's detection-guided auxiliary supervision. Child plan:
-`~/.claude/plans/CCP based BADAS/2026-09-15_Child-Plan-AA1-v2b-YOLOPv2-lanes-tracking.md` (stale in
-Stage 2/3 detail; this section is authoritative). Stages 0–3 built; Stage 4 (targets/masks) not.
+`~/.claude/plans/CCP based BADAS/2026-09-15_Child-Plan-AA1-v2b-YOLOPv2-lanes-tracking.md`.
+Stages 0–2 are built; Stage 3 (threat) and Stage 4 (targets) are not.
 
 ```
-raw MP4 at native fps (decode_span)
- -> YOLOPv2 (aa1_scene.YOLOPv2.infer): vehicle boxes + drivable + lane masks, cached per frame
-    (boxes down to conf 0.10, masks RLE)                              -> <vid>_yolop.json
- -> BoT-SORT (buffer 90, activation/high-conf 0.30, low-conf 0.10..0.30 only continues tracks)
-    -> stitch_fragments -> is_ego_hood -> extend_edge_tracks           -> <vid>_tracks_v2.json
- -> load_frame_masks: per frame decode masks, trace_path (old drivable path, only used by nothing
-    downstream now), estimate_ego_path                                  (in memory)
- -> compute_track_scores: one causal pass -> per (track, t) score dict
- -> per window: candidate_pool -> select_top_k(5)                      -> <vid>_threat_v2.json
-    overlay video + target curves                                       -> _overlay_threat.mp4, _target_curves.png/csv
+raw MP4 at native fps (spans from aa1_detect_track_rank.decode_span)
+ -> YOLOPv2 (aa1_scene.YOLOPv2.infer): vehicle boxes + drivable mask + lane mask
+    cached per frame, masks RLE                                     -> <vid>_yolop.json
+ -> BoT-SORT (lost buffer 90 @30fps, CMC with frames) -> stitch_fragments -> is_ego_hood filter
+                                                                    -> <vid>_tracks_v2.json
+ -> per frame: fill_vehicle_gaps(drivable, boxes) -> trace_path (bottom-up drivable-run following,
+    lane-line snapping) -> track_geometry_v2 per object per window, causal:
+    alpha, s_end, s_rate, rho, lane_state                           -> <vid>_geometry_v2.json
+ -> [Stage 3, NOT BUILT] collision check -> threat -> top-5 per window
 ```
 
-**Ego path** (`aa1_lanes.estimate_ego_path`, writes `frame_masks[t]["ego_path"] = dict(coef, top, src)`,
-evaluate with `path_x_at(ep, y)`; x = polyval(coef, (y−360)/360), clamped to rows ≥ `top`):
-1. `static_lane_mask`: pixels lane-classified in ≥ 95% of the clip's frames are removed from every
-   frame (a fixed object, not paint). 4 known-good clips have 0 such pixels.
-2. `_calibrate_lanes`: fixed image-centre reference, `_nearest_lane_points` (per row, nearest lane run
-   each side of the reference, runs ≤ 60 px wide), `_ransac_curve`; frames with both lines and a
-   lane that widens toward the ego give the clip's `anchor` (x of the lane centre at the nearest
-   fitted row) and a lane-width model `w(y)=p·y+q`. Needs ≥ 8 pair frames (`PAIR_MIN_FRAMES`) else
-   anchor = 640, no model.
-3. Per frame `_measure_path`: `_exclude_vehicles` (zero lane pixels inside detected vehicle boxes),
-   row scan around the PREVIOUS smoothed path, `_ransac_curve` per side (min 6 inliers, span 40 px).
-   Both lines → `lane_pair` (centre, width must be 0.6–1.5× model if a model exists); one line →
-   `lane_single` (shifted half a lane width; needs the model); else none.
-   `_fit_centreline` fits a quadratic (curvature cap 120, else straight) through the samples plus the
-   anchor at row 719 (weight 5).
-4. Smoothing: EMA (τ 0.25 s) on the 3 coefficients, not per row. A measurement whose mean |Δx| over the
-   lower half exceeds `PATH_GATE_PX`=120 is rejected unless rejections last `PATH_RESYNC_S`=0.4 s.
-5. The first accepted measurement must be `lane_pair`; earlier frames are `backfilled` from it. After
-   `PATH_RESET_HOLD_S`=0.8 s with no measurement, retry against the anchor as reference (accepted only
-   as `lane_pair`). With no lane evidence the path is held (`held`); a clip with no seed gets a vertical
-   line at the anchor (`default`).
-`src` ∈ lane_pair / lane_single / held / backfilled / default. The overlay draws the path down to `top`.
+**Training side (father plan AA.5, not built):**
+- The aux tap is the `backbone.encoder` output: 2048 tokens = 8 time slices × 16×16 patches.
+- An object box maps to a token mask via compress256 scaling (x·256/1280, y·256/720, then /16);
+  token index = t·256 + row·16 + col.
+- The predictor's 512 appended tokens are never masked. The crash head reads all 2560 tokens.
 
-**Selection score** (`aa1_collision.py`; NOT a threat, NOT a target): `score = EMA_τ0.3s( closeness ×
-side × (1+approach) )`, ×0.25 if shielded.
-- closeness = min(box_h/360, 1). approach = clip(α, 0, 1), α = log-size slope over the last 1 s
-  (`aa1_lanes.fit_alpha`; area / width / height by which box edges are clean).
-- side: g = horizontal gap from the box's bottom edge to the ego path at that row, in box heights
-  (perspective-free ruler); g_rate = slope of g over 1 s; g_eff = min(g, max(g + g_rate·1 s, 0));
-  side = 1 for g_eff ≤ 0.3, falls linearly to 0.15 at 1.5.
-- shielded: another box is ≥ 10 px lower (nearer) and overlaps ≥ 35% in x.
-- candidate pool per frame/window: recent (present in ≥ half of the last 0.5 s), box height ≥ 25 px, only
-  the 8 tallest. Top-5 by smoothed score; every top-5 member is drawn coloured regardless of score.
-
-**Target-curve plot** (`render_target_curves`): 3×2, row 3 = selection score across both columns; the 4
-proposed Stage 4 targets α, g, closing_rate (= −g_rate), lane (LEFT/EGO/RIGHT, 5-sample majority);
-title says TP/TN; dashed lines + labels at the window ends; per-panel x-axis and legend; shows the 5
-longest-lived tracks (not the selected top-5); x = seconds into the decoded span (crash clips 3 s,
-normal clips 8 s with an unused gap).
-
-**Windows** (`window_ends`): positives TTE 1.5/1.0/0.5 s before `time_of_event` (span event−3.5…−0.5 s);
-negatives MID−10/−8/−4 s around the clip midpoint; ends floored at `T_FLOOR`=2.0 s.
+### Key design choices, and why
+- **YOLOPv2 is the default detector.** One pass gives vehicles, drivable area and lane lines. It is
+  trained on BDD100K dashcam footage, runs at 23–57 ms/frame (vs G-DINO's 0.6–0.8 s), finds 78% of
+  G-DINO's boxes, and never boxed the ego hood. It has a single class (id 3) — no person/bicycle —
+  so the G-DINO `Detector` stays available in the v1 script.
+- **Official TorchScript weights + the authors' own `utils.py` vendored verbatim** for letterbox,
+  anchor decode (`split_for_trace_model`), NMS and mask crop/upsample. Not reimplemented.
+- **The ego path is traced per frame from the masks.** No horizon, no camera height/pitch/roll
+  assumption. Turns, roll and off-centre cameras are handled because the mask follows the road.
+  Lateral measurement needs no ego-rotation compensation: each past frame's object is measured
+  against that frame's own traced path.
+- **Path tracing robustness:**
+  - The seed is the drivable run nearest frame centre (≤200 px), scanning up from the bottom.
+  - Narrow or missing rows are tolerated (up to 6 consecutive) instead of stopping the trace.
+  - Tracked vehicle boxes (lower 60% of each box) are filled into the drivable mask, so a leading
+    car doesn't split the lane.
+- **Tracking:** `lost_track_buffer=90`, `minimum_consecutive_frames=1`, and
+  `track_activation_threshold = high_conf_det_threshold = 0.30` (the package default of 0.6 blocks
+  real objects from starting tracks). Frames must be passed to `update()`, or CMC silently no-ops.
+  BoT-SORT has no ReID, hence offline stitching: constant-velocity centre extrapolation + size ratio
+  + HSV colour histogram.
+- **Geometry:**
+  - Proximity `rho` = where the box bottom row falls within the traced path's row range, per frame.
+  - Looming `alpha` is horizon-free: area if no edge is cut, width if only top/bottom is cut,
+    height if only the sides are cut.
+- **Windowing is unchanged from v1** (`window_ends`): positives TTE 1.5/1.0/0.5, negatives
+  MID-10/-8/-4, floored at `T_FLOOR=2.0`. Geometry is causal per window.
 
 ### Constraints / invariants
-- `YOLOPv2.infer` requires 1280×720 BGR (asserts). Cache timestamps are rounded to 4 dp — always look up
-  with `round(t, 4)`.
-- `rle_encode` must not emit a zero-length first run (round-trip-test before changing).
-- BoT-SORT needs frames passed to `update()` (CMC); its low-confidence stage is hardcoded `> 0.1`.
-- `aa1_stage2.OUT_DIR` is module-level: `aa1_run_set.py` sets it; anything else reading another folder
-  must set it too.
-- `load_frame_masks` mutates `lane` masks in place (static pixels removed); callers after it see the
-  cleaned mask (the overlay draws the cleaned one).
-- Shell pipelines (`python ... | grep`) report grep's exit code, not python's — check for tracebacks.
+- `YOLOPv2.infer` requires a 1280×720 BGR frame (it asserts). The vendored mask crop `[12:372]` +
+  ×2 upsample returns exactly 720×1280 only for that input.
+- Cache timestamps are rounded to 4 dp. Always look up and compare with `round(t, 4)`: an exact
+  1e-6 match against raw `i/fps` matches nothing.
+- `rle_encode` must not emit a zero-length first run (the old version inverted every decoded mask).
+  Round-trip-test `rle_encode`/`rle_decode` before changing either.
+- Every stage's per-clip output includes `target_curves.png`+`.csv`, a timeline, a grid and an
+  overlay with lane masks (project convention).
 
 ### Files that matter
 
 | Path | Purpose |
 |---|---|
-| `student_training/scripts/aa1_scene.py` | YOLOPv2 wrapper (`YOLOPv2.infer`) |
-| `student_training/scripts/aa1_yolop_cache.py` | Stage 0 cache (`LOW_CONF_THRES`=0.10), recall vs v1 G-DINO |
-| `student_training/scripts/aa1_tracks.py` | `track_from_yolop`, `stitch_fragments`, `is_ego_hood`, `extend_edge_tracks` |
-| `student_training/scripts/aa1_track_stage1.py` | Stage 1 driver → `_tracks_v2.json`; exports `VAL_E3A_IDS`, `PALETTE_HEX` |
-| `student_training/scripts/aa1_lanes.py` | lane geometry: `rle_decode`, `trace_path`, `fit_alpha`, `estimate_ego_path`, `path_x_at`, `track_geometry_v2` (legacy, unused) |
-| `student_training/scripts/aa1_stage2.py` | loaders only: `load_frame_masks`, `load_stitched_tracks` |
-| `student_training/scripts/aa1_collision.py` | `compute_track_scores`, `candidate_pool`, `select_top_k`, `side_gap`, `lane_side` |
-| `student_training/scripts/aa1_stage3.py` | Stage 3 driver: window top-5, `render_overlay`, `render_target_curves`, `run_clip`, `main` (18 dev clips) |
-| `student_training/scripts/aa1_run_set.py` | runs Stages 0/1/3 on the gen18 set (`--set gen18 --stages …`); seeded sampler, writes `clip_list.json` |
-| `student_training/scripts/aa1_detect_track_rank.py` | v1 baseline (do not extend); still supplies decode/window helpers |
-| `third_party/yolopv2_ref/` | vendored YOLOPv2 utils; `weights/yolopv2.pt` gitignored |
-| `outputs/aa1_v2_18clips/` | ALL AA.1 outputs, 36 clips (18 dev + 18 gen18): `_yolop.json`, `_tracks_v2.json`, `_threat_v2.json`, `_overlay_threat.mp4`, `_target_curves.png/csv`; plus `stage1_summary.json`, `yolop_vs_gdino_comparison.json`, `clip_list.json` |
+| `student_training/scripts/aa1_scene.py` | YOLOPv2 wrapper (`YOLOPv2.infer`); `__main__` = sanity check on 00687 |
+| `student_training/scripts/aa1_yolop_cache.py` | Stage 0: YOLOPv2 on the 18 clips → per-frame boxes/scores/RLE masks; recall vs v1 G-DINO tracks |
+| `student_training/scripts/aa1_tracks.py` | Stage 1 core: `track_from_yolop`, `stitch_fragments`, `is_ego_hood` |
+| `student_training/scripts/aa1_track_stage1.py` | Stage 1 driver + renders (overlay_v2, grid16_v2, timeline_v2); exports `VAL_E3A_IDS`, `PALETTE_HEX/BGR` |
+| `student_training/scripts/aa1_lanes.py` | Stage 2 core: `rle_decode`, `fill_vehicle_gaps`, `trace_path`, `path_bounds_at`, `track_geometry_v2` |
+| `student_training/scripts/aa1_stage2.py` | Stage 2 driver + renders (overlay_lanes, grid16_lanes, target_curves) |
+| `student_training/scripts/aa1_detect_track_rank.py` | v1 baseline (G-DINO + horizon corridor; do not extend). Still supplies `decode_span`, `decode_frames`, `window_ends`, `load_event_row`, `load_cache`, G-DINO `Detector`, and the `rank_window`/`recency_ok` patterns |
+| `third_party/yolopv2_ref/` | Vendored YOLOPv2 `utils.py`/`demo.py` (MIT) + `weights/yolopv2.pt` (gitignored) |
+| `outputs/aa1_v2_18clips/` | v2b per-clip outputs + `stage1_summary.json`, `yolop_vs_gdino_comparison.json`, run logs |
 | `outputs/aa1_smoke_18clips/` | v1 baseline outputs — keep untouched |
+| `reports/_scripts/_build_progress_report.py` | Builds the 2026-09-15 professor report + its two figures |
 
-Removed 2026-09-19 and no longer generated: `_grid16_{lanes,threat,v2}.jpg`, `_path_check*.jpg`,
-`_geometry_v2.json`, `_overlay_lanes.mp4`, `_overlay_v2.mp4`, `_timeline_v2.png`.
+### APIs / functions — AA.1 v2b (2026-09-15, signatures only)
 
-### APIs — signatures only
 ```python
-# aa1_lanes.py
-fit_alpha(track, t_window_end, ...) -> (alpha, alpha_mode, pts, low_samples, span) | None
-static_lane_mask(frame_masks, ts) -> bool (720,1280)              # STATIC_LANE_FRAC = 0.95
-_exclude_vehicles(lane, boxes) -> lane
-_nearest_lane_points(lane, xref_fn, step=4, max_run=60) -> (left, right)  # [(row, x)]
-_ransac_curve(pts, rng, iters=200, thr=6, min_inl=10, min_span=60) -> (coef, y_min, y_max) | None
-_calibrate_lanes(frame_masks, ts, rng) -> (anchor, width_model | None, n_pair_frames)
-_measure_path(fm, xref_fn, anchor, model, rng) -> (coef, top, src) | None
-estimate_ego_path(frame_masks, seed=0) -> summary dict            # writes ego_path per frame
-path_x_at(ego_path, y) -> float
-# aa1_collision.py
-compute_track_scores(tracks, frame_masks, fps) -> {tid: {t: dict(score, raw, closeness, side, approach,
-                                                          alpha, g, g_rate, lane, shielded, box_h)}}
-candidate_pool(boxes_now, tracks, t, fps) -> {tid: box};  select_top_k(pool, scores_now, k=5)
-side_gap(box, ego_path) -> float;  lane_side(box, ego_path) -> "LEFT"|"EGO"|"RIGHT"
+# aa1_scene.py
+WEIGHTS_PATH; IMG_SIZE = 640; STRIDE = 32; CONF_THRES = 0.30; IOU_THRES = 0.45; CLASS_ID_VEHICLE = 3
+class YOLOPv2:
+    def __init__(self, weights_path=WEIGHTS_PATH, device="cuda"): ...   # torch.jit.load, FP16 on CUDA
+    def infer(self, frame_bgr, conf_thres=CONF_THRES, iou_thres=IOU_THRES) -> dict:
+        """1280x720 BGR only -> dict(boxes (N,4) xyxy px, scores (N,), classes (N,),
+        drivable (720,1280) bool, lane (720,1280) bool)."""
+
+# aa1_yolop_cache.py
+def rle_encode(mask) -> dict                         # {shape, start, runs}; fixed 2026-09-15
+def run_clip(yp, video_id, out_dir) -> (per_frame, timestamps)   # writes <vid>_yolop.json (t rounded 4dp)
+def compare_to_gdino(video_id, yolop_frames, iou_thresh=0.4) -> dict   # recall vs v1 G-DINO tracks
+
 # aa1_tracks.py
-extend_edge_tracks(tracks, cache) -> (tracks, [(tid, n_added, side)])   # continues edge-touching tracks with
-                                                                        # low-conf boxes, <= 0.3 s gaps
-# aa1_stage3.py
-run_clip(video_id, out_dir) -> windows;  render_target_curves(video_id, tracks, scores, timestamps, win_ends, is_pos, out_dir)
-# aa1_run_set.py
-sample_clips(n_pos, n_neg, seed) -> dict;  main(--set gen18, --stages 0,1,3)
+LOST_TRACK_BUFFER = 90; STITCH_MAX_GAP_S = 3.0; STITCH_MAX_CENTER_DIST_FRAC = 1.5
+STITCH_SIZE_RATIO_RANGE = (0.4, 2.5); STITCH_HIST_SIM_MIN = 0.45; HOOD_Y_FRAC = 0.85
+def load_yolop_cache(out_dir, video_id) -> dict
+def track_from_yolop(cache, frames, conf_thres=0.30, lost_track_buffer=90) -> dict[int, list[(t, xyxy, conf)]]
+def stitch_fragments(tracks, frames, timestamps, fps, max_gap_s=3.0) -> (tracks, merge_log[(kept, absorbed, gap, dist_frac, hist_sim)])
+def is_ego_hood(pts, frame_h=720) -> bool             # camera-static track in the bottom band
+
+# aa1_track_stage1.py
+def run_clip(video_id, out_dir) -> dict               # writes <vid>_tracks_v2.json (stitched, hood-filtered) + renders
+
+# aa1_lanes.py
+ROW_STEP = 4; MIN_RUN_WIDTH_PX = 20; SEED_MAX_CENTER_DIST_PX = 200; MIN_PATH_WIDTH_PX = 40
+MAX_CONSECUTIVE_MISS = 6; LANE_SNAP_MARGIN_PX = 60; MIN_FIT_SAMPLES = 8; FIT_SPAN = 1.0; MAX_FIT_SPAN = 2.5
+def rle_decode(rle) -> np.ndarray
+def fill_vehicle_gaps(drivable, boxes) -> np.ndarray  # OR lower 60% of each box into the mask
+def trace_path(drivable, lane, frame_w=1280, frame_h=720, row_step=4, vehicle_boxes=None) -> dict[row, {x_left, x_right, x_center, source}]
+def path_bounds_at(y, path) -> (x_left, x_right) | (None, None)   # nearest traced row
+def track_geometry_v2(track, t_window_end, frame_masks, fit_span=1.0) -> dict | None
+    # frame_masks: {round(t,4): {drivable, lane, boxes, path}}; returns alpha, alpha_mode, s_end, s_rate,
+    # rho, lane_state in {IN, LEFT, RIGHT, INVALID}, n_samples, fit_span_used, low_samples, last_box, last_t.
+    # NO threat - Stage 3.
+
+# aa1_stage2.py
+def load_frame_masks(video_id) -> (frame_masks, fps, span)   # decodes + traces every cached frame once
+def load_stitched_tracks(video_id) -> dict
+def run_clip(video_id, out_dir) -> list[window_record]       # writes <vid>_geometry_v2.json + renders
 ```
 
 ### v1 baseline — `aa1_detect_track_rank.py` (committed `812e884`)
-G-DINO → BoT-SORT → calibrated virtual horizon corridor; threat = `max(alpha·in_path, rho·ttc_lat_inv)`.
-**Rejected** (DECISIONS.md). Its decode/window helpers are reused.
+G-DINO (`IDEA-Research/grounding-dino-tiny`, manual class-agnostic NMS) → BoT-SORT → per-clip
+calibrated virtual corridor:
+- horizon fitted from box height vs box bottom (`estimate_horizon`)
+- lane width = 2.7·(row − horizon) (`path_bounds`)
+- ego-yaw shift from optical flow (`estimate_yaw_shift`)
+- threat = `max(alpha·in_path, rho·ttc_lat_inv)`
+
+Per-window causal ranking (`rank_window`, `recency_ok` = present in ≥ half of the last 0.5 s,
+≥ 8-sample fit window). **The corridor geometry is rejected** (DECISIONS.md). The decode/windowing
+helpers are reused by v2b.

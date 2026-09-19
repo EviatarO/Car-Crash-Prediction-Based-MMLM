@@ -395,31 +395,15 @@
   horizontal jump segments that mislead non-specialists. Show masks + boxes only.
 - **Treating the aux path as "4 versions"** → the v2 diagram is one pipeline whose components answer
   different questions. The only comparisons are YOLOPv2 vs G-DINO (Stage 1/2) and v2 vs v1 (Stage 3).
-- **Horizon / vanishing-point heading line as the ego path** → wrong on curves and at intersections; replaced by a quadratic centreline fitted to lane lines.
-- **Per-row EMA of the path** → rows jitter independently; smooth the 3 quadratic coefficients instead.
-- **Fade-to-straight when lane evidence is lost** → a turning car ends up with a wrong straight path; pure hold is better (retry against the anchor after 0.8 s).
-- **Green drivable-corridor fallback for the path** → the drivable mask also covers side streets and intersections; not a heading.
-- **Adaptive calibration reference (even gated on full pairs)** → RANSAC RNG divergence broke clips that worked (01153 168→2 pairs, 01504 199→53, 02117 246→3). Fixed image-centre reference kept.
-- **Quadratic extrapolation to row 719 for the anchor** → unstable; evaluate at the nearest fitted row.
-- **Lane-width band prefilter on measured lines** → dropped real lines when the model was off; the width check is applied to the pair only.
-- **Opposite-sign left/right slope filter (reject crosswalk pairs)** → 00932's genuine pair has same-sign slopes.
-- **Lower static-lane-pixel threshold (< 95%)** → 00505's spare-tire pixels reach only 63% persistence, while real far-lane pixels on 02117 reach 85%; would erase real paint.
-- **`s`, `s_rate`, ρ as score inputs or Stage 4 targets** → lane-overlap `s` was noise; ρ was a constant. Use α, g, closing_rate, lane.
-- **Display threshold on the top-5 overlay** → hid the crash partner (00319 id3); always draw all 5.
-- **Ending the drawn path at the first car/dot marker** → hides where the path actually goes.
-- **Selection score as a training target or fit to the crash label** → leaks the label; it only picks which 5 objects get supervised.
 
 ## Unresolved design questions
 
 - ~~How should Stage AA.1's virtual-corridor threat ranking handle wide intersections (A: widen corridor, B: size/proximity signal, C: CLRerNet)?~~ **RESOLVED 2026-09-15: none of the three** — the corridor was replaced by per-frame YOLOPv2 drivable/lane path tracing (see rejected options above).
-- **Stage 4 go-ahead:** targets α, g, closing_rate, lane per selected object — proceed, or change the target set after the overlay review? Open, user decision.
-- **Ground truth for gen18 positives 00903, 00932, 01035 and dev 00283 (id1 vs id2):** which object is hit? Needed to score the selection; user to supply.
-- **Target-curve plot shows the 5 longest-lived tracks, not the selected top-5:** switch to selected objects? Open.
-- **Spare-tire false lane (00486, 00505):** accept, mask by hand-tuned rule, or fine-tune YOLOPv2 lane head? Open; two filters already rejected.
-- **Pedestrians/cyclists:** YOLOPv2 is vehicle-only. Add G-DINO (person/bicycle) or accept vehicle-only? Open.
-- **Are the 386 Stage-1 stitch merges correct?** Constants set from 00319/00687 only. Verify before AA.2 or tighten? Open.
-- **Negative-clip decode gap (~4 s between MID-8 and MID-4):** decode two blocks or shade the gap? Open.
-- **02104 short clip (empty windows) and 01737 near-empty scene:** exclude or handle? Open.
+- **Smooth the frame-to-frame flicker of traced lane bounds before building Stage 3, or proceed and see whether a ~1 s collision-check integration averages it out?** Open, user decision.
+- **Pedestrians/cyclists:** YOLOPv2 is vehicle-only. Add G-DINO (person/bicycle prompt) to the detection pass, or accept vehicle-only targets for Stage AA? Open.
+- **Are the 358 Stage-1 stitch merges correct?** Gate constants were set from 00319/00687 only; several merges sit near thresholds. Verify against GT/visual review before AA.2, or tighten gates? Open.
+- **Open lots without lane structure (01552):** accept weak path tracing, or add an optical-flow heading fallback? Open.
+- **Ground-truth partner table for the 9 positive `val_e3a` clips** (object, time visible, mechanism) — needed for Stage 3 acceptance; to be supplied by the user.
 - ~~Do the captions still carry class-discriminating information, and is that why the semantic
   arms lose on positives?~~ **REFUTED 2026-08-27** — see DECISIONS.md's new rejected-options
   entry above and PROJECT_STATE.md's correction. Class separation is flat-to-higher for B-v3,

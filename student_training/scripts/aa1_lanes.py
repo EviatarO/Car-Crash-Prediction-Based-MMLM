@@ -194,6 +194,8 @@ PATH_ANCHOR_WEIGHT = 5.0    # weight of the bottom-row anchor in the centre-path
 PATH_EMA_TAU_S = 0.25
 PATH_GATE_PX = 120          # mean |new - current| over the lower half of the image
 PATH_RESYNC_S = 0.4         # accept a far measurement once rejections last this long (a turn)
+PATH_RESET_HOLD_S = 0.8     # after this long fully held, retry against the calibrated anchor
+                            # instead of only ever searching near the (possibly stuck) reference
 PAIR_MIN_FRAMES = 8         # frames with both ego lane lines needed for the anchor + lane width
 MEASURE_MIN_INL = 6         # RANSAC inliers needed to accept ONE lane line in a single frame
                             # (lower than the calibration pass - near an intersection the mask
@@ -246,6 +248,45 @@ def fit_alpha(track, t_window_end, frame_w: int = FRAME_W, frame_h: int = FRAME_
     single_t = len(set(ts)) < 2
     alpha = 0.0 if single_t else _lstsq_slope(ts, np.log(size))
     return float(alpha), alpha_mode, pts, low_samples, round(span, 2)
+
+
+STATIC_LANE_FRAC = 0.95  # a pixel classified 'lane' in at least this fraction of the WHOLE
+                         # clip is a fixed part of the vehicle/mount (a real lane line always
+                         # moves at least a little as the ego drives), not road paint
+
+
+def static_lane_mask(frame_masks: dict, ts: list) -> np.ndarray:
+    """Pixels that read as 'lane' in >= STATIC_LANE_FRAC of every frame in the clip - almost
+    certainly a fixed object visible in the shot (e.g. a spare tire mounted on the ego's own
+    bumper), which YOLOPv2 sometimes misclassifies as lane paint because it never moves the way
+    a real line does. Confirmed 2026-09-19 on 00486/00932: a bright/patterned mounted object at
+    the bottom of frame was lane-classified in 100% of frames, fooling the line fit into
+    tracking it instead of the road. 4 known-good clips checked (01153/01504/02117/01737) have
+    ZERO pixels this persistent, so the cutoff has margin to spare."""
+    if not ts:
+        return np.zeros((FRAME_H, FRAME_W), dtype=bool)
+    acc = np.zeros_like(frame_masks[ts[0]]["lane"], dtype=np.int32)
+    for t in ts:
+        acc += frame_masks[t]["lane"]
+    return (acc / len(ts)) >= STATIC_LANE_FRAC
+
+
+def _exclude_vehicles(lane: np.ndarray, boxes) -> np.ndarray:
+    """Zero out lane pixels that fall inside a detected vehicle's box - a real lane line can't
+    be painted under a car, so any 'lane' pixels there are a false positive (usually headlight
+    glare or a reflection on the vehicle's own body). Confirmed 2026-09-19 on 00932: every
+    frame's fitted 'lane line' was tracking the glare on a van's grille/headlights directly
+    ahead, not the road, because YOLOPv2's lane mask lit up on the reflections."""
+    if len(boxes) == 0:
+        return lane
+    out = lane.copy()
+    h, w = lane.shape
+    for x1, y1, x2, y2 in boxes:
+        x1, x2 = int(max(0, x1)), int(min(w, x2))
+        y1, y2 = int(max(0, y1)), int(min(h, y2))
+        if x2 > x1 and y2 > y1:
+            out[y1:y2, x1:x2] = False
+    return out
 
 
 def _nearest_lane_points(lane, xref_fn, step=4, max_run=60):
@@ -359,7 +400,8 @@ def _calibrate_lanes(frame_masks: dict, ts: list, rng):
     a per-clip constant, and it is what _fit_centreline pulls every frame's path through."""
     anchors, samples = [], []
     for t in ts:
-        left, right = _nearest_lane_points(frame_masks[t]["lane"], lambda y: FRAME_W / 2)
+        lane = _exclude_vehicles(frame_masks[t]["lane"], frame_masks[t]["boxes"])
+        left, right = _nearest_lane_points(lane, lambda y: FRAME_W / 2)
         fl, fr = _ransac_curve(left, rng), _ransac_curve(right, rng)
         if fl is None or fr is None:
             continue
@@ -427,7 +469,8 @@ def _measure_path(fm, xref_fn, anchor, model, rng):
     place for that check. Also lowered the RANSAC bar for a single line (MEASURE_MIN_INL/SPAN):
     near an intersection the lane mask is often genuinely sparse - a handful of real points is
     still better than nothing, and the width/plausibility checks still guard the result."""
-    left, right = _nearest_lane_points(fm["lane"], xref_fn)
+    lane = _exclude_vehicles(fm["lane"], fm["boxes"])
+    left, right = _nearest_lane_points(lane, xref_fn)
     fl = _ransac_curve(left, rng, min_inl=MEASURE_MIN_INL, min_span=MEASURE_MIN_SPAN)
     fr = _ransac_curve(right, rng, min_inl=MEASURE_MIN_INL, min_span=MEASURE_MIN_SPAN)
     if fl is not None and fr is not None:
@@ -489,6 +532,21 @@ def estimate_ego_path(frame_masks: dict, seed: int = 0) -> dict:
     stale. Before the first measurement, frames get the first measured path (camera calibration,
     not object motion); a clip with no measurement at all gets a vertical path above the anchor.
 
+    2026-09-19: two more fixes, both from clips where the path never recovered for the rest of
+    the clip once wrong -
+    - **The first-ever accepted measurement is now required to be a full `lane_pair` fit**, not
+      any single-line guess. It seeds every later frame's reference (and gets literally
+      backfilled onto every frame before it), so a noisy first guess propagated indefinitely:
+      confirmed on 00486/00505/01532/01478, where an early single-line fit (grabbed a spare
+      tire, glare, or a crosswalk stripe) locked in a wrong reference for the whole clip.
+    - **After PATH_RESET_HOLD_S of continuous "held" (no measurement found near the current,
+      possibly-stale, reference)**, retry once against the calibrated anchor - a fixed,
+      independent reference - instead of only ever searching near the position that got stuck
+      in the first place. Only adopts the retry if it comes back a full `lane_pair` (same bar as
+      the seed). Confirmed needed on 01075 and 01532: real, clearly-visible lines existed for
+      the rest of the clip, but the reference-based search anchored to the wrong spot never
+      found its way back to them on its own.
+
     Replaces (2026-09-18) a single straight line to one vanishing point: it started at a fixed
     default in the sky (00372), froze during turns when lane lines went near-horizontal (01737),
     and needed lines on both sides of the ego (00687 has them on one side only)."""
@@ -496,9 +554,13 @@ def estimate_ego_path(frame_masks: dict, seed: int = 0) -> dict:
     ts = sorted(frame_masks)
     if not ts:
         return {}
+    static = static_lane_mask(frame_masks, ts)
+    if static.any():
+        for t in ts:
+            frame_masks[t]["lane"] = frame_masks[t]["lane"] & ~static
     anchor, model, n_pair_frames = _calibrate_lanes(frame_masks, ts, rng)
     sm_coef, sm_top = None, None
-    pending, prev_t, rejected_since = [], None, None
+    pending, prev_t, rejected_since, held_since = [], None, None, None
     srcs = []
     for t in ts:
         if sm_coef is None:
@@ -510,7 +572,7 @@ def estimate_ego_path(frame_masks: dict, seed: int = 0) -> dict:
         a = 1.0 - np.exp(-(t - prev_t) / PATH_EMA_TAU_S) if prev_t is not None and t > prev_t else 1.0
         prev_t = t
         src = "held"
-        if meas is not None:
+        if meas is not None and (sm_coef is not None or meas[2] == "lane_pair"):
             mcoef, mtop, msrc = meas
             if sm_coef is None:
                 sm_coef, sm_top, src = mcoef.copy(), mtop, msrc
@@ -523,6 +585,16 @@ def estimate_ego_path(frame_masks: dict, seed: int = 0) -> dict:
                     rejected_since, src = None, msrc
                 elif rejected_since is None:
                     rejected_since = t
+        if src == "held":
+            if held_since is None:
+                held_since = t
+            elif sm_coef is not None and t - held_since >= PATH_RESET_HOLD_S:
+                retry = _measure_path(frame_masks[t], lambda y: anchor, anchor, model, rng)
+                if retry is not None and retry[2] == "lane_pair":
+                    sm_coef, sm_top, src = retry[0].copy(), retry[1], retry[2]
+                    held_since = rejected_since = None
+        else:
+            held_since = None
         if sm_coef is None:
             pending.append(t)
             continue

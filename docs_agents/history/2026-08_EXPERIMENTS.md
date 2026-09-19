@@ -1430,55 +1430,78 @@ A planned same-environment control run (`A1-crop-rerun`) was started then delibe
 cancelled when the pod was paused mid-run — see DECISIONS.md for why that was the right call,
 not a loose end.
 
-## Stage AA.1 — detection pipeline (v1 baseline 2026-09-14; v2b Stages 0–3 + generalization set 2026-09-19)
+## Stage AA.1 — detection pipeline on the 18 `val_e3a` clips (v1 baseline + v2b Stages 0–2, 2026-09-14/15)
 
-All runs local (RTX 1000 Ada 6 GB). Dev set = 18 held-out `val_e3a` clips (9 pos / 9 neg). Positives decode
-[event − 3.5 s, event − 0.5 s] (~91 frames), windows TTE 1.5/1.0/0.5; negatives decode ~8 s, windows
-MID-10/-8/-4.
+All runs were local (RTX 1000 Ada 6 GB) on the 18 held-out clips (9 pos / 9 neg).
+- Positives decode [event − 3.5 s, event − 0.5 s] (~91 frames); windows TTE 1.5/1.0/0.5.
+- Negatives decode an ~8 s block (~241 frames); windows MID-10/-8/-4.
 
-### v1 baseline — G-DINO + horizon corridor (`outputs/aa1_smoke_18clips/`, commit `812e884`)
-G-DINO-tiny 0.61–0.79 s/frame; horizon fit fell back on 6/18 clips → threat 0 on 3 of 9 positives
-(00319/00077/00283). Rejected.
+### v1 baseline — G-DINO + horizon-fitted virtual corridor
+- **Config:** `aa1_detect_track_rank.py --all` (commit `812e884`).
+  - Detection: G-DINO-tiny, box 0.30 / text 0.25, NMS 0.5.
+  - Tracking: BoT-SORT with `high_conf_det_threshold=0.30`, `lost_track_buffer=30`.
+  - Ranking: per-window causal.
+- **Outputs:** `outputs/aa1_smoke_18clips/` (`run_log.txt`, per clip `.json`, grid16, overlay, target_curves).
+- **Detection speed:** 0.61–0.79 s/frame.
+- **Horizon fit:** 12 fit / 6 fallback (00319, 00077, 00283, 01153, 02104, 01552). The fallback
+  row 432 put every box above the horizon on 00319/00077/00283 → lateral INVALID, threat 0
+  (ranking failed on 3 of 9 positives).
+- **Raw fit on the fallback clips:**
 
-### v2b Stage 0 — YOLOPv2
-`aa1_yolop_cache.py --all`, img 640, NMS IoU 0.45, cached down to conf 0.10 (was 0.30). 22–95 ms/frame;
-all boxes class id 3 (vehicle only). Recall vs the v1 G-DINO tracks, IoU ≥ 0.4: mean 0.814 (was 0.776 at
-cache conf 0.30); lowest 01737 0.14 (near-empty night highway), 00474 0.60, 00283 0.66.
+| Clip | Raw horizon fit | Slope | Rejected by |
+|---|---|---|---|
+| 00077 | 150 | 0.88 | 30–85% range rule — a correct fit |
+| 00283 | 193 | 1.03 | range rule — a correct fit |
+| 00319 | 272 | 0.38 | slope |
+| 01153 | 408 | −0.34 | slope |
+| 01552 | 403 | 0.35 | slope |
+| 02104 | 479 | 1.53 | slope |
 
-### v2b Stage 1 — tracking
-BoT-SORT `lost_track_buffer=90`; totals on the 18 dev clips: raw 1062 → stitched 676 (386 merges), 0 hood
-tracks. `extend_edge_tracks` keeps a track alive with low-confidence boxes at the frame edge (00319 id3 now
-tracked to the last frame, 12 boxes added; its crash car had genuinely started leaving the frame, box
-grows 36→231 px tall).
+- **Good positives (per-window threat of the #1 object):**
 
-### v2b Stage 3 — selection score (dev 18 + gen18)
-Config in ARCHITECTURE.md. Steps that changed the numbers (dev set, partner = drafted GT, see PROJECT_STATE):
-- box height alone: partner in top-5 23/23 visible windows, #1 14/23;
-- path-overlap score (2026-09-17): top-5 20/23, #1 15/23 — small far in-lane boxes and stale frozen tracks
-  outranked the partner (fixed by recency gate, closeness, shielding);
-- closeness × side × (1+approach) with EMA (2026-09-18): top-5 23/24, #1 15/24 (00319 excluded);
-- with a lane-line ego path (2026-09-18/19): top-5 26/27, #1 18/27 (00319 partner id3 counted).
+| Clip | #1 object | TTE1.5 / TTE1.0 / TTE0.5 |
+|---|---|---|
+| 00687 | SUV | 2.39 / 2.31 / 1.09 |
+| 00147 | id5 | 0.19 / 0.49 / 1.07 |
+| 00493 | id0 | 3.37 / 2.62 / 3.24 |
+| 00372 | id6 | 1.07 / 1.17 / 0.61 |
 
-### Generalization set (gen18, `outputs/aa1_v2_18clips/clip_list.json`)
-9 pos + 9 neg drawn with seed 20260919 from the training pool (741 pos / 741 neg after excluding the 18
-dev clips and all `test_*.jsonl` manifests, 1362 ids). Nothing was tuned on them.
-- Positives: 00136, 00195, 00486, 00505, 00583, 00803, 00903, 00932, 01035.
-- Negatives: 01075, 01131, 01140, 01196, 01478, 01532, 01696, 01862, 01939.
-- Eye-labelled partners (5 clips, 15 windows): 00136 id0, 00486 id0, 00505 id9, 00583 id0, 00803 id1 →
-  #1 in 15/15 windows, top-5 15/15 (before the last ego-path fixes; unchanged after).
-- 00195: the car about to be hit never gets a box (late-entering car missed by the detector) — a recall
-  failure, not a scoring failure. 00903/00932/01035 ambiguous by eye — not labelled.
-- Ego-path problems found on gen18 (fixed/open list in PROJECT_STATE.md): 01075, 00932 fixed; 00486,
-  00505, 01532, 01478 open.
+  On 00474 and 00529 the #1 object changed between windows (not resolved).
+- **Constant-sensitivity sweep on 00687:** SUV #1 in 243/243 settings, worst margin 9.3×.
 
-### Combined result after the last fixes (36 clips)
-- 14 clips with drafted/eye labels: partner #1 in 33/42 windows, top-5 in 41/42.
-- Top-1 selection score median 0.59 over 54 crash windows vs 0.19 over 54 normal windows (not a crash
-  classifier; the score picks objects only).
-- Ego-path sources, e.g. 01075 lane_pair 31 / lane_single 184; 01552 lane_pair 204 (was 0); 00077 lane_pair
-  86 / lane_single 4; 00486 held 88; 01532 held 132 + backfilled 112; 00529 default 93.
-- Score-term diagnostics worth remembering: partner box heights in the last window are 172–591 px on the 9 dev
-  positives (00283 truck only 30 px at TTE1.5); lane-overlap `s` was noise (values −10…−127), ρ was a
-  constant 0/1 bug before 2026-09-17.
+### v2b Stage 0 — YOLOPv2 detection + cache
+- **Config:** `aa1_yolop_cache.py --all`. Official `yolopv2.pt`, img 640, conf 0.30, IoU 0.45.
+- **Outputs:** `outputs/aa1_v2_18clips/<vid>_yolop.json`, `yolop_vs_gdino_comparison.json`,
+  `yolop_run_log.txt`.
+- **Speed:** 22–57 ms/frame (~1 min for all 18 clips).
+- **Classes:** only class id 3, on every frame of all 18 clips.
+- **Box recall vs v1 G-DINO tracks** (IoU ≥ 0.4, G-DINO is a reference, not ground truth): mean
+  0.776, max 0.928.
 
-Outputs: `outputs/aa1_v2_18clips/` (see ARCHITECTURE.md file table).
+| Low-recall clip | Recall | Note |
+|---|---|---|
+| 01737 | 0.079 | near-empty night highway; both detectors find almost nothing |
+| 00474 | 0.583 | |
+| 00283 | 0.614 | truck cab; the U-turning truck is detected every frame through the event |
+| 01552 | 0.674 | |
+
+### v2b Stage 1 — tracking + stitching + hood filter
+- **Config:** `aa1_track_stage1.py`. BoT-SORT `lost_track_buffer=90`, stitching gates per
+  ARCHITECTURE.md.
+- **Outputs:** `<vid>_tracks_v2.json`, `_overlay_v2.mp4`, `_grid16_v2.jpg`, `_timeline_v2.png`,
+  `stage1_summary.json`.
+- **Totals:** 954 raw tracks → 596 after stitching (358 merges). 0 tracks flagged as ego hood.
+- **00319:** the occluded crash car is one continuous track (id9, 16.6–19.1 s); no stitch needed,
+  the longer buffer alone fixed it.
+- **00687:** the SUV is one continuous track (id0) for the whole span.
+
+### v2b Stage 2 — ego-path tracing + per-object geometry
+- **Config:** `aa1_stage2.py`. `trace_path` with vehicle-gap fill; `track_geometry_v2`, 1.0 s causal
+  fit, ≥ 8 samples.
+- **Outputs:** `<vid>_geometry_v2.json`, `_overlay_lanes.mp4`, `_grid16_lanes.jpg`,
+  `_target_curves.png/.csv`, `stage2_run_log.txt`. Single-frame path checks: `<vid>_path_check*.jpg`.
+- **Result:** 54 windows, 982 object-window geometries, **0 INVALID (0.0%)**.
+- **Visual gate:** path correct on 00077 (pitched), 01153 (rolled), 00283 (off-centre truck, night),
+  00687 (turning intersection), 00319 (night), and 00147 (car directly ahead, after the vehicle-gap
+  fill). Weak on 01552 (open parking lot).
+- **Known artefact:** frame-to-frame flicker of `lane_state`/`s` near lane boundaries.

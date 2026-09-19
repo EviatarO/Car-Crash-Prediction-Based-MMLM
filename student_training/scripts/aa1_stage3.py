@@ -15,10 +15,12 @@ Per clip, in outputs/aa1_v2_18clips/:
                              the first car on it) and its source, the scoring candidates only
                              (thin grey with id), current top-5 always colored + labeled
                              "#rank idN score"
-  <vid>_grid16_threat.jpg    16-frame grid from that overlay
-  <vid>_target_curves.png/csv  panels 1-5 unchanged (alpha/s_end/s_rate/rho/lane, from
-                             aa1_lanes.track_geometry_v2, kept for comparison only); panel 6 is
-                             now the new selection score
+  <vid>_target_curves.png/csv  5 panels: the Stage 4 target dims (alpha, side gap g, closing
+                             rate, lane) + the selection score, for the 5 longest-lived tracks
+
+2026-09-19: dropped <vid>_grid16_threat.jpg (the 16-frame grid from the overlay) - reviewing
+this project's clips has settled on watching the .mp4 directly, and generating+saving the grid
+was pure overhead once nobody was opening it any more.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aa1_detect_track_rank import decode_frames, window_ends  # noqa: E402
-from aa1_lanes import track_geometry_v2, path_x_at  # noqa: E402
+from aa1_lanes import path_x_at  # noqa: E402
 from aa1_stage2 import load_frame_masks, load_stitched_tracks  # noqa: E402
 from aa1_track_stage1 import VAL_E3A_IDS, PALETTE_HEX  # noqa: E402
 from aa1_collision import compute_track_scores, candidate_pool, select_top_k  # noqa: E402
@@ -74,11 +76,9 @@ def compute_window_top5(win_ends: list, tracks: dict, scores: dict, fps: float) 
 
 def render_overlay(video_id, frames, timestamps, frame_masks, tracks, scores, out_dir: Path, fps):
     h, w = frames[0].shape[:2]
-    grid_idx = set(np.linspace(0, len(frames) - 1, 16).round().astype(int).tolist())
-    tiles = []
     writer = cv2.VideoWriter(str(out_dir / f"{video_id}_overlay_threat.mp4"),
                              cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for fi, (frame, t_raw) in enumerate(zip(frames, timestamps)):
+    for frame, t_raw in zip(frames, timestamps):
         t = round(float(t_raw), 4)
         vis = frame.copy()
         fm = frame_masks.get(t)
@@ -127,48 +127,60 @@ def render_overlay(video_id, frames, timestamps, frame_masks, tracks, scores, ou
         cv2.putText(vis, f"{video_id}  t={t:.2f}s", (10, 34), cv2.FONT_HERSHEY_SIMPLEX,
                     1.1, (255, 255, 255), 3)
         writer.write(vis)
-        if fi in grid_idx:
-            tiles.append(cv2.resize(vis, (w * 2 // 5, h * 2 // 5)))
     writer.release()
-    while len(tiles) < 16:
-        tiles.append(np.zeros_like(tiles[0]) if tiles else np.zeros((h * 2 // 5, w * 2 // 5, 3), np.uint8))
-    grid = np.vstack([np.hstack(tiles[r * 4:(r + 1) * 4]) for r in range(4)])
-    cv2.imwrite(str(out_dir / f"{video_id}_grid16_threat.jpg"), grid, [cv2.IMWRITE_JPEG_QUALITY, 88])
 
 
-def render_target_curves(video_id, tracks, frame_masks, scores, timestamps, win_ends, out_dir: Path):
+def render_target_curves(video_id, tracks, scores, timestamps, win_ends, is_pos, out_dir: Path):
+    """5 panels, 3x2 grid (row 3 spans both columns): the 4 Stage 4 target dims - alpha
+    (looming), g (side gap to the ego path, in box-heights), closing_rate (= -g_rate, + =
+    approaching the path), lane (LEFT/EGO/RIGHT, 5-sample majority vote) - plus the selection
+    score that picked which objects to show. All 5 come straight out of
+    aa1_collision.compute_track_scores' per-frame dict; nothing here is recomputed.
+
+    2026-09-19 rewrite: was 6 stacked panels sharing one x-axis and one legend, plotting the
+    OLD lane-overlap-width geometry (s/s_rate/rho/lane_state) that Stage 3's score no longer
+    uses - kept "for comparison" but never actually compared to anything. Now every panel has
+    its own x-axis and legend, and shows only what the score and the Stage 4 targets are built
+    from."""
     top_ids = sorted(tracks, key=lambda tid: -len(tracks[tid]))[:N_CURVE_OBJECTS]
     if not top_ids:
         return
     id_labels = {tid: f"id{tid} ({len(tracks[tid])} pts)" for tid in top_ids}
-    dims = ["alpha", "s_end", "s_rate", "rho", "lane", "threat"]
-    LANE = {"LEFT": -1.0, "IN": 0.0, "RIGHT": 1.0}
+    LANE = {"LEFT": -1.0, "EGO": 0.0, "RIGHT": 1.0}
     ts_all = np.array(timestamps)
     n = len(ts_all)
+    dims = ["alpha", "g", "closing_rate", "lane", "threat"]
     series = {tid: {d: np.full(n, np.nan) for d in dims} for tid in top_ids}
+    lane_raw = {tid: [None] * n for tid in top_ids}
     rows = []
     for f, t_raw in enumerate(ts_all):
         t = round(float(t_raw), 4)
         for tid in top_ids:
-            pts = [p for p in tracks[tid] if p[0] <= t + 1e-4]
-            if not pts or abs(pts[-1][0] - t) > 1e-4:
+            e = scores.get(tid, {}).get(t)
+            if e is None:
                 continue
-            g = track_geometry_v2(pts, t, frame_masks)
-            if g is None or g["low_samples"]:
-                continue
-            score_entry = scores.get(tid, {}).get(t)
-            score = score_entry["score"] if score_entry is not None else np.nan
             s = series[tid]
-            s["alpha"][f] = g["alpha"]
-            s["s_end"][f] = np.nan if g["s_end"] is None else g["s_end"]
-            s["s_rate"][f] = np.nan if g["s_rate"] is None else g["s_rate"]
-            s["rho"][f] = np.nan if g["rho"] is None else g["rho"]
-            s["lane"][f] = LANE.get(g["lane_state"], np.nan)
-            s["threat"][f] = score
-            rows.append(dict(frame=f, t=round(float(t), 3), track_id=tid, n_samples=g["n_samples"],
-                             alpha=g["alpha"], alpha_mode=g["alpha_mode"], lane_overlap_s=g["s_end"],
-                             lane_overlap_rate=g["s_rate"], proximity=g["rho"], lane_state=g["lane_state"],
-                             selection_score=score))
+            s["alpha"][f] = e["alpha"]
+            s["g"][f] = e["g"]
+            s["closing_rate"][f] = -e["g_rate"]
+            s["threat"][f] = e["score"]
+            lane_raw[tid][f] = e["lane"]
+            rows.append(dict(frame=f, t=round(float(t), 3), track_id=tid, alpha=e["alpha"],
+                             side_gap=e["g"], closing_rate=round(-e["g_rate"], 4), lane=e["lane"],
+                             selection_score=e["score"]))
+    # 5-sample majority vote on the categorical lane label, matching aa1_lanes.FLICKER_SMOOTH_N -
+    # a single-frame flip near the path edge (path-width noise) shouldn't flip the plotted state
+    for tid in top_ids:
+        raw = lane_raw[tid]
+        for f in range(n):
+            window = [v for v in raw[max(0, f - 4):f + 1] if v is not None]
+            if not window:
+                continue
+            counts = {v: window.count(v) for v in set(window)}
+            top = max(counts.values())
+            tied = {v for v, c in counts.items() if c == top}
+            smoothed = next(v for v in reversed(window) if v in tied)
+            series[tid]["lane"][f] = LANE[smoothed]
     if rows:
         with open(out_dir / f"{video_id}_target_curves.csv", "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0]))
@@ -177,15 +189,18 @@ def render_target_curves(video_id, tracks, frame_masks, scores, timestamps, win_
 
     INK, INK2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
     panels = [
-        ("alpha", "1. Looming α  (1/s)", "growth rate of the object's size (horizon-free: area/width/height by which edges are clean)"),
-        ("s_end", "2. Lane overlap s  (kept for comparison only, not used by the score)", "share of the traced ego path covered; <0 = outside"),
-        ("s_rate", "3. Lane-overlap rate  (kept for comparison only)", ""),
-        ("rho", "4. Proximity ρ  (kept for comparison only)", "0 = farthest traced row, 1 = nearest"),
-        ("lane", "5. Lane state  (kept for comparison only)", ""),
-        ("threat", "6. Selection score", "closeness x side x (1+approach), EMA-smoothed (tau=0.3s) - picks the top-5 objects; never fit to the crash label"),
+        ("alpha", "1. Looming α  (1/s)", "log-size growth rate; Stage 4 target"),
+        ("g", "2. Side gap g  (box-heights)", "gap from the ego path; 0 = on the path; Stage 4 target"),
+        ("closing_rate", "3. Closing rate  (box-heights/s)", "-d(g)/dt; + = approaching the path; Stage 4 target"),
+        ("lane", "4. Lane  (5-sample majority)", "position relative to the ego path; Stage 4 target"),
+        ("threat", "5. Selection score", "closeness x side x (1+approach), EMA-smoothed - picks which objects get the targets above; never fit to the crash label"),
     ]
     plt.rcParams.update({"font.family": ["Segoe UI", "DejaVu Sans"], "font.size": 10})
-    fig, axes = plt.subplots(len(panels), 1, figsize=(11, 15.5), sharex=True, facecolor=SURFACE)
+    fig = plt.figure(figsize=(13, 11), facecolor=SURFACE)
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1], hspace=0.55, wspace=0.28)
+    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]),
+           fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1]),
+           fig.add_subplot(gs[2, :])]
     x = ts_all - ts_all[0]
     for ax, (key, title, sub) in zip(axes, panels):
         ax.set_facecolor(SURFACE)
@@ -197,26 +212,27 @@ def render_target_curves(video_id, tracks, frame_masks, scores, timestamps, win_
             else:
                 ax.plot(x, y, color=color, lw=2, label=id_labels[tid])
         for label, te in win_ends:
-            ax.axvline(te - ts_all[0], color=MUTED, lw=1, ls=(0, (4, 3)), zorder=0)
+            ax.axvline(te - ts_all[0], color=MUTED, lw=1.2, ls=(0, (4, 3)), zorder=0)
+            ax.text(te - ts_all[0], 1.0, label, transform=ax.get_xaxis_transform(),
+                   color=MUTED, fontsize=7, rotation=90, va="top", ha="right")
         if key == "lane":
-            ax.set_yticks([-1, 0, 1], ["LEFT", "IN", "RIGHT"]); ax.set_ylim(-1.5, 1.5)
-        if key == "rho":
-            ax.set_ylim(0, 1.05)
+            ax.set_yticks([-1, 0, 1], ["LEFT", "EGO", "RIGHT"]); ax.set_ylim(-1.5, 1.5)
         ax.grid(axis="y", color=GRID, lw=0.8)
-        ax.set_title(title, loc="left", color=INK, fontsize=11, fontweight="semibold", pad=16)
+        ax.set_title(title, loc="left", color=INK, fontsize=11, fontweight="semibold", pad=14)
         if sub:
-            ax.text(0, 1.02, sub, transform=ax.transAxes, color=INK2, fontsize=8.5, va="bottom")
+            ax.text(0, 1.02, sub, transform=ax.transAxes, color=INK2, fontsize=8, va="bottom")
+        ax.set_xlabel("seconds into the decoded span", color=INK2, fontsize=8.5)
+        ax.legend(loc="best", ncol=min(len(top_ids), 3), frameon=True, framealpha=0.7,
+                 facecolor=SURFACE, edgecolor=AXIS, fontsize=7.5, labelcolor=INK2, handlelength=1.6)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         for side in ("left", "bottom"):
             ax.spines[side].set_color(AXIS)
-        ax.tick_params(colors=MUTED)
-    axes[0].legend(loc="upper left", bbox_to_anchor=(0, -0.08), ncol=min(len(top_ids), 5),
-                  frameon=False, fontsize=9, labelcolor=INK2, handlelength=3)
-    axes[-1].set_xlabel(f"seconds into the decoded span  ({n} frames)", color=INK2)
-    fig.suptitle(f"Clip {video_id}: Stage 3 geometry + selection score per frame (causal; longest-lived tracks shown)",
+        ax.tick_params(colors=MUTED, labelsize=8)
+    fig.suptitle(f"Clip {video_id} ({'TP - positive/crash' if is_pos else 'TN - negative/normal'}): "
+                f"Stage 4 targets + selection score per frame (causal; {len(top_ids)} longest-lived tracks shown)",
                 x=0.06, ha="left", color=INK, fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.985))
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_dir / f"{video_id}_target_curves.png", dpi=110, facecolor=SURFACE)
     plt.close(fig)
 
@@ -228,7 +244,7 @@ def run_clip(video_id: str, out_dir: Path):
 
     scores = compute_track_scores(tracks, frame_masks, fps)
 
-    _, wins = window_ends(video_id)
+    is_pos, wins = window_ends(video_id)
     wins = [(label, te) for label, te in wins if span[0] - 1e-6 <= te <= span[1] + 1e-6]
 
     threat_windows = compute_window_top5(wins, tracks, scores, fps)
@@ -237,7 +253,7 @@ def run_clip(video_id: str, out_dir: Path):
         print(f"[{video_id}] {win['label']} (t={win['t_end']:.2f}s): top5 = {top_desc or '(none)'}")
 
     render_overlay(video_id, frames, timestamps, frame_masks, tracks, scores, out_dir, fps)
-    render_target_curves(video_id, tracks, frame_masks, scores, timestamps, wins, out_dir)
+    render_target_curves(video_id, tracks, scores, timestamps, wins, is_pos, out_dir)
 
     with open(out_dir / f"{video_id}_threat_v2.json", "w", encoding="utf-8") as f:
         json.dump(dict(video_id=video_id, span=list(span), fps=fps, windows=threat_windows), f, indent=2)

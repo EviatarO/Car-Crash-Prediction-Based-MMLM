@@ -101,6 +101,16 @@ def side_gap(box, ego_path) -> float:
     return gap_px / h
 
 
+def lane_side(box, ego_path) -> str:
+    """LEFT / EGO / RIGHT of the ego path, from the box's bottom edge at that row - the
+    categorical counterpart to side_gap, for the target-curve plots (aa1_stage3.py)."""
+    x1, y1, x2, y2 = box
+    x_line = FRAME_W / 2.0 if ego_path is None else path_x_at(ego_path, y2)
+    if x1 <= x_line <= x2:
+        return "EGO"
+    return "LEFT" if x2 < x_line else "RIGHT"
+
+
 def side_score(g_eff: float) -> float:
     """1.0 within SIDE_FULL_GAP box-heights of the ego path, floors at SIDE_FLOOR beyond
     SIDE_ZERO_GAP, linear in between."""
@@ -157,10 +167,12 @@ def candidate_pool(boxes_now: dict, tracks: dict, t: float, fps: float) -> dict:
 def compute_track_scores(tracks: dict, frame_masks: dict, fps: float) -> dict:
     """One causal forward pass, in time order, over every (track, detection) event in the
     clip - not per-window, per-object recomputation. Returns
-    {track_id: {t: dict(score, raw, closeness, side, approach, alpha, g, g_rate, shielded,
+    {track_id: {t: dict(score, raw, closeness, side, approach, alpha, g, g_rate, lane, shielded,
     box_h)}}, where `score` is the EMA-smoothed value and `raw` is the unsmoothed one at that
-    instant. Shielding needs every track's box at the SAME frame, so this is driven by a
-    merged, time-sorted event list across all tracks rather than processed track-by-track."""
+    instant. `alpha`/`g`/`g_rate`/`lane` double as the Stage 4 target-curve series
+    (aa1_stage3.render_target_curves plots them directly, no recomputation). Shielding needs
+    every track's box at the SAME frame, so this is driven by a merged, time-sorted event list
+    across all tracks rather than processed track-by-track."""
     from aa1_lanes import fit_alpha
 
     by_t: dict[float, dict] = {}
@@ -211,6 +223,7 @@ def compute_track_scores(tracks: dict, frame_masks: dict, fps: float) -> dict:
                                closeness=round(float(closeness), 4), side=round(float(side), 4),
                                approach=round(float(approach), 4), alpha=round(float(alpha), 4),
                                g=round(float(g), 4), g_rate=round(float(g_rate), 4),
+                               lane=lane_side(box, ego_path),
                                shielded=bool(shielded), box_h=round(float(box_h), 1))
     return out
 
