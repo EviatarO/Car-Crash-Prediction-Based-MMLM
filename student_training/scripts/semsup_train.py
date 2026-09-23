@@ -1393,8 +1393,15 @@ def main():
                                               retain_graph=True, allow_unused=True)
                     g_a = torch.autograd.grad(aux_loss, lora_params,
                                               retain_graph=True, allow_unused=True)
-                    fc = torch.cat([g.flatten() for g in g_c if g is not None])
-                    fa = torch.cat([g.flatten() for g in g_a if g is not None])
+                    # Unlike the sem block below, g_a is None for every layer past aux_layer BY
+                    # DESIGN (the aux graph ends there) - filtering None independently on each
+                    # side (as the sem block does) would compare two flattened vectors of
+                    # DIFFERENT lengths (fc over all 24 layers, fa over 0..aux_layer only), so
+                    # numel() never matches and this block silently never runs. Restrict BOTH to
+                    # the positions where the aux gradient exists - the "shared trunk" the
+                    # per-layer block below already gets right per-bucket.
+                    fc = torch.cat([gc_i.flatten() for gc_i, ga_i in zip(g_c, g_a) if ga_i is not None])
+                    fa = torch.cat([ga_i.flatten() for ga_i in g_a if ga_i is not None])
                     if fc.numel() and fa.numel() and fc.numel() == fa.numel():
                         c = F.cosine_similarity(fc.unsqueeze(0), fa.unsqueeze(0)).item()
                         if c == c:
