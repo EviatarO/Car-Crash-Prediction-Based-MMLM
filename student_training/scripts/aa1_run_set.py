@@ -15,10 +15,23 @@ never changes silently.
 through the identical pipeline and are reviewed together; the per-clip filenames don't collide
 between the two sets' video ids). clip_list.json still lives there, keyed by that folder.
 
+2026-09-22: added `--set pool1761`, the AA.2 detection pass for the AA-rel/AA-occ token
+supervision plan (~/.claude/plans/CCP based BADAS/2026-09-19_Child-Plan-AA-token-relevance-aux.md).
+Its video list is every unique video_id in dataset/manifests/recap_v12_1761.jsonl - the exact
+1,761-window pool A1-compress256 trained on - not a fresh random sample, so it's a different
+"kind" of set (`kind="pool"`): `load_or_create_list` reads the manifest instead of sampling,
+and Stage 0 gets a 1s preroll (child plan Phase 1 step 1: compute_track_scores' alpha/EMA need
+~1s of causal history, which the earliest window's earliest tubelet didn't have before - see
+aa1_detect_track_rank.decode_span's `preroll_s`). Stage 3 (full overlay video + target-curve
+plot per clip) is for the ~36-clip review sets only - at ~1,100 videos it would be pure waste;
+a pool-kind set's labels come from aa4_token_labels.py instead, which reuses Stage 0/1's cached
+output directly (see that script's docstring).
+
 Usage:
   python aa1_run_set.py --set gen18 --stages 0,1      # detection, tracks (no stage "2" driver
                                                        # any more - see aa1_stage2.py)
   python aa1_run_set.py --set gen18 --stages 3        # selection score (after GT labelling)
+  python aa1_run_set.py --set pool1761 --stages 0,1   # AA.2 detection + tracking, full pool
 """
 from __future__ import annotations
 
@@ -34,7 +47,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aa1_detect_track_rank import RAW_VIDEO_ROOT, TRAIN_CSV  # noqa: E402
 from aa1_track_stage1 import VAL_E3A_IDS  # noqa: E402
 
-SETS = {"gen18": dict(out_dir=REPO / "outputs" / "aa1_v2_18clips", n_pos=9, n_neg=9, seed=20260919)}
+POOL1761_MANIFEST = REPO / "dataset" / "manifests" / "recap_v12_1761.jsonl"
+
+SETS = {
+    "gen18": dict(kind="sample", out_dir=REPO / "outputs" / "aa1_v2_18clips",
+                  n_pos=9, n_neg=9, seed=20260919),
+    "pool1761": dict(kind="pool", out_dir=REPO / "outputs" / "aa1_pool1761",
+                     manifest=POOL1761_MANIFEST, preroll_s=1.0),
+}
 TEST_MANIFESTS = sorted((REPO / "dataset" / "manifests").glob("test_*.jsonl"))
 
 
@@ -67,6 +87,27 @@ def sample_clips(n_pos: int, n_neg: int, seed: int) -> dict:
                 negatives=sorted(rng.sample(sorted(neg), n_neg)))
 
 
+def pool_video_ids(manifest_path: Path) -> dict:
+    """Every unique video_id in a recap-style window manifest (video_id/frames_dir/
+    event_occurs/requested_time_to_event/t_seconds - see recap_v12_1761.jsonl), split by class
+    for the same printed summary as sample_clips, and filtered to videos whose raw mp4 actually
+    exists locally (mirrors sample_clips' own guard)."""
+    pos, neg, n_rows = set(), set(), 0
+    with open(manifest_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            n_rows += 1
+            vid = str(row["video_id"]).zfill(5)
+            if not (RAW_VIDEO_ROOT / f"{vid}.mp4").exists():
+                continue
+            (pos if row["event_occurs"] else neg).add(vid)
+    return dict(manifest=str(manifest_path), n_windows=n_rows,
+                positives=sorted(pos), negatives=sorted(neg))
+
+
 def load_or_create_list(cfg: dict) -> list:
     out_dir = cfg["out_dir"]
     path = out_dir / "clip_list.json"
@@ -75,11 +116,14 @@ def load_or_create_list(cfg: dict) -> list:
             rec = json.load(f)
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
-        rec = sample_clips(cfg["n_pos"], cfg["n_neg"], cfg["seed"])
+        if cfg.get("kind") == "pool":
+            rec = pool_video_ids(cfg["manifest"])
+        else:
+            rec = sample_clips(cfg["n_pos"], cfg["n_neg"], cfg["seed"])
         with open(path, "w", encoding="utf-8") as f:
             json.dump(rec, f, indent=2)
-    print(f"[set] {len(rec['positives'])} pos {rec['positives']}")
-    print(f"[set] {len(rec['negatives'])} neg {rec['negatives']}")
+    print(f"[set] {len(rec['positives'])} pos, {len(rec['negatives'])} neg "
+         f"({len(rec['positives']) + len(rec['negatives'])} videos)")
     return rec["positives"] + rec["negatives"]
 
 
@@ -90,6 +134,7 @@ def main():
     args = ap.parse_args()
     cfg = SETS[args.set]
     out_dir = cfg["out_dir"]
+    preroll_s = cfg.get("preroll_s", 0.0)
     clips = load_or_create_list(cfg)
     stages = {int(s) for s in args.stages.split(",")}
 
@@ -98,7 +143,7 @@ def main():
         import aa1_yolop_cache
         yp = YOLOPv2()
         for vid in clips:
-            aa1_yolop_cache.run_clip(yp, vid, out_dir)
+            aa1_yolop_cache.run_clip(yp, vid, out_dir, preroll_s=preroll_s)
     if 1 in stages:
         import aa1_track_stage1
         for vid in clips:
@@ -110,9 +155,14 @@ def main():
         import aa1_stage2
         aa1_stage2.OUT_DIR = out_dir  # its loaders read the module-level folder
     if 3 in stages:
-        import aa1_stage3
-        for vid in clips:
-            aa1_stage3.run_clip(vid, out_dir)
+        if cfg.get("kind") == "pool":
+            print(f"[set] '{args.set}' is a pool-kind set ({len(clips)} videos) - Stage 3's "
+                 f"full overlay+curves render is for the ~36-clip review sets only. Use "
+                 f"aa4_token_labels.py for this set's AA-rel/AA-occ labels instead.")
+        else:
+            import aa1_stage3
+            for vid in clips:
+                aa1_stage3.run_clip(vid, out_dir)
 
 
 if __name__ == "__main__":

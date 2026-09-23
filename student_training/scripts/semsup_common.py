@@ -181,7 +181,7 @@ class TrainableBadasWrapper:
     def __init__(self, stagea_cfg: dict, lora_target_modules: list | None = None,
                  lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
                  unfreeze_module_substrings: list | None = None,
-                 preprocess_mode: str = "crop"):
+                 preprocess_mode: str = "crop", aux_layer: int | None = None):
         from e4_stageA_badas_open_eval import load_badas, preprocess_clip, PREPROCESS_MODES
         if preprocess_mode not in PREPROCESS_MODES:
             raise ValueError(f"preprocess_mode {preprocess_mode!r} not in {PREPROCESS_MODES}")
@@ -306,6 +306,38 @@ class TrainableBadasWrapper:
             n_head = sum(p.numel() for p in self.head_params)
             print(f"  [wrapper] unfroze {len(self.head_params)} head params ({n_head:,} numel) "
                   f"matching {unfreeze_module_substrings}")
+
+        # AA-rel/AA-occ token-relevance aux (child plan 2026-09-19-AA-token-relevance-aux):
+        # a forward hook on one encoder layer's OUTPUT, read via self._captured["aux_tokens"]
+        # after forward_clip() - same pattern as the "pooled" tap above, not returned from
+        # forward_clip() itself so every existing call site (logits, patches = ...) is
+        # untouched. Off by default (aux_layer=None): zero behavior change for every other arm.
+        # Looked up by NAME SUFFIX, not attribute path (`self.nn_model.backbone...`), because
+        # get_peft_model() (above) reparents everything under "base_model.model." - a suffix
+        # match on ".encoder.layer.{L}" is robust to that prefix without hardcoding it, mirroring
+        # the head-unfreeze substring match a few lines up.
+        self.aux_layer = aux_layer
+        if aux_layer is not None:
+            target_suffix = f".encoder.layer.{aux_layer}"
+            aux_module, aux_name = None, None
+            for name, mod in self.nn_model.named_modules():
+                if name == target_suffix.lstrip(".") or name.endswith(target_suffix):
+                    aux_module, aux_name = mod, name
+                    break
+            if aux_module is None:
+                raise RuntimeError(
+                    f"Could not find a module named '...{target_suffix}' to hook for aux_layer="
+                    f"{aux_layer}. Run --dry-run-modules and check the real encoder layer names."
+                )
+            print(f"  [wrapper] aux hook on '{aux_name}' (layer {aux_layer})")
+
+            def _aux_hook(_module, _args, output):
+                # HF encoder layers commonly return (hidden_states, ...) - take element 0 if so.
+                # No .detach(): the aux loss must backprop through this tensor into the LoRA
+                # adapters in layers 0..aux_layer (nothing later in the stack sees this hook).
+                self._captured["aux_tokens"] = output[0] if isinstance(output, (tuple, list)) else output
+
+            aux_module.register_forward_hook(_aux_hook)
 
     def head_state_dict(self):
         """State dict of ONLY the unfrozen head params (e.g. temporal_processor +

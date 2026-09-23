@@ -57,6 +57,7 @@ Usage (RunPod):
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import random
 import re
@@ -66,6 +67,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import average_precision_score
@@ -75,7 +77,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 
 from semsup_common import (  # noqa: E402
     TrainableBadasWrapper, load_siglip, siglip_text_embed,
-    load_training_examples, clip_level_split,
+    load_training_examples, clip_level_split, PROJECT_ROOT,
 )
 from vjepa_reason import ResamplerProjector  # noqa: E402
 from e4_stageA_badas_open_eval import load_manifest, frame_paths_for  # noqa: E402
@@ -157,6 +159,131 @@ def _layer_bucket(param_name):
     if _PREDICTOR_STACK_RE.search(param_name):
         return "predictor_stack"
     return "other"
+
+
+# =============================================================================
+# Stage AA token-relevance aux (child plan 2026-09-19-AA-token-relevance-aux)
+# =============================================================================
+
+def build_aux_head(device):
+    """The frozen aux head: LayerNorm(1024, no affine - just puts mid-stack tokens on a
+    fixed scale, no learned shift/scale to blur into the trunk's job) + Linear(1024, 1),
+    the SAME 1,025 weights applied to every one of the 2048 tokens independently (matches
+    a 1x1-conv segmentation head - NOT one big Linear(2048*1024, 2048), which would have
+    ~2.1B weights and memorize the pool instead of reading a shared per-token feature)."""
+    return torch.nn.Sequential(
+        torch.nn.LayerNorm(1024, elementwise_affine=False),
+        torch.nn.Linear(1024, 1),
+    ).to(device)
+
+
+@functools.lru_cache(maxsize=4096)
+def _load_aux_npz(path_str: str):
+    """Cached (a run touches the same window's label file at most once per epoch, and
+    windows repeat every epoch) - avoids re-reading+re-decompressing the same .npz
+    N_EPOCHS times. Returns None for a missing file (not every window has one - see
+    --aux-mode's help) instead of raising, so one missing label never kills the run."""
+    p = Path(path_str)
+    if not p.exists():
+        return None
+    with np.load(p) as z:
+        return {"rel": z["rel"].copy(), "occ": z["occ"].copy()}
+
+
+def load_aux_target(frames_dir: str, mode: str, labels_dir: str, device):
+    """(2048,) float32 target tensor on `device` for this window's frames_dir under
+    --aux-mode {occ,rel}, or None if no label file exists for it."""
+    arrs = _load_aux_npz(str(Path(labels_dir) / f"{frames_dir}.npz"))
+    if arrs is None:
+        return None
+    arr = arrs["occ"].astype(np.float32) if mode == "occ" else arrs["rel"]
+    return torch.from_numpy(arr).to(device)
+
+
+def balanced_bce_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """BCEWithLogitsLoss, but averaged 1/2 over object tokens (target>0) and 1/2 over
+    background tokens, not a flat mean over all 2048 - a window's object tokens are
+    almost always a small minority (aa4_token_labels.py's label_stats.json quantifies
+    this), and a flat mean would let the trivial all-background solution dominate."""
+    per_token = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    pos = target > 0
+    if pos.any() and (~pos).any():
+        return 0.5 * per_token[pos].mean() + 0.5 * per_token[~pos].mean()
+    return per_token.mean()
+
+
+def _lora_weight_change_norms(cur_adapter_dir: Path, prev_adapter_dir: Path) -> dict:
+    """Per-layer-bucket L2 norm of (this epoch's LoRA weights - the previous epoch's),
+    over EVERY LoRA tensor (A and B matrices), not just the sampled --grad-cosine-every
+    steps' gradients. A converged layer can show a small gradient while still being the
+    layer that moved the most that epoch (NEXT_LORA_PLACEMENT.md) - this is the
+    cross-reference for that, independent of the gradient probe above. Returns {} if
+    there is no previous epoch (epoch 1) or either adapter is unreadable."""
+    if not prev_adapter_dir.exists():
+        return {}
+    from safetensors.torch import load_file as _load_sft
+    try:
+        cur = _load_sft(str(cur_adapter_dir / "adapter_model.safetensors"))
+        prev = _load_sft(str(prev_adapter_dir / "adapter_model.safetensors"))
+    except FileNotFoundError:
+        return {}
+    sums = defaultdict(float)
+    for name, cur_t in cur.items():
+        prev_t = prev.get(name)
+        if prev_t is None or prev_t.shape != cur_t.shape:
+            continue
+        sums[_layer_bucket(name)] += (cur_t.float() - prev_t.float()).norm().item() ** 2
+    return {str(k): round(v ** 0.5, 6) for k, v in sums.items()}
+
+
+def write_grad_trace(out_dir: Path, epoch: int, aux_layer: int, aux_layer_stats: dict,
+                     aux_cos_n: int, cur_adapter_dir: Path):
+    """Stage AA gradient monitor (child plan Phase 4): one line per epoch to
+    out_dir/grad_trace.jsonl - per-encoder-layer (0-23, always all 24, 0-filled where the
+    aux gradient never reached rather than omitted, so a plot never has to special-case
+    a missing key) crash-grad norm, aux-grad norm, their cosine, the sampled-step count,
+    PLUS the vanishing-gradient ratio and the per-layer LoRA weight-change norm. See
+    plot_grad_trace.py for the companion figure."""
+    per_layer = {}
+    for layer in range(24):
+        entry = aux_layer_stats.get(layer)
+        if entry is None:
+            per_layer[str(layer)] = dict(crash_grad_norm=0.0, aux_grad_norm=0.0, cos=None, n_sampled=0)
+            continue
+        cn, an, cs, n_s = entry
+        per_layer[str(layer)] = dict(
+            crash_grad_norm=round(cn / n_s, 6) if n_s else 0.0,
+            aux_grad_norm=round(an / n_s, 6) if n_s else 0.0,
+            cos=round(cs / n_s, 6) if n_s else None,
+            n_sampled=n_s)
+    if "predictor_stack" in aux_layer_stats:
+        cn, an, cs, n_s = aux_layer_stats["predictor_stack"]
+        per_layer["predictor_stack"] = dict(
+            crash_grad_norm=round(cn / n_s, 6) if n_s else 0.0,
+            aux_grad_norm=round(an / n_s, 6) if n_s else 0.0,
+            cos=round(cs / n_s, 6) if n_s else None, n_sampled=n_s)
+
+    aux_norm_0 = per_layer["0"]["aux_grad_norm"]
+    aux_norm_top = per_layer[str(aux_layer)]["aux_grad_norm"]
+    vanishing_ratio = (aux_norm_0 / aux_norm_top) if aux_norm_top else None
+    # The wiring test (child plan Phase 4): the aux loss's graph ends at aux_layer, so
+    # every layer AFTER it (and the predictor stack) must show an EXACT zero aux gradient.
+    leaked = [l for l in range(aux_layer + 1, 24) if per_layer[str(l)]["aux_grad_norm"] > 0]
+
+    prev_adapter_dir = out_dir / f"epoch_{epoch - 1:02d}" / "lora_adapter"
+    weight_change = _lora_weight_change_norms(cur_adapter_dir, prev_adapter_dir)
+
+    with open(out_dir / "grad_trace.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(
+            epoch=epoch, aux_layer=aux_layer, n_sampled_steps=aux_cos_n,
+            per_layer=per_layer, vanishing_ratio=vanishing_ratio,
+            vanishing_flag=(vanishing_ratio is not None and vanishing_ratio < 1e-3),
+            leaked_into_later_layers=leaked,
+            lora_weight_change_norm=weight_change,
+        )) + "\n")
+    if leaked:
+        print(f"  [warn] aux gradient reached layer(s) {leaked} - should be exactly 0 past "
+             f"aux_layer={aux_layer}. Wiring bug, not a modeling issue - check the hook point.")
 
 
 def _clip_grads(args, lora_params, aux_params, trainable, head_params=None):
@@ -531,6 +658,39 @@ def main():
                           "--semantic-weight > 0 and --semantic-loss infonce (cosine's "
                           "degenerate-optimum problem applies here too, and was never fixed "
                           "for cosine).")
+    ap.add_argument("--aux-mode", default="none", choices=["none", "occ", "rel"],
+                     help="Stage AA token-relevance aux (child plan 2026-09-19-AA-token-"
+                          "relevance-aux). 'none' (default): no aux branch, byte-identical to "
+                          "every arm before this flag existed. 'occ': target = does any tracked "
+                          "vehicle cover this patch (hard 0/1, ALL tracked vehicles - the "
+                          "localization-only control, AA-occ). 'rel': target = the AA.1 "
+                          "selection score / 2 for the top-5 objects only, 0 elsewhere (soft "
+                          "0..1 - the treatment, AA-rel). Labels come from aa4_token_labels.py's "
+                          ".npz files (--aux-labels-dir), looked up by the window's own "
+                          "frames_dir. A window with no label file just contributes 0 aux loss "
+                          "(logged as n_aux_missing) - the crash loss is unaffected.")
+    ap.add_argument("--aux-layer", type=int, default=17,
+                     help="0-indexed encoder layer whose OUTPUT the aux head reads (default 17 "
+                          "= 'layer 18', 1-indexed, per the child plan). Backprop from the aux "
+                          "loss reaches LoRA in encoder layers 0..aux_layer only - layers after "
+                          "it, and the predictor stack, see the crash gradient alone.")
+    ap.add_argument("--aux-weight", type=float, default=0.0,
+                     help="lambda on the aux BCE term, added to the loss as crash_weight*"
+                          "crash_loss + semantic_weight*sem_loss + aux_weight*aux_loss (all "
+                          "three co-exist; semantic_weight is normally 0 for these arms). "
+                          "Set from the child plan's Phase-4 gradient-ratio pilot "
+                          "(lambda*|g_aux|/|g_crash| in 0.1-0.5 on the shared LoRA layers), "
+                          "never guessed. 0.0 (default) = --aux-mode has no effect on the loss "
+                          "even if set, matching every other weight flag's convention here.")
+    ap.add_argument("--aux-labels-dir", default=str(PROJECT_ROOT / "dataset" / "aa_token_labels"),
+                     help="directory of aa4_token_labels.py's <frames_dir>.npz files (rel/occ "
+                          "arrays, 2048 each).")
+    ap.add_argument("--aux-head-init", default=None,
+                     help="state_dict path for the FROZEN aux head (LayerNorm(1024, no-affine) "
+                          "+ Linear(1024,1)) - aa1_token_probe.py's Phase-3 fit on the frozen "
+                          "trunk. Required for a real run; if omitted with --aux-mode set, the "
+                          "head is random-init (wiring/gradient-flow smoke test ONLY - it has "
+                          "not learned to read relevance and must not be used for a real arm).")
     ap.add_argument("--siglip-model", default="google/siglip-base-patch16-224")
     ap.add_argument("--predictor-init", default=None, help="warm-start from B1 checkpoint")
     ap.add_argument("--clip-grad-per-group", action="store_true",
@@ -816,7 +976,25 @@ def main():
         lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         unfreeze_module_substrings=["temporal_processor", "classifier"] if args.unfreeze_head else None,
         preprocess_mode=args.preprocess,
+        aux_layer=args.aux_layer if args.aux_mode != "none" else None,
     )
+
+    # Stage AA token-relevance aux head: built AFTER the wrapper (needs `device`),
+    # ALWAYS frozen - it must never absorb the aux loss itself, only shape what the
+    # LoRA-unfrozen layers below it write into their tokens (see --aux-mode's help).
+    aux_head = None
+    if args.aux_mode != "none":
+        aux_head = build_aux_head(device)
+        if args.aux_head_init:
+            aux_head.load_state_dict(torch.load(args.aux_head_init, map_location=device))
+            print(f"[load] aux head (frozen, layer {args.aux_layer}) from {args.aux_head_init}")
+        else:
+            print(f"  [warn] --aux-mode={args.aux_mode} but no --aux-head-init given - the aux "
+                 f"head is RANDOM-INIT. Fine for a wiring/gradient-flow smoke test only; the "
+                 f"real head comes from aa1_token_probe.py's Phase-3 fit on the frozen trunk.")
+        for p in aux_head.parameters():
+            p.requires_grad = False
+        aux_head.eval()
     # peft's save_pretrained() auto-generates a model card BEFORE writing any
     # adapter weights, and assumes base_model.config supports `in` (a HF
     # PretrainedConfig). BADAS's V-JEPA2 uses a plain ModelArgs dataclass
@@ -1098,6 +1276,14 @@ def main():
         # --per-layer-grads: per-bucket running sums (bucket key -> [crash_norm_sum,
         # sem_norm_sum, cos_sum, n_sampled]), reset each epoch, averaged at epoch end.
         layer_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0]) if args.per_layer_grads else None
+        # Stage AA aux-loss accumulators, mirroring the sem_loss ones above (n_aux_missing
+        # counts windows with no label file - see load_aux_target - not an error, just
+        # logged so a run with an incomplete aa4_token_labels.py pass is easy to spot).
+        total_aux, n_aux_missing = 0.0, 0
+        aux_cos_sum, aux_cos_n, aux_cos_neg = 0.0, 0, 0
+        aux_gnorm_crash, aux_gnorm_aux = 0.0, 0.0
+        aux_layer_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0]) if aux_head is not None else None
+        aux_gc_probe_failed = False
         # `pending` counts SUCCESSFUL backward() calls since the last opt.step().
         # Driving the accumulation boundary off the enumerate() index instead would
         # desync the moment any example is skipped: some steps would average fewer
@@ -1167,6 +1353,85 @@ def main():
             sem_loss_combined = (args.sem_patch_weight * sem_loss
                                   + args.sem_pooled_weight * sem_loss_pooled)
 
+            # --- Stage AA token-relevance aux loss ---
+            # badas._captured["aux_tokens"] is from THIS SAME forward_clip() call (the hook
+            # fires during badas.nn_model(clip), before forward_clip returns) - zero extra
+            # GPU compute, same pattern as the pooled-tap semantic term above.
+            aux_loss = torch.tensor(0.0, device=device)
+            if aux_head is not None:
+                aux_tokens = badas._captured.get("aux_tokens")
+                if aux_tokens is None:
+                    raise RuntimeError(
+                        f"--aux-mode={args.aux_mode} but the layer-{args.aux_layer} hook did "
+                        f"not fire this window - check --aux-layer against the real module "
+                        f"names (--dry-run-modules).")
+                aux_target = load_aux_target(ex["frames_dir"], args.aux_mode,
+                                             args.aux_labels_dir, device)
+                if aux_target is not None:
+                    # the hook keeps the batch dim (1, 2048, 1024); the label is (2048,) - drop
+                    # the batch dim here or BCE raises a size mismatch on the first window
+                    tok = aux_tokens[0] if aux_tokens.dim() == 3 else aux_tokens
+                    aux_logits = aux_head(tok.to(dtype=torch.float32)).squeeze(-1)
+                    if aux_logits.shape != aux_target.shape:
+                        raise RuntimeError(
+                            f"aux logits {tuple(aux_logits.shape)} vs label "
+                            f"{tuple(aux_target.shape)} for {ex['frames_dir']} - token grid "
+                            f"mismatch (expected 2048 = 8x16x16).")
+                    aux_loss = balanced_bce_loss(aux_logits, aux_target)
+                else:
+                    n_aux_missing += 1
+
+            # --- crash-vs-aux gradient angle (diagnostic only, never optimized) --- Same
+            # construction as the crash-vs-semantic probe below, kept as its OWN block (not
+            # merged into it) so the semantic-arm probe is untouched byte-for-byte whether or
+            # not --aux-mode is set.
+            if (aux_head is not None and args.grad_cosine_every
+                    and not aux_gc_probe_failed
+                    and n % args.grad_cosine_every == 0):
+                try:
+                    g_c = torch.autograd.grad(crash_loss, lora_params,
+                                              retain_graph=True, allow_unused=True)
+                    g_a = torch.autograd.grad(aux_loss, lora_params,
+                                              retain_graph=True, allow_unused=True)
+                    fc = torch.cat([g.flatten() for g in g_c if g is not None])
+                    fa = torch.cat([g.flatten() for g in g_a if g is not None])
+                    if fc.numel() and fa.numel() and fc.numel() == fa.numel():
+                        c = F.cosine_similarity(fc.unsqueeze(0), fa.unsqueeze(0)).item()
+                        if c == c:
+                            aux_cos_sum += c
+                            aux_cos_n += 1
+                            aux_cos_neg += int(c < 0)
+                            aux_gnorm_crash += fc.norm().item()
+                            aux_gnorm_aux += fa.norm().item()
+
+                    by_bucket = defaultdict(lambda: ([], []))
+                    for name, gc_i, ga_i in zip(lora_param_names, g_c, g_a):
+                        if gc_i is None and ga_i is None:
+                            continue
+                        bucket = _layer_bucket(name)
+                        cs, as_ = by_bucket[bucket]
+                        if gc_i is not None:
+                            cs.append(gc_i.flatten())
+                        if ga_i is not None:
+                            as_.append(ga_i.flatten())
+                    for bucket, (cs, as_) in by_bucket.items():
+                        if not cs or not as_:
+                            continue
+                        fcb = torch.cat(cs)
+                        fab = torch.cat(as_)
+                        cb = (F.cosine_similarity(fcb.unsqueeze(0), fab.unsqueeze(0)).item()
+                              if fcb.numel() == fab.numel() else float("nan"))
+                        entry = aux_layer_stats[bucket]
+                        entry[0] += fcb.norm().item()
+                        entry[1] += fab.norm().item()
+                        if cb == cb:
+                            entry[2] += cb
+                        entry[3] += 1
+                except RuntimeError as exc:
+                    if aux_cos_n == 0:
+                        print(f"  [warn] aux grad-cosine probe disabled this epoch: {exc}")
+                    aux_gc_probe_failed = True
+
             # --- crash-vs-semantic gradient angle (diagnostic only, never optimized) ---
             # Measured on lora_params (the SHARED trunk) before the combined backward.
             # retain_graph=True is required because loss.backward() below reuses the graph.
@@ -1232,10 +1497,12 @@ def main():
             # whether the frozen head still fits the drifting representation; it
             # just contributes zero gradient.
             loss = (args.crash_weight * crash_loss
-                    + args.semantic_weight * sem_loss_combined) / args.grad_accum
+                    + args.semantic_weight * sem_loss_combined
+                    + args.aux_weight * aux_loss) / args.grad_accum
             loss.backward()
             total_crash += crash_loss.item()
             total_sem += sem_loss_combined.item()
+            total_aux += aux_loss.item()
             if pooled_head is not None:
                 total_sem_patch += sem_loss.item()
                 total_sem_pooled += sem_loss_pooled.item()
@@ -1328,6 +1595,22 @@ def main():
                   f"|g_crash|={grad_norm_crash:.4f}  |g_sem|={grad_norm_sem:.4f}  "
                   f"lambda*|g_sem|/|g_crash|={rel:.3f}")
 
+        # Stage AA aux-loss epoch summary (mirrors the sem block above; see --aux-mode).
+        avg_aux = total_aux / n if n else float("nan")
+        aux_grad_cos_mean = aux_cos_sum / aux_cos_n if aux_cos_n else float("nan")
+        aux_grad_cos_frac_neg = aux_cos_neg / aux_cos_n if aux_cos_n else float("nan")
+        aux_grad_norm_crash = aux_gnorm_crash / aux_cos_n if aux_cos_n else float("nan")
+        aux_grad_norm_aux = aux_gnorm_aux / aux_cos_n if aux_cos_n else float("nan")
+        if aux_head is not None:
+            print(f"  [aux]   aux_loss={avg_aux:.4f}  n_aux_missing={n_aux_missing}/{n}")
+            if aux_cos_n:
+                aux_rel = (args.aux_weight * aux_grad_norm_aux / aux_grad_norm_crash
+                          if aux_grad_norm_crash else float("nan"))
+                print(f"      [grad] cos(crash,aux)={aux_grad_cos_mean:+.4f}  "
+                     f"conflicting={100*aux_grad_cos_frac_neg:.1f}% of {aux_cos_n} sampled "
+                     f"steps  |g_crash|={aux_grad_norm_crash:.4f}  |g_aux|={aux_grad_norm_aux:.4f}  "
+                     f"lambda*|g_aux|/|g_crash|={aux_rel:.3f}")
+
         # `_j` centralises the NaN->null guard. json.dumps defaults to allow_nan=True
         # and emits a bare `NaN` token, which is INVALID json: python's own loads()
         # accepts it so it survives local inspection, but jq/JS/Go and most
@@ -1398,6 +1681,14 @@ def main():
                 "grad_norm_sem": _j(grad_norm_sem),
                 "grad_cos_n_sampled": cos_n,
                 "per_layer_grads": per_layer_grads,
+                # Stage AA aux loss (null-safe: 0.0/no missing when --aux-mode none, since
+                # total_aux/n_aux_missing/aux_cos_n stay 0 by construction).
+                "aux_loss": _j(avg_aux), "n_aux_missing": n_aux_missing,
+                "aux_grad_cos_mean": _j(aux_grad_cos_mean),
+                "aux_grad_cos_frac_neg": _j(aux_grad_cos_frac_neg),
+                "aux_grad_norm_crash": _j(aux_grad_norm_crash),
+                "aux_grad_norm_aux": _j(aux_grad_norm_aux),
+                "aux_grad_cos_n_sampled": aux_cos_n,
                 "n_failed": n_failed, "n_val_failed": n_val_failed,
                 # epoch_s = THIS epoch; elapsed_s = cumulative since run start.
                 # Only the cumulative one existed before, logged under a name that
@@ -1411,6 +1702,9 @@ def main():
         ep_dir = out_dir / f"epoch_{epoch:02d}"
         ep_dir.mkdir(parents=True, exist_ok=True)
         badas.nn_model.save_pretrained(str(ep_dir / "lora_adapter"))
+        if aux_head is not None:
+            write_grad_trace(out_dir, epoch, args.aux_layer, aux_layer_stats, aux_cos_n,
+                             ep_dir / "lora_adapter")
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
         if pooled_head is not None:

@@ -66,8 +66,8 @@ def rle_encode(mask: np.ndarray) -> dict:
     return dict(shape=list(mask.shape), start=int(flat[0]), runs=runs.tolist())
 
 
-def run_clip(yp: YOLOPv2, video_id: str, out_dir: Path):
-    t_start, t_end, is_pos = decode_span(video_id)
+def run_clip(yp: YOLOPv2, video_id: str, out_dir: Path, preroll_s: float = 0.0):
+    t_start, t_end, is_pos = decode_span(video_id, preroll_s=preroll_s)
     frames, timestamps, fps = decode_frames(video_id, t_start, t_end)
     t0 = time.time()
     per_frame = []

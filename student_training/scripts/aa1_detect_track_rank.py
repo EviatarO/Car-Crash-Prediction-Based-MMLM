@@ -214,23 +214,30 @@ def video_fps_duration(video_id: str):
     return fps, n / fps
 
 
-def decode_span(video_id: str):
+def decode_span(video_id: str, preroll_s: float = 0.0):
     """Returns (t_start, t_end, is_positive). Raw-pixel seconds into the clip. See module
-    docstring's KNOWN DEFERRED ITEM re: negatives decoding one block, not two."""
+    docstring's KNOWN DEFERRED ITEM re: negatives decoding one block, not two.
+
+    `preroll_s` (default 0.0, byte-identical to every historical call): decode this many extra
+    seconds BEFORE the earliest window's own start, floored at 0 (not T_FLOOR - T_FLOOR bounds
+    a WINDOW's end time, not how much extra video we decode before it). Added for the AA.4
+    token-relevance labels (2026-09-22): compute_track_scores' alpha/EMA need ~1s of a track's
+    own causal history to be valid, and without this the earliest window's earliest tubelet has
+    none - decode used to start exactly at that window's own start."""
     row = load_event_row(video_id)
     is_pos = int(row["target"]) == 1
     if is_pos:
         t_event = float(row["time_of_event"])
         t_start = max(T_FLOOR, t_event - POS_SPAN_START_BEFORE_EVENT)
         t_end = max(T_FLOOR, t_event - POS_SPAN_END_BEFORE_EVENT)
-        return t_start, t_end, True
+        return max(0.0, t_start - preroll_s), t_end, True
     else:
         _, duration = video_fps_duration(video_id)
         mid = duration / 2
         ends = [max(T_FLOOR, mid - off) for off in NEG_OFFSETS]
         t_start = max(T_FLOOR, min(ends) - 2.0)
         t_end = max(ends)
-        return t_start, t_end, False
+        return max(0.0, t_start - preroll_s), t_end, False
 
 
 def window_ends(video_id: str):
