@@ -747,6 +747,13 @@ def main():
                           "loss added; (2) RESUMING an interrupted run - point at the last "
                           "completed epoch's adapter. Note the trunk's frozen base weights are "
                           "unchanged either way; only the LoRA delta is loaded.")
+    ap.add_argument("--head-init", default=None,
+                     help="path to a head_state.pt saved by a previous --unfreeze-head epoch "
+                          "(next to that epoch's lora_adapter/). REQUIRED alongside --lora-init "
+                          "whenever resuming/continuing a run that has --unfreeze-head and is "
+                          "past epoch 1 - otherwise the head silently resets to its frozen "
+                          "starting weights while the LoRA continues, with no error. Requires "
+                          "--unfreeze-head.")
     ap.add_argument("--optimizer-init", default=None,
                      help="path to an optimizer.pt saved by a previous run's epoch dir. Restores "
                           "Adam moment estimates so a resumed run continues the SAME optimization "
@@ -1016,6 +1023,18 @@ def main():
             )
         _set_peft_sd(badas.nn_model, _load_sft(str(sft)))
         print(f"[load] initialized LoRA from {sft}")
+
+    # Symmetric to --lora-init, and REQUIRED alongside it whenever --unfreeze-head is resuming
+    # a run past epoch 1: badas.load_head_state() (semsup_common.py) was previously only ever
+    # called at TEST-SCORING time (see the test-scoring block below), never here. Resuming
+    # training with --lora-init pointed at epoch N would silently carry the LoRA forward but
+    # reset the head back to its frozen starting weights, un-training every update the head
+    # received in epochs 1..N with no error or warning - the run would look fine and be wrong.
+    if args.head_init:
+        if not args.unfreeze_head:
+            raise ValueError("--head-init given but --unfreeze-head is not set - there is no "
+                             "trainable head state to resume into.")
+        badas.load_head_state(args.head_init)
 
     # head_params (temporal_processor + classifier, --unfreeze-head only) are excluded
     # from lora_params here and given their own optimizer param group + LR below - they
