@@ -54,6 +54,7 @@ OUT = Path(__file__).resolve().parent / "experiments_data.js"
 E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
+AAT = MMLM_AI / "outputs" / "aa_token_aux"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 MANIFESTS = MMLM_AI / "dataset" / "manifests"
 TEST_MANIFEST = MANIFESTS / "test_manifest_hires.jsonl"
@@ -86,6 +87,8 @@ EXPECTED_CM = {
     "V12":     dict(n=677, tp=253, fn=85, fp=39, tn=300),   # build_landing_data.py: "v12"
     "v12shuf": dict(n=677, tp=244, fn=94, fp=36, tn=303),
     "A1-compress256": dict(n=677, tp=286, fn=52, fp=55, tn=284),
+    "AA-occ-unfrozen": dict(n=677, tp=264, fn=74, fp=45, tn=294),
+    "AA-rel-unfrozen": dict(n=677, tp=276, fn=62, fp=51, tn=288),
 }
 
 
@@ -205,7 +208,9 @@ def load_prompt(kind):
 HYPER_KEYS = [
     "lora_target_modules", "lora_r", "lora_alpha", "lora_dropout", "lora_init",
     "predictor_init", "crash_weight", "semantic_weight", "semantic_loss",
-    "infonce_tau_init", "siglip_model", "captions_path", "bank_captions",
+    "infonce_tau_init", "siglip_model",
+    "aux_mode", "aux_layer", "aux_weight", "aux_head_init",
+    "captions_path", "bank_captions",
     "lr", "lr_schedule", "warmup_frac", "epochs", "grad_accum", "clip_grad_per_group",
     "unfreeze_head", "head_lr_mult", "head_lr_schedule",
     "early_stop_patience", "select_by", "keep_top_k", "val_frac", "seed",
@@ -227,6 +232,13 @@ HYPER_DESC = {
     "semantic_loss": "how caption and vision embeddings are compared",
     "infonce_tau_init": "starting temperature of the InfoNCE softmax",
     "siglip_model": "frozen text encoder that embeds the captions",
+    "aux_mode": "Stage AA per-token aux target: occ (any car) or rel (relevance score)",
+    "aux_layer": "encoder layer the aux loss reads (0-indexed); backprop reaches only "
+                 "layers 0..this one",
+    "aux_weight": "lambda on the aux term; sized so its gradient on the shared LoRA "
+                  "layers is ~10% of the crash gradient's",
+    "aux_head_init": "frozen linear probe (LayerNorm+Linear) the aux loss is read "
+                     "through; fit once on the untrained trunk, never updated here",
     "captions_path": "caption corpus supervising this run",
     "bank_captions": "wider corpus used only to add InfoNCE distractors",
     "lr": "peak learning rate for the trunk/LoRA group",
@@ -568,6 +580,95 @@ ARMS = [
       test=dict(path=A1F / "test_scores" / "v12shuf_ep10.jsonl", gt_key="gt_verdict",
                 summary=None, epoch=10,
                 source="a1fail321/test_scores/v12shuf_ep10.jsonl (epoch 10)")),
+
+    A(key="AA-occ-unfrozen", label="AA-occ-unfrozen · occupancy aux, unfrozen head",
+      order=10, family="pool1761",
+      tagline="Localisation-only control for Stage AA's token-relevance aux loss — teach "
+              "the trunk 'a car is here', nothing about which car matters.",
+      hypothesis="A per-token auxiliary loss attached mid-trunk, plus letting the crash "
+                 "head itself train (A1's recipe freezes it), should let the model use "
+                 "spatial car-presence information the frozen A1-compress256 recipe "
+                 "cannot act on.",
+      aim="Isolate 'the trunk knows where cars are' from 'the trunk knows which car "
+          "matters' (AA-rel-unfrozen, below) — the two arms share every setting except "
+          "the aux target, so any gap between them is attributable to relevance, not to "
+          "unfreezing the head or to the aux loss existing at all.",
+      method="A1-compress256's exact recipe (LoRA r=16 α=32 on query/key/value, lr 2e-4 "
+             "constant, compress256, pool1761, seed 0) PLUS: (1) the crash head "
+             "(attention-pool + MLP classifier) unfrozen at the same 2e-4 LR, and (2) a "
+             "second loss term read from encoder layer 17 through a FROZEN linear probe "
+             "(fit once on the untrained trunk, never updated here): balanced BCE against "
+             "a per-patch-token label ('does any tracked vehicle cover this patch', from "
+             "an offline YOLOPv2+BoT-SORT detection pass). Backprop from this term reaches "
+             "only the LoRA in layers 0-17 — layers 18-23 and the predictor stack still "
+             "learn from crash CE alone. lambda=0.59, sized so the aux term's gradient on "
+             "the shared LoRA layers is ~10% of the crash gradient's (measured directly, "
+             "not guessed). Only 3 of the usual 8 epochs were run — a quick check to see "
+             "whether unfreezing the head does ANYTHING before committing a full 8-epoch "
+             "pair, not the final recipe. CAUTION comparing to A1-compress256 above: that "
+             "arm keeps the head frozen, so the honest baseline for this one is the "
+             "matched no-aux control, AA-ctrl-unfrozen (rank-1 test AP 0.9070, not on this "
+             "page) — against A1-compress256 directly, two things changed at once "
+             "(unfreezing + the aux loss).",
+      prompt=None,
+      prompt_note="No language supervision in this arm — the aux target is a per-token "
+                  "geometric label from detection, not a caption.",
+      pool="pool1761", train_dir=AAT / "AA-occ-unfrozen-check3",
+      arch=dict(semantic=False, loss=True, state={"tproc": "train", "clsf": "train"},
+               note="crash head (temporal processor + classifier) UNFROZEN, training at "
+                    "the same 2e-4 LR as LoRA — every other arm on this page keeps it "
+                    "frozen"),
+      hyper=AAT / "AA-occ-unfrozen-check3" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-occ-unfrozen-check3" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAT / "AA-occ-unfrozen-check3" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAT / "AA-occ-unfrozen-check3" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 4)],
+                source="aa_token_aux/AA-occ-unfrozen-check3 (epoch 2)")),
+
+    A(key="AA-rel-unfrozen", label="AA-rel-unfrozen · relevance aux, unfrozen head",
+      order=11, family="pool1761",
+      tagline="Does teaching the trunk WHICH car matters (not just that one is present) "
+              "improve crash prediction, once the head can actually use it?",
+      hypothesis="A frozen-head run of this same idea (aux loss at layer 17, lambda sized "
+                 "the same way) measurably changed layer-17 token readability for "
+                 "relevance more than its own occupancy control did, but that change "
+                 "never reached the final prediction (0.99 score correlation with "
+                 "A1-compress256, ~16/677 label flips at threshold 0.5 — smaller than the "
+                 "drift between two ordinary training epochs of the same arm). Unfreezing "
+                 "the crash head, so it can actually act on relevance information instead "
+                 "of a fixed frozen readout, should let that already-real internal change "
+                 "surface as a prediction difference.",
+      aim="Test the head-freezing explanation directly, as the other lever (moving the "
+          "aux tap from layer 17 to layer 23, closer to the output) already failed to "
+          "produce it. Compare against AA-occ-unfrozen above, its exact-recipe control, "
+          "to attribute any gap to relevance specifically rather than to the aux loss or "
+          "the unfrozen head in general.",
+      method="Identical to AA-occ-unfrozen's recipe (see that arm's method for the full "
+             "unfrozen-head + aux-loss description) with two changes: the per-token label "
+             "is 'how relevant is this car' (0-1, continuous — a kinematic selection "
+             "score: closeness x ego-lane position x approach rate, computed offline and "
+             "never fit to the crash label) instead of binary occupancy, and lambda=2.43 "
+             "(sized the same way — ~10% relative gradient pull — but larger because the "
+             "relevance target's own gradient is smaller in magnitude). Same 3-epoch "
+             "quick-check caveat and the same CAUTION about comparing to A1-compress256 "
+             "directly (see AA-occ-unfrozen's method) — the fair baseline here is "
+             "AA-ctrl-unfrozen (0.9070) or AA-occ-unfrozen (0.9101) above, not "
+             "A1-compress256 (0.9128, frozen head).",
+      prompt=None,
+      prompt_note="No language supervision in this arm — the aux target is a per-token "
+                  "kinematic label from detection, not a caption.",
+      pool="pool1761", train_dir=AAT / "AA-rel-unfrozen-check3",
+      arch=dict(semantic=False, loss=True, state={"tproc": "train", "clsf": "train"},
+               note="crash head UNFROZEN, same as AA-occ-unfrozen — the two arms differ "
+                    "only in the aux target"),
+      hyper=AAT / "AA-rel-unfrozen-check3" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-rel-unfrozen-check3" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAT / "AA-rel-unfrozen-check3" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAT / "AA-rel-unfrozen-check3" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 4)],
+                source="aa_token_aux/AA-rel-unfrozen-check3 (epoch 2)")),
 ]
 
 
@@ -602,6 +703,8 @@ def train_block(arm):
             "train_val_gap": series("train_val_gap"),
             "lr": series("lr"),
             "grad_cos": series("grad_cos_mean"),
+            "train_aux": series("aux_loss"),
+            "aux_grad_cos": series("aux_grad_cos_mean"),
         }.items() if v is not None},
         "selection_metric": rows[0].get("select_by") or "val_ap",
         "note": arm.get("train_note"),

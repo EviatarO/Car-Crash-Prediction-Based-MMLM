@@ -210,6 +210,13 @@ const CLIP_INDEX = {
 };
 const ARMS = [...EX.arms].sort((a, b) => a.order - b.order);
 const ARM_BY_KEY = Object.fromEntries(ARMS.map(a => [a.key, a]));
+// Was a hand-typed literal ("11 arms · A0 → v12shuf") that silently went stale the moment
+// a new highest-order arm shipped - found 2026-09-24 still reading v12shuf after
+// A1-compress256 and two AA arms had already been added. Derived from ARMS so it can't
+// drift again.
+document.querySelector(".picker-hint").textContent =
+  `${ARMS.length} arms · ${ARMS[0].key} → ${ARMS[ARMS.length - 1].key}. `
+  + "Pick one to see its full report.";
 /* Horizon labels come from three different corpora conventions (tte_0.5s, TTE_0.5,
    MID-4). Normalise for display only - the raw value stays the filter/match key. */
 function prettyWindow(w){

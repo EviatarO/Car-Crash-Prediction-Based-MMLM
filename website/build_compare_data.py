@@ -45,6 +45,7 @@ OUT = Path(__file__).resolve().parent / "compare_data.js"
 E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
+AAT = MMLM_AI / "outputs" / "aa_token_aux"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 TEST_MANIFEST = MMLM_AI / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 
@@ -68,6 +69,11 @@ TEST_SCORES = {
     "a1cont":  (A1F / "test_scores" / "a1cont_ep10.jsonl", "gt_verdict"),
     "V10":     (A1F / "test_scores" / "v10_ep10.jsonl", "gt_verdict"),
     "v12shuf": (A1F / "test_scores" / "v12shuf_ep10.jsonl", "gt_verdict"),
+    # Stage AA unfrozen-head 3-epoch checks (2026-09-24). test677 only: neither has a
+    # pool1761_scores/{arm}.jsonl dump (build_pool1761()/build_a1fail321() below need one
+    # per arm in POOL1761_ARMS - these two are deliberately NOT added there).
+    "AA-occ-unfrozen": (AAT / "AA-occ-unfrozen-check3" / "test_results_ep02.jsonl", "ground_truth"),
+    "AA-rel-unfrozen": (AAT / "AA-rel-unfrozen-check3" / "test_results_ep02.jsonl", "ground_truth"),
 }
 POOL1761_ARMS = ["A0", "A1", "A1-compress256", "B-v1", "B-v2", "B-v3", "P1"]
 # a1cont is the crash-only control started from the identical A1 weights - it is what V10

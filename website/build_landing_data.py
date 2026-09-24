@@ -39,6 +39,7 @@ E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
+AAT = MMLM_AI / "outputs" / "aa_token_aux"
 
 # A1 deliberately reads its ORIGINAL evaluation (a1_1761, epoch 4 - the run the published
 # 0.900 came from), not the a1fail321 re-score of the same weights. The two differ: the
@@ -100,6 +101,22 @@ EXPERIMENTS = [
          path=A1F / "test_scores" / "v12shuf_ep10.jsonl",
          gt_key="gt_verdict", summary=None,
          source="a1fail321/test_scores/v12shuf_ep10.jsonl (epoch 10)"),
+    # Stage AA token-relevance aux, unfrozen-head 3-epoch checks (2026-09-24). CAUTION for
+    # anyone reading this table: these two are NOT directly comparable to A1-compress256
+    # above - that arm keeps the crash head frozen (A1's recipe); these two unfreeze it, so
+    # their honest baseline is the matched no-aux control, AA-ctrl-unfrozen (rank-1 test
+    # AP 0.9070 - not itself listed here, since the user asked for these two plus
+    # A1-compress256; see outputs/aa_token_aux/AA-ctrl-unfrozen-check3 for that control).
+    # Also only 3 of the usual 8 epochs were run (a quick check, not the full recipe) - see
+    # each arm's `method` text on the Experiments page for the caveat in full.
+    dict(order=10, arm="AA-occ-unfrozen", label="AA-occ-unfrozen · occupancy aux (3-epoch check)",
+         path=AAT / "AA-occ-unfrozen-check3" / "test_results_ep02.jsonl",
+         gt_key="ground_truth", summary=AAT / "AA-occ-unfrozen-check3" / "test_summary.json",
+         epoch=2, source="aa_token_aux/AA-occ-unfrozen-check3 (epoch 2)"),
+    dict(order=11, arm="AA-rel-unfrozen", label="AA-rel-unfrozen · relevance aux (3-epoch check)",
+         path=AAT / "AA-rel-unfrozen-check3" / "test_results_ep02.jsonl",
+         gt_key="ground_truth", summary=AAT / "AA-rel-unfrozen-check3" / "test_summary.json",
+         epoch=2, source="aa_token_aux/AA-rel-unfrozen-check3 (epoch 2)"),
 ]
 SEMANTIC_LAMBDA = 0.2   # current --semantic-weight; a landing-page field, not baked into the SVG
 
@@ -117,6 +134,8 @@ EXPECTED = {
     "V10":     dict(n=677, tp=253, fn=85, fp=39, tn=300),
     "v12":     dict(n=677, tp=253, fn=85, fp=39, tn=300),
     "v12shuf": dict(n=677, tp=244, fn=94, fp=36, tn=303),
+    "AA-occ-unfrozen": dict(n=677, tp=264, fn=74, fp=45, tn=294),
+    "AA-rel-unfrozen": dict(n=677, tp=276, fn=62, fp=51, tn=288),
 }
 # Every arm must be pinned - an unpinned arm silently skips the drift assert, which is the
 # only thing standing between a changed score file and a wrong number on the landing page.
