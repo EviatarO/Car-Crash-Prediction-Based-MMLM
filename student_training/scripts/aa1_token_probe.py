@@ -307,9 +307,10 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--preprocess", default="compress256", choices=["crop", "compress256"])
     ap.add_argument("--layers", default="11,17,23")
-    ap.add_argument("--checkpoint", required=True, choices=["base", "a1compress256"],
-                    help="'base' = raw BADAS-Open (no --lora-adapter). 'a1compress256' = "
-                         "requires --lora-adapter pointing at its saved adapter.")
+    ap.add_argument("--checkpoint", required=True,
+                    help="a LABEL for the report. 'base' = raw BADAS-Open (no --lora-adapter); "
+                         "any other label (e.g. a1compress256, AA-rel-ep03) requires --lora-adapter "
+                         "pointing at that run's saved adapter.")
     ap.add_argument("--lora-adapter", default=None)
     ap.add_argument("--lora-target-modules", default="query,key,value",
                     help="MUST match what the loaded adapter was trained with - "
@@ -341,8 +342,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     layers = [int(l) for l in args.layers.split(",")]
 
-    if args.checkpoint == "a1compress256" and not args.lora_adapter:
-        raise ValueError("--checkpoint a1compress256 requires --lora-adapter")
+    if args.checkpoint != "base" and not args.lora_adapter:
+        raise ValueError(f"--checkpoint {args.checkpoint} requires --lora-adapter")
+    if args.checkpoint == "base" and args.lora_adapter:
+        raise ValueError("--checkpoint base must not be given --lora-adapter")
 
     import yaml
     with open(args.config, encoding="utf-8") as f:
