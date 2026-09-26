@@ -326,7 +326,7 @@ function renderDetail(key){
     key ? ARM_BY_KEY[key].label : "Choose an experiment";
   if (!key){
     host.innerHTML = `<section class="block"><p class="lede">
-      Nothing selected yet — press the button above to pick one of the eight arms.</p></section>`;
+      Nothing selected yet — press the button above to pick one of the ${ARMS.length} arms.</p></section>`;
     return;
   }
   const a = ARM_BY_KEY[key];
@@ -342,6 +342,16 @@ function renderDetail(key){
       <div class="goal-card"><h3>What it aims to settle</h3><p>${esc(a.description.aim)}</p></div>
       <div class="goal-card"><h3>How</h3><p>${esc(a.description.method)}</p></div>
     </div>
+    ${a.media ? `<h3 class="subh">Example: the detection pass behind the aux label</h3>
+      <div class="chartgrid">
+        <figure><figcaption>Detection + tracking overlay</figcaption>
+          <video src="${esc(a.media.video)}" controls muted loop playsinline preload="metadata"
+                 style="width:100%;border-radius:8px"></video></figure>
+        <figure><figcaption>Per-track target curves over the clip</figcaption>
+          <img src="${esc(a.media.image)}" alt="per-track target curves"
+               style="width:100%;border-radius:8px"></figure>
+      </div>
+      ${noteHTML(a.media.caption, "flat")}` : ""}
   </section>
 
   <section class="block">
@@ -400,7 +410,11 @@ function renderDetail(key){
     <div class="kicker">4 · Architecture</div>
     <h2>What is frozen, what is trained</h2>
     <p class="lede">Green = trainable in this arm. Blue = frozen. Grey = data or a
-       derived quantity, not a module with weights.</p>
+       derived quantity, not a module with weights.${a.arch.auxBranch ? ` Dashed amber =
+       auxiliary branch used only during training and dropped at inference
+       (${a.arch.auxBranch.kind === "probe"
+          ? "Stage AA: a frozen probe reading encoder layer " + a.arch.auxBranch.layer
+          : "Stage AA-H: a hook reading the crash head's own attention weights"}).` : ""}</p>
     <div class="archwrap" id="armArch"></div>
     ${noteHTML(a.arch.note ? "This arm: " + a.arch.note + "." : null, "flat")}
   </section>
@@ -431,15 +445,35 @@ function renderDetail(key){
       </div>
     </div>
     <div id="testBlock"></div>
+    ${a.public ? `<h2 class="subh2">Public test set · 667 clips</h2>
+      <div id="publicBlock"></div>` : ""}
     <h2 class="subh2">Inference</h2>
     ${noteHTML(a.inference.note, "flat")}
   </section>`;
 
   buildArch(document.getElementById("armArch"), {
     semantic: a.arch.semantic, loss: a.arch.loss, state: a.arch.state,
+    auxBranch: a.arch.auxBranch || null,
   });
   renderTrain(a);
   buildModeRow(a);
+  if (a.public) renderPublic(a);
+}
+
+/* ---------------------------------------------------------------- public */
+function renderPublic(a){
+  const host = document.getElementById("publicBlock");
+  const p = a.public;
+  const m = {
+    n_total: p.n, tp: p.tp, fn: p.fn, fp: p.fp, tn: p.tn,
+    precision: p.precision, recall_sensitivity_tpr: p.recall,
+    f1: p.f1, accuracy: (p.tp + p.tn) / p.n, ap: p.ap, auc_roc: p.auc,
+  };
+  host.innerHTML = `
+    <p class="lede small">Source: <code>${esc(p.source)}</code> · threshold ${p.threshold}</p>
+    ${metricsTable([{name: "public · all", m}])}
+    <p class="note flat">specificity ${f4(p.specificity)} · Brier ${f4(p.brier)} · ECE ${f4(p.ece)}</p>
+    ${noteHTML(p.note, "flat")}`;
 }
 
 /* ------------------------------------------------------------------ train */
@@ -449,6 +483,8 @@ function renderTrain(a){
   if (!t.available){ host.innerHTML = noteHTML(t.note, "warn"); return; }
 
   const S = t.series, ep = t.epochs;
+  const hasAAaux = S.train_aux || S.aux_grad_cos;
+  const hasAAHaux = S.aux_h_rho_pv || S.aux_h_rho_pb || S.aux_h_entropy;
   host.innerHTML = `
     ${noteHTML(t.note, "warn")}
     <div class="chartgrid">
@@ -456,6 +492,21 @@ function renderTrain(a){
       <figure><figcaption>Validation AP vs epoch — the checkpoint-selection criterion</figcaption>
         <div id="cAp"></div></figure>
     </div>
+    ${hasAAaux ? `<div class="chartgrid">
+      <figure><figcaption>Aux loss &amp; crash/aux gradient cosine (sampled steps)</figcaption>
+        <div id="cAuxAA"></div></figure>
+    </div>` : ""}
+    ${hasAAHaux ? `<div class="chartgrid">
+      <figure><figcaption>Stage AA-H: attention ratio (relevant vs. other-vehicle / background)</figcaption>
+        <div id="cAuxRho"></div></figure>
+      <figure><figcaption>Attention entropy &amp; λ schedule</figcaption>
+        <div id="cAuxEntropy"></div></figure>
+    </div>
+    <p class="note flat">ρ = mean attention received by relevant-car tokens ÷ mean
+       attention received by other-vehicle (ρ_P/V) or background (ρ_P/B) tokens. λ=0
+       marks epochs where the aux loss was switched off (warm_on_off schedule) — a
+       ratio that stays elevated there is the effect persisting after the loss stops
+       holding it there, not the loss still acting.</p>` : ""}
     ${noteHTML(t.acc_note, "flat")}
     <div id="valEval"></div>`;
 
@@ -479,6 +530,38 @@ function renderTrain(a){
       xLabel: "epoch", yLabel: "val AP",
       mark: t.selected_epoch ? {x: t.selected_epoch, label: "selected"} : null,
     });
+  }
+
+  if (hasAAaux){
+    const as = [];
+    if (S.train_aux) as.push({name: "aux loss", x: ep, y: S.train_aux, color: CHART_COLORS[1]});
+    if (S.aux_grad_cos) as.push({name: "cos(crash, aux)", x: ep, y: S.aux_grad_cos,
+                                 color: CHART_COLORS[3], axis: "right"});
+    lineChart(document.getElementById("cAuxAA"), {
+      series: as, xLabel: "epoch", yLabel: "aux loss", yRightLabel: "grad cosine",
+      mark: t.selected_epoch ? {x: t.selected_epoch, label: "selected"} : null,
+    });
+    legendInto("cAuxAA", as);
+  }
+
+  if (hasAAHaux){
+    const rs = [];
+    if (S.aux_h_rho_pv) rs.push({name: "ρ_P/V", x: ep, y: S.aux_h_rho_pv, color: CHART_COLORS[0]});
+    if (S.aux_h_rho_pb) rs.push({name: "ρ_P/B", x: ep, y: S.aux_h_rho_pb, color: CHART_COLORS[1]});
+    lineChart(document.getElementById("cAuxRho"), {
+      series: rs, xLabel: "epoch", yLabel: "attention ratio ρ",
+      mark: t.selected_epoch ? {x: t.selected_epoch, label: "selected"} : null,
+    });
+    legendInto("cAuxRho", rs);
+
+    const es = [];
+    if (S.aux_h_entropy) es.push({name: "entropy", x: ep, y: S.aux_h_entropy, color: CHART_COLORS[2]});
+    if (S.aux_h_lambda) es.push({name: "λ", x: ep, y: S.aux_h_lambda, color: CHART_COLORS[4], axis: "right"});
+    lineChart(document.getElementById("cAuxEntropy"), {
+      series: es, xLabel: "epoch", yLabel: "entropy (nats)", yRightLabel: "λ",
+      mark: t.selected_epoch ? {x: t.selected_epoch, label: "selected"} : null,
+    });
+    legendInto("cAuxEntropy", es);
   }
 
   const ve = t.val_eval, vhost = document.getElementById("valEval");
@@ -617,6 +700,15 @@ function renderTest(a){
     n.className = "note flat";
     n.textContent = t.by_epoch_note;
     document.getElementById("cTestEp").parentElement.appendChild(n);
+  }
+  if (t.mean_ap_over_epochs){
+    const mo = t.mean_ap_over_epochs, nf = EX.stage1_noise_floor;
+    const p2 = document.createElement("p");
+    p2.className = "note flat";
+    p2.innerHTML = `<b>Mean-over-${mo.n_epochs} test AP: ${f4(mo.mean_ap)}</b>` +
+      (nf ? ` · Stage-1 noise floor: ${f4(nf.low)}–${f4(nf.high)}` : "") +
+      ` — ${esc(mo.note)}` + (nf ? ` Noise floor: ${esc(nf.note)}` : "");
+    host.appendChild(p2);
   }
 }
 

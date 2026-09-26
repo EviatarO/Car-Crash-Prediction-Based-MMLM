@@ -55,11 +55,18 @@ E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
 AAT = MMLM_AI / "outputs" / "aa_token_aux"
+AAH = MMLM_AI / "outputs" / "aa_head_attn"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 MANIFESTS = MMLM_AI / "dataset" / "manifests"
 TEST_MANIFEST = MANIFESTS / "test_manifest_hires.jsonl"
 
 THRESHOLD = 0.5
+# Stage 1 noise floor: mean-over-8-checkpoint test AP of the two LoRA-init-seed controls
+# (AA-ctrl-seed1/2, split held fixed at A1-compress256's partition). DERIVED in main() from
+# those two arms' own by_epoch means, not hardcoded, so the floor and every arm's
+# mean-over-8 on this page are computed the same way (from the rounded per-epoch dumps).
+# The published-summary basis reads 0.8910-0.8958 for the same two runs.
+NOISE_FLOOR_ARMS = ("AA-ctrl-seed1", "AA-ctrl-seed2")
 # metrics_core.py's own mapping - group is an int on the test manifest and every test dump.
 GROUP_LABEL = {0: "tte_0.5s", 1: "tte_1.0s", 2: "tte_1.5s"}
 TTE_ORDER = ["tte_0.5s", "tte_1.0s", "tte_1.5s"]
@@ -89,6 +96,16 @@ EXPECTED_CM = {
     "A1-compress256": dict(n=677, tp=286, fn=52, fp=55, tn=284),
     "AA-occ-unfrozen": dict(n=677, tp=264, fn=74, fp=45, tn=294),
     "AA-rel-unfrozen": dict(n=677, tp=276, fn=62, fp=51, tn=288),
+    "AA-rel": dict(n=677, tp=310, fn=28, fp=93, tn=246),
+    "AA-occ": dict(n=677, tp=303, fn=35, fp=86, tn=253),
+    "AA-rel-L23": dict(n=677, tp=283, fn=55, fp=69, tn=270),
+    "AA-ctrl-unfrozen": dict(n=677, tp=258, fn=80, fp=41, tn=298),
+    "AA-ctrl-seed1": dict(n=677, tp=271, fn=67, fp=60, tn=279),
+    "AA-ctrl-seed2": dict(n=677, tp=267, fn=71, fp=45, tn=294),
+    "AA-H-rank-R_all": dict(n=677, tp=288, fn=50, fp=57, tn=282),
+    "AA-H-rank-R_pos": dict(n=677, tp=287, fn=51, fp=55, tn=284),
+    "AA-H-rank-partner_pos": dict(n=677, tp=288, fn=50, fp=55, tn=284),
+    "AA-H-mass-R_pos": dict(n=677, tp=277, fn=61, fp=77, tn=262),
 }
 
 
@@ -209,7 +226,8 @@ HYPER_KEYS = [
     "lora_target_modules", "lora_r", "lora_alpha", "lora_dropout", "lora_init",
     "predictor_init", "crash_weight", "semantic_weight", "semantic_loss",
     "infonce_tau_init", "siglip_model",
-    "aux_mode", "aux_layer", "aux_weight", "aux_head_init",
+    "aux_mode", "aux_label", "aux_layer", "aux_weight", "aux_margin", "aux_schedule",
+    "aux_warmup_frac", "aux_on_epochs", "aux_head_init",
     "captions_path", "bank_captions",
     "lr", "lr_schedule", "warmup_frac", "epochs", "grad_accum", "clip_grad_per_group",
     "unfreeze_head", "head_lr_mult", "head_lr_schedule",
@@ -232,11 +250,18 @@ HYPER_DESC = {
     "semantic_loss": "how caption and vision embeddings are compared",
     "infonce_tau_init": "starting temperature of the InfoNCE softmax",
     "siglip_model": "frozen text encoder that embeds the captions",
-    "aux_mode": "Stage AA per-token aux target: occ (any car) or rel (relevance score)",
+    "aux_mode": "Stage AA per-token aux target (occ/rel, layer probe) or Stage AA-H "
+                "crash-head aux loss (attn_rank/attn_mass/gradcam)",
+    "aux_label": "Stage AA-H only: which windows count as R (R_all/R_pos/partner_pos)",
     "aux_layer": "encoder layer the aux loss reads (0-indexed); backprop reaches only "
-                 "layers 0..this one",
+                 "layers 0..this one — Stage AA (side probe) only",
     "aux_weight": "lambda on the aux term; sized so its gradient on the shared LoRA "
-                  "layers is ~10% of the crash gradient's",
+                  "layers is ~10-30% of the crash gradient's (measured, not guessed)",
+    "aux_margin": "attn_rank only: required log-ratio margin before the loss goes slack",
+    "aux_schedule": "constant = aux loss on for every epoch; warm_on_off = on for the "
+                    "first --aux-on-epochs, then off for the rest",
+    "aux_warmup_frac": "fraction of the aux-on window spent ramping lambda up from 0",
+    "aux_on_epochs": "warm_on_off only: how many epochs the aux loss stays active",
     "aux_head_init": "frozen linear probe (LayerNorm+Linear) the aux loss is read "
                      "through; fit once on the untrained trunk, never updated here",
     "captions_path": "caption corpus supervising this run",
@@ -669,6 +694,340 @@ ARMS = [
                 by_epoch=[(n, AAT / "AA-rel-unfrozen-check3" / f"test_results_ep{n:02d}.jsonl")
                           for n in range(1, 4)],
                 source="aa_token_aux/AA-rel-unfrozen-check3 (epoch 2)")),
+
+    # ---------------------------------------------------------------------------------
+    # Stage AA: original frozen-head side-probe arms (2026-09-13/24). These ran BEFORE
+    # AA-occ-unfrozen/AA-rel-unfrozen above and are why the head was unfrozen at all -
+    # order placed just before them (9.1-9.4) so the page reads in the order the work
+    # actually happened, not upload order.
+    A(key="AA-rel", label="AA-rel · relevance aux, frozen head (layer 17)", order=9.1,
+      family="pool1761",
+      tagline="Does a per-token 'which car matters' loss on the trunk change the final "
+              "crash prediction, with the crash head kept exactly as A1-compress256 froze it?",
+      hypothesis="A per-token auxiliary loss teaching the trunk which detected car is "
+                 "relevant (closeness x ego-lane position x approach rate, from an offline "
+                 "YOLOPv2+tracking pass, never fit to the crash label) should sharpen the "
+                 "features the frozen crash head reads, and improve test AP.",
+      aim="The first test of the whole token-relevance idea, at A1-compress256's exact "
+          "recipe otherwise, so any effect is attributable to the aux loss alone.",
+      method="A1-compress256's exact recipe (LoRA r=16 α=32 on query/key/value, lr 2e-4 "
+             "constant, compress256, pool1761, seed 0), crash head FROZEN, plus a second "
+             "loss term read from encoder layer 17 through a frozen linear probe (fit "
+             "once on the untrained trunk): balanced BCE against the continuous relevance "
+             "label. Backprop from this term reaches only the LoRA in layers 0-17. "
+             "lambda=3.6, sized so the aux gradient on shared LoRA layers is ~10% of the "
+             "crash gradient's.",
+      prompt=None,
+      prompt_note="No language supervision - the aux target is a per-token kinematic "
+                  "label from detection, not a caption.",
+      pool="pool1761", train_dir=AAT / "AA-rel",
+      media={"video": "assets/media/aa1_detection_example.webm",
+             "image": "assets/media/aa1_detection_curves.png",
+             "caption": "Video 00283: the offline YOLOPv2 detection + tracking pass "
+                        "this arm's relevance label is computed from - boxes, ego-path "
+                        "corridor and the per-track relevance/threat curve over time. "
+                        "This runs once, offline, before training; the aux loss only "
+                        "ever sees its output (a 0-1 label per patch token), never the "
+                        "video or detector at train time."},
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "probe", "layer": 17, "target": "relevance (0-1)"},
+               note="frozen head (unlike AA-rel-unfrozen below) - the aux loss changed "
+                    "layer-17 readability for relevance but the effect never reached the "
+                    "final prediction: 0.99 score correlation with A1-compress256, ~16/677 "
+                    "label flips at threshold 0.5 - smaller than the drift between two "
+                    "ordinary epochs of the same arm. Verdict: negative, not propagated."),
+      hyper=AAT / "AA-rel" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-rel" / "test_results_ep03.jsonl", gt_key="ground_truth",
+                summary=AAT / "AA-rel" / "test_summary.json", epoch=3,
+                by_epoch=[(n, AAT / "AA-rel" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_token_aux/AA-rel (epoch 3)")),
+
+    A(key="AA-occ", label="AA-occ · occupancy aux, frozen head (layer 17)", order=9.2,
+      family="pool1761",
+      tagline="Localisation-only control for AA-rel - teach the trunk 'a car is here', "
+              "nothing about which car matters.",
+      hypothesis="If AA-rel's aux loss helps, it should help BECAUSE of relevance "
+                 "specifically, not merely because any per-token supervision regularises "
+                 "the trunk. A binary 'is any tracked vehicle here' target isolates that.",
+      aim="Give AA-rel a same-recipe control that shares everything except which "
+          "question the per-token label answers, so any gap between the two arms is "
+          "attributable to relevance, not to the aux loss existing at all.",
+      method="Identical to AA-rel's recipe (layer 17, frozen head, same lambda-sizing "
+             "procedure) except the per-token label is binary occupancy (does any "
+             "tracked vehicle cover this patch) instead of the continuous relevance "
+             "score. lambda=0.59 (different target, so the 10%-gradient sizing lands on "
+             "a different absolute number).",
+      prompt=None,
+      prompt_note="No language supervision - the aux target is a per-token geometric "
+                  "label from detection, not a caption.",
+      pool="pool1761", train_dir=AAT / "AA-occ",
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "probe", "layer": 17, "target": "occupancy (0/1)"},
+               note="frozen head - same non-propagation result as AA-rel (see that arm)."),
+      hyper=AAT / "AA-occ" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-occ" / "test_results_ep03.jsonl", gt_key="ground_truth",
+                summary=AAT / "AA-occ" / "test_summary.json", epoch=3,
+                by_epoch=[(n, AAT / "AA-occ" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_token_aux/AA-occ (epoch 3)")),
+
+    A(key="AA-rel-L23", label="AA-rel-L23 · relevance aux, frozen head (layer 23)", order=9.3,
+      family="pool1761",
+      tagline="Moving the tap closer to the crash head's own input - does that alone fix "
+              "the non-propagation seen at layer 17?",
+      hypothesis="AA-rel's aux signal might be real at layer 17 but dilute across "
+                 "layers 18-23 before reaching the crash head. Reading the probe at "
+                 "layer 23 instead (one layer before the head) should let more of it "
+                 "survive if dilution is the explanation.",
+      aim="Test the 'wrong tap depth' explanation directly, holding the aux target "
+          "(relevance) and everything else fixed.",
+      method="AA-rel's exact recipe with --aux-layer 23 instead of 17 (a new frozen "
+             "probe fit at layer 23 on the untrained trunk). lambda=2.76.",
+      prompt=None,
+      prompt_note="No language supervision - same as AA-rel.",
+      pool="pool1761", train_dir=AAT / "AA-rel-L23",
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "probe", "layer": 23, "target": "relevance (0-1)"},
+               note="Moving the tap did not fix propagation either - see this arm's test "
+                    "result vs A1-compress256/AA-rel. Ruled out as a standalone fix."),
+      hyper=AAT / "AA-rel-L23" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-rel-L23" / "test_results_ep08.jsonl", gt_key="ground_truth",
+                summary=AAT / "AA-rel-L23" / "test_summary.json", epoch=8,
+                by_epoch=[(n, AAT / "AA-rel-L23" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_token_aux/AA-rel-L23 (epoch 8)")),
+
+    A(key="AA-ctrl-unfrozen", label="AA-ctrl-unfrozen · unfrozen head, no aux loss (control)",
+      order=9.4, family="pool1761",
+      tagline="The honest baseline for AA-occ-unfrozen/AA-rel-unfrozen: what does "
+              "unfreezing the crash head do BY ITSELF, with no aux loss at all?",
+      hypothesis="None - this is a control, not a treatment. It isolates 'unfreezing the "
+                 "head' from 'unfreezing the head AND adding an aux loss'.",
+      aim="Without this arm, AA-occ-unfrozen/AA-rel-unfrozen could only be compared "
+          "against A1-compress256 (frozen head) - a comparison that changes two things "
+          "at once. This arm changes only the head.",
+      method="A1-compress256's exact recipe, crash head UNFROZEN at the same 2e-4 LR, "
+             "aux_mode=none (no second loss term at all). Same 3-epoch quick-check as "
+             "the two aux arms it controls for.",
+      prompt=None, prompt_note="No language supervision in this arm.",
+      pool="pool1761", train_dir=AAT / "AA-ctrl-unfrozen-check3",
+      arch=dict(semantic=False, loss=True, state={"tproc": "train", "clsf": "train"},
+               note="crash head UNFROZEN, no aux loss - the control AA-occ-unfrozen and "
+                    "AA-rel-unfrozen above are read against, not A1-compress256."),
+      hyper=AAT / "AA-ctrl-unfrozen-check3" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAT / "AA-ctrl-unfrozen-check3" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAT / "AA-ctrl-unfrozen-check3" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAT / "AA-ctrl-unfrozen-check3" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 4)],
+                source="aa_token_aux/AA-ctrl-unfrozen-check3 (epoch 2)")),
+
+    # ---------------------------------------------------------------------------------
+    # Stage AA-H: supervise the crash head's OWN attention instead of a side probe on an
+    # intermediate layer (2026-09-24/26). Literature: RARE (attn_rank), FAX (attn_mass),
+    # GAIN/CAMAL (gradcam, never run - see DECISIONS.md). Same A1-compress256 recipe and
+    # split-seed throughout; only init_seed and the aux loss vary.
+    A(key="AA-ctrl-seed1", label="AA-ctrl-seed1 · noise floor, init_seed=1", order=12,
+      family="pool1761",
+      tagline="How much does test AP move from LoRA-init randomness alone, holding the "
+              "split fixed? Half of the Stage-1 noise-floor measurement.",
+      hypothesis="None - this is a noise-floor control. Two re-runs of A1-compress256 "
+                 "with only the init_seed changed bound how big a change has to be before "
+                 "it means anything, for every Stage AA-H arm below.",
+      aim="Give the AA-H screen a real yardstick before judging any aux-loss arm: a "
+          "result within this range is a re-roll of the random init, not an effect.",
+      method="A1-compress256's exact recipe and split_seed=0 (identical train/val "
+             "partition), only --init-seed 1 / --seed 1 changed.",
+      prompt=None, prompt_note="No language supervision - crash-only, same as A1-compress256.",
+      pool="pool1761", train_dir=AAH / "AA-ctrl-seed1" / "train",
+      public=dict(jsonl=AAH / "AA-ctrl-seed1" / "scores_public" / "AA-ctrl-seed1.jsonl",
+                  metrics=AAH / "AA-ctrl-seed1" / "scores_public" / "AA-ctrl-seed1.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               note="identical recipe to A1-compress256 - only the LoRA init/seed differ."),
+      hyper=AAH / "AA-ctrl-seed1" / "train" / "train_metrics.json", hyper_note=None,
+      # No summary= override: this run's live (unrounded) evaluation and its rounded
+      # per-clip dump disagree by >1e-3 on f1 at epoch 4 (a genuine near-threshold score
+      # that rounds across 0.5) - test_block's own identity gate catches this, so the
+      # dump's own recomputed metrics are used throughout instead of the published ones.
+      test=dict(path=AAH / "AA-ctrl-seed1" / "train" / "test_results_ep04.jsonl",
+                gt_key="ground_truth", epoch=4,
+                by_epoch=[(n, AAH / "AA-ctrl-seed1" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-ctrl-seed1/train (epoch 4, dump-recomputed — see note)")),
+
+    A(key="AA-ctrl-seed2", label="AA-ctrl-seed2 · noise floor, init_seed=2", order=13,
+      family="pool1761",
+      tagline="The other half of the Stage-1 noise-floor pair.",
+      hypothesis="None - noise-floor control, see AA-ctrl-seed1.",
+      aim="Same as AA-ctrl-seed1; two seeds (not one) so the floor is a range, not a "
+          "single lucky/unlucky draw.",
+      method="A1-compress256's exact recipe and split_seed=0, only --init-seed 2 / "
+             "--seed 2 changed.",
+      prompt=None, prompt_note="No language supervision - crash-only, same as A1-compress256.",
+      pool="pool1761", train_dir=AAH / "AA-ctrl-seed2" / "train",
+      public=dict(jsonl=AAH / "AA-ctrl-seed2" / "scores_public" / "AA-ctrl-seed2.jsonl",
+                  metrics=AAH / "AA-ctrl-seed2" / "scores_public" / "AA-ctrl-seed2.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               note="identical recipe to A1-compress256 - only the LoRA init/seed differ."),
+      hyper=AAH / "AA-ctrl-seed2" / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAH / "AA-ctrl-seed2" / "train" / "test_results_ep01.jsonl",
+                gt_key="ground_truth",
+                summary=AAH / "AA-ctrl-seed2" / "train" / "test_summary.json", epoch=1,
+                by_epoch=[(n, AAH / "AA-ctrl-seed2" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-ctrl-seed2/train (epoch 1)")),
+
+    A(key="AA-H-rank-R_all", label="AA-H-rank-R_all · attn_rank aux, R on every clip",
+      order=14, family="pool1761",
+      tagline="RARE-style ranking loss on the crash head's own attention: rank the "
+              "relevant car's tokens above other cars and background, every window.",
+      hypothesis="A side probe never reached the crash head's decision (see AA-rel "
+                 "above). Supervising the head's OWN attention instead should reach it "
+                 "by construction - the aux gradient flows through the same path the "
+                 "crash loss does.",
+      aim="Screen attn_rank against the R_all label (the existing relevance score, "
+          "applied unconditionally) as the first of 3 label variants, against the "
+          "Stage-1 noise floor (0.8910-0.8958 mean-over-8) rather than a single control.",
+      method="A1-compress256's exact recipe, crash head frozen, plus a rank/margin loss "
+             "(RARE) on the attention weights of the crash head's own temporal-processor "
+             "MultiheadAttention: relevant-car tokens must out-rank other-vehicle and "
+             "background tokens by a log-ratio margin of 0.5 (a thin-sample "
+             "approximation - see DECISIONS.md). lambda=0.1645, sized to a 30% "
+             "gradient-norm pull via a 1-epoch pilot. Ramped on epochs 1-3, off 4-8 "
+             "(warm_on_off, matching HASTE/REPA's early-stop finding).",
+      prompt=None, prompt_note="No language supervision - the aux target is the crash "
+                  "head's own attention distribution, not a caption.",
+      pool="pool1761", train_dir=AAH / "AA-H-rank-R_all" / "train",
+      public=dict(jsonl=AAH / "AA-H-rank-R_all" / "scores_public" / "AA-H-rank-R_all.jsonl",
+                  metrics=AAH / "AA-H-rank-R_all" / "scores_public" / "AA-H-rank-R_all.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "head", "mode": "attn_rank", "label": "R_all"},
+               note="Attention moved as designed (rho_P/V, rho_P/B both rose) but AP "
+                    "gain is marginal (mean-over-8 0.8991 vs control 0.8910-0.8958, both on the "
+                    "published-summary basis) "
+                    "and, on the pooled 1,344-clip re-analysis against the same-seed "
+                    "control, statistically a null result once seed variance is "
+                    "accounted for - see EXPERIMENTS.md's 2026-09-26 re-analysis."),
+      hyper=AAH / "AA-H-rank-R_all" / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAH / "AA-H-rank-R_all" / "train" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAH / "AA-H-rank-R_all" / "train" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAH / "AA-H-rank-R_all" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-H-rank-R_all/train (epoch 2)")),
+
+    A(key="AA-H-rank-R_pos", label="AA-H-rank-R_pos · attn_rank aux, R on crash clips only",
+      order=15, family="pool1761",
+      tagline="Same ranking loss, but the aux term is skipped on negative clips - does "
+              "restricting it to windows with a real threat change anything?",
+      hypothesis="The relevance score R answers 'which car might matter', not 'is a "
+                 "crash coming' - a car merely close in normal traffic scores the same "
+                 "as a real threat. Restricting the aux term to crash clips (where R's "
+                 "target really is the threat) should avoid teaching 'close car -> "
+                 "alarm' on ordinary negatives.",
+      aim="Test whether label precision (which windows count as R) fixes attn_rank's "
+          "weak result, holding the loss and every hyperparameter procedure fixed.",
+      method="Identical to AA-H-rank-R_all except the aux loss is skipped entirely on "
+             "negative-clip windows (~half the pool) - R only supervises attention on "
+             "crash clips. lambda=0.6965 (its own pilot; skipping half the pool changes "
+             "the gradient-norm ratio the pilot targets).",
+      prompt=None, prompt_note="No language supervision - same as AA-H-rank-R_all.",
+      pool="pool1761", train_dir=AAH / "AA-H-rank-R_pos" / "train",
+      public=dict(jsonl=AAH / "AA-H-rank-R_pos" / "scores_public" / "AA-H-rank-R_pos.jsonl",
+                  metrics=AAH / "AA-H-rank-R_pos" / "scores_public" / "AA-H-rank-R_pos.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "head", "mode": "attn_rank", "label": "R_pos"},
+               note="Best mean-over-8 of the attn_rank screen (0.9018, published-summary "
+                    "basis) and, on the "
+                    "pooled 1,344-clip re-analysis at matched recall, no measurable FP "
+                    "change vs its same-seed control - a null result, not a win or a "
+                    "regression. See EXPERIMENTS.md's 2026-09-26 re-analysis."),
+      hyper=AAH / "AA-H-rank-R_pos" / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAH / "AA-H-rank-R_pos" / "train" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAH / "AA-H-rank-R_pos" / "train" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAH / "AA-H-rank-R_pos" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-H-rank-R_pos/train (epoch 2)")),
+
+    A(key="AA-H-rank-partner_pos",
+      label="AA-H-rank-partner_pos · attn_rank aux, hindsight collision-partner label",
+      order=16, family="pool1761",
+      tagline="Replace the proximity-based relevance score with the actual car the ego "
+              "collided with, found by decoding a moment past the crash.",
+      hypothesis="R_pos still answers 'which car is near/entering the lane', not 'which "
+                 "car did we hit'. A hindsight label - the literal collision partner, "
+                 "found by tracking objects through the impact moment - removes that "
+                 "ambiguity entirely, so if attention placement is the bottleneck, this "
+                 "label should show the clearest gain.",
+      aim="The most direct test of the plan's original FP concern: does the most "
+          "precise possible 'relevant object' label fix what R_all/R_pos could not?",
+      method="Identical to AA-H-rank-R_pos except the label is `partner_pos`: for each "
+             "crash clip, the video is decoded ~0.8s past the cached span, detected and "
+             "tracked (YOLOPv2 + a greedy IoU tracker), and the partner is the track "
+             "re-identified into the original window with the largest box near the end "
+             "of the extension. 543 positive videos processed, 498 found a partner "
+             "(88.6% window label rate). lambda=0.5036 (own pilot).",
+      prompt=None, prompt_note="No language supervision - same as AA-H-rank-R_all.",
+      pool="pool1761", train_dir=AAH / "AA-H-rank-partner_pos" / "train",
+      public=dict(jsonl=AAH / "AA-H-rank-partner_pos" / "scores_public" / "AA-H-rank-partner_pos.jsonl",
+                  metrics=AAH / "AA-H-rank-partner_pos" / "scores_public" / "AA-H-rank-partner_pos.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "head", "mode": "attn_rank", "label": "partner_pos"},
+               note="The most precise label gave the LEAST AP lift of the three (mean-"
+                    "over-8 0.8951 on the published basis, inside the control range) - its "
+                    "rho_P/V (attention "
+                    "vs other vehicles) barely moved; its gain was entirely attention vs "
+                    "background. Never learned to prefer the true partner over other "
+                    "nearby traffic."),
+      hyper=AAH / "AA-H-rank-partner_pos" / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAH / "AA-H-rank-partner_pos" / "train" / "test_results_ep02.jsonl",
+                gt_key="ground_truth",
+                summary=AAH / "AA-H-rank-partner_pos" / "train" / "test_summary.json", epoch=2,
+                by_epoch=[(n, AAH / "AA-H-rank-partner_pos" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-H-rank-partner_pos/train (epoch 2)")),
+
+    A(key="AA-H-mass-R_pos", label="AA-H-mass-R_pos · attn_mass aux (FAX-style), R_pos label",
+      order=17, family="pool1761",
+      tagline="A mechanistically different loss from attn_rank: maximise the SHARE of "
+              "the head's total attention on the relevant car, not just its rank.",
+      hypothesis="attn_rank is a margin loss - it stops pushing once the relevant car "
+                 "out-ranks the rest, so it can be satisfied cheaply without a real "
+                 "reallocation of attention. attn_mass (FAX) instead maximises "
+                 "-ln(sum of attention on relevant tokens), which cannot be satisfied "
+                 "that way - it should force a genuinely larger share of attention onto "
+                 "the relevant object, and might succeed where attn_rank's weaker push "
+                 "did not.",
+      aim="Test a mechanistically different loss family with the best-performing label "
+          "from the attn_rank screen (R_pos), after attn_rank itself showed no clear "
+          "effect.",
+      method="Same recipe as AA-H-rank-R_pos with --aux-mode attn_mass instead of "
+             "attn_rank: the loss is -ln(sum of attention probability on relevant "
+             "tokens), guarded by an entropy monitor against full collapse. "
+             "lambda=0.5518 (own pilot, same 30%-gradient-norm target), same "
+             "warm_on_off schedule.",
+      prompt=None, prompt_note="No language supervision - same as AA-H-rank-R_all.",
+      pool="pool1761", train_dir=AAH / "AA-H-mass-R_pos" / "train",
+      public=dict(jsonl=AAH / "AA-H-mass-R_pos" / "scores_public" / "AA-H-mass-R_pos.jsonl",
+                  metrics=AAH / "AA-H-mass-R_pos" / "scores_public" / "AA-H-mass-R_pos.metrics.json"),
+      arch=dict(semantic=False, loss=True, state={},
+               auxBranch={"kind": "head", "mode": "attn_mass", "label": "R_pos"},
+               note="The mechanism prediction was right - rho_P/V reaches 195.85 (vs "
+                    "attn_rank's ~4.6 peak) and barely unwinds after the loss switches "
+                    "off - but val_ap picked epoch 8, the checkpoint with the WORST "
+                    "private test AP of all 8 (0.8841). Epoch 4 (the genuinely best "
+                    "checkpoint) scores the same AP as control at matched recall - the "
+                    "large FP count at threshold 0.5 there is a calibration shift, not "
+                    "worse ranking. Only the val-selected epoch 8 is a real regression."),
+      hyper=AAH / "AA-H-mass-R_pos" / "train" / "train_metrics.json", hyper_note=None,
+      test=dict(path=AAH / "AA-H-mass-R_pos" / "train" / "test_results_ep08.jsonl",
+                gt_key="ground_truth",
+                summary=AAH / "AA-H-mass-R_pos" / "train" / "test_summary.json", epoch=8,
+                by_epoch=[(n, AAH / "AA-H-mass-R_pos" / "train" / f"test_results_ep{n:02d}.jsonl")
+                          for n in range(1, 9)],
+                source="aa_head_attn/AA-H-mass-R_pos/train (epoch 8, val-selected)")),
 ]
 
 
@@ -705,6 +1064,10 @@ def train_block(arm):
             "grad_cos": series("grad_cos_mean"),
             "train_aux": series("aux_loss"),
             "aux_grad_cos": series("aux_grad_cos_mean"),
+            "aux_h_rho_pv": series("aux_h_rho_pv"),
+            "aux_h_rho_pb": series("aux_h_rho_pb"),
+            "aux_h_entropy": series("aux_h_entropy"),
+            "aux_h_lambda": series("aux_h_lambda_last"),
         }.items() if v is not None},
         "selection_metric": rows[0].get("select_by") or "val_ap",
         "note": arm.get("train_note"),
@@ -751,9 +1114,10 @@ def train_block(arm):
     if "val_eval" not in out:
         out["val_eval"] = {
             "available": False,
-            "note": "This run predates --dump-val-scores, so no per-clip validation "
-                    "scores exist: no ROC curve and no confusion matrix can be drawn for "
-                    "its training phase. Only the loss and val-AP curves above survive.",
+            "note": "No per-clip validation scores were dumped for this run (it predates "
+                    "--dump-val-scores, or ran with it off), so no ROC curve and no "
+                    "confusion matrix can be drawn for its training phase. Only the loss "
+                    "and val-AP curves above survive.",
         }
     out["train_roc_note"] = ("There is no train-split ROC for any arm in this project — "
                              "the trainer never dumps per-example scores for the training "
@@ -871,7 +1235,79 @@ def test_block(arm, group_by_vid):
         "so this is a handful of points, not a training curve." if len(by_epoch) > 1
         else "Only one checkpoint of this arm was ever scored on the test set, so there "
              "is no metric-vs-epoch curve to draw.")
+
+    # Mean-over-N-checkpoints AP: the reliable metric for judging whether an arm's whole
+    # trajectory moved (Stage 1 finding — rank-1/val-selected AP alone is noisy, range
+    # 0.0204 across seeds vs 0.0048 for the mean). Computed from the SAME by_epoch dump
+    # recomputation above (not re-read from test_summary.json), so it can never disagree
+    # with the per-epoch curve on this same page. Only shown for a full 8/8-epoch run,
+    # not a handful of hand-picked checkpoints.
+    if len(by_epoch) >= 8:
+        aps = [r["ap"] for r in by_epoch]
+        out["mean_ap_over_epochs"] = {
+            "n_epochs": len(aps), "mean_ap": round(sum(aps) / len(aps), 4),
+            "note": f"average over all {len(aps)} checkpoints, recomputed from the "
+                    "per-epoch dumps. This is the metric the Stage AA-H screen is judged "
+                    "on; the single val-selected checkpoint is much noisier. Can differ by "
+                    "a few thousandths from published summaries (scores stored rounded).",
+        }
     return out
+
+
+# ------------------------------------------------------------------------------ public
+# The 667-clip Public half of the Nexar test set (disjoint from the 677-clip Private set
+# used everywhere else on this page — no video_id overlap). Only scored for the Stage
+# AA-H arms and their noise-floor controls; every other arm on this page has never been
+# scored on it. Numbers are read from the run's own scores_public/*.metrics.json (already
+# computed by score_checkpoints_on_test.py at the SAME threshold=0.5), not recomputed —
+# the per-clip dump is used only to verify the metrics file describes the same scores.
+EXPECTED_CM_PUBLIC = {
+    "AA-ctrl-seed1":         dict(n=667, tp=271, fn=63, fp=62, tn=271),
+    "AA-ctrl-seed2":         dict(n=667, tp=268, fn=66, fp=54, tn=279),
+    "AA-H-rank-R_all":       dict(n=667, tp=284, fn=50, fp=67, tn=266),
+    "AA-H-rank-R_pos":       dict(n=667, tp=282, fn=52, fp=66, tn=267),
+    "AA-H-rank-partner_pos": dict(n=667, tp=282, fn=52, fp=66, tn=267),
+    "AA-H-mass-R_pos":       dict(n=667, tp=278, fn=56, fp=79, tn=254),
+}
+
+
+def public_block(arm):
+    cfg = arm.get("public")
+    if not cfg:
+        return None
+    rows = load_jsonl(cfg["jsonl"])
+    assert len(rows) == 667, f"{arm['key']}: expected 667 public-test rows, got {len(rows)}"
+    y = [to01(r["gt_verdict"]) for r in rows]
+    s = [float(r["score"]) for r in rows]
+    m = metrics_from_arrays(y, s, threshold=THRESHOLD)
+
+    exp = EXPECTED_CM_PUBLIC.get(arm["key"])
+    assert exp is not None, f"{arm['key']}: no entry in EXPECTED_CM_PUBLIC"
+    got = dict(n=m["n_total"], tp=m["tp"], fn=m["fn"], fp=m["fp"], tn=m["tn"])
+    assert got == exp, f"{arm['key']} (public): drifted.\n  expected {exp}\n  got {got}"
+
+    published = json.load(open(cfg["metrics"], encoding="utf-8"))
+    # Identity gate, same purpose as the private-test one above: these are reproducible
+    # from the per-clip dump, so if they disagree the metrics.json describes a different
+    # checkpoint than this jsonl.
+    for key, mine in (("fp", m["fp"]), ("tp", m["tp"]), ("tn", m["tn"]), ("fn", m["fn"])):
+        assert published[key] == mine, \
+            f"{arm['key']} (public): metrics.json {key}={published[key]} disagrees with " \
+            f"the per-clip dump ({mine})"
+    return {
+        "available": True, "n": 667, "threshold": THRESHOLD,
+        "source": str(cfg["jsonl"]).rsplit("outputs", 1)[-1].replace("\\", "/"),
+        "ap": published["ap"], "auc": published["auc_roc"],
+        "tp": published["tp"], "fp": published["fp"],
+        "tn": published["tn"], "fn": published["fn"],
+        "precision": published["precision"],
+        "recall": published["recall_sensitivity_tpr"],
+        "specificity": published["specificity_tnr"],
+        "f1": published["f1"], "brier": published["brier"], "ece": published["ece"],
+        "note": "A second, disjoint 667-clip half of the Nexar test set — scored only "
+                "for the Stage AA-H family and its two noise-floor controls, so this "
+                "panel does not appear on every arm's page.",
+    }
 
 
 # ------------------------------------------------------------------------------- main
@@ -903,10 +1339,13 @@ def main():
                             "method": arm["method"]},
             "prompt": prompt_cache.get(p), "prompt_note": arm.get("prompt_note"),
             "pool": arm.get("pool"),
-            "arch": arm["arch"],
+            "media": arm.get("media"),
+            # the page appends its own full stop after the note
+            "arch": {**arm["arch"], "note": (arm["arch"].get("note") or "").rstrip(".") or None},
             "hyper": hyper, "hyper_note": arm.get("hyper_note"),
             "train": train_block(arm),
             "test": test_block(arm, group_by_vid),
+            "public": public_block(arm),
             "inference": {
                 "available": False,
                 "note": "No arm has yet been scored on a dataset that is neither its own "
@@ -916,15 +1355,29 @@ def main():
         }
         arms.append(rec)
         t = rec["test"]
+        pub = f" public=AP {rec['public']['ap']:.4f} FP {rec['public']['fp']}" if rec["public"] else ""
         print(f"[arm] {arm['key']:<5} train={'yes' if rec['train']['available'] else 'NO ':<3} "
               f"valROC={'yes' if rec['train'].get('val_eval', {}).get('available') else 'no ':<3} "
-              f"test={'AP %.4f AUC %.4f' % (t['ap'], t['auc']) if t['available'] else 'NONE'}")
+              f"test={'AP %.4f AUC %.4f' % (t['ap'], t['auc']) if t['available'] else 'NONE'}{pub}")
+
+    floor_means = [a["test"].get("mean_ap_over_epochs", {}).get("mean_ap")
+                   for a in arms if a["key"] in NOISE_FLOOR_ARMS]
+    assert len(floor_means) == 2 and None not in floor_means, \
+        f"noise floor needs mean_ap_over_epochs on both {NOISE_FLOOR_ARMS}, got {floor_means}"
+    noise_floor = {
+        "low": min(floor_means), "high": max(floor_means),
+        "note": "the same metric for AA-ctrl-seed1/2 (A1-compress256's recipe and split, "
+                "only the LoRA-init seed changed) - how far it moves from random init alone. "
+                "Published-summary basis: 0.8910-0.8958.",
+    }
+    print(f"[noise floor] {noise_floor['low']:.4f}-{noise_floor['high']:.4f}")
 
     data = {
         "generated_from": "build_experiments_data.py",
         "threshold": THRESHOLD,
         "tte_order": TTE_ORDER,
         "pools": pools,
+        "stage1_noise_floor": noise_floor,
         "arms": arms,
     }
     with open(OUT, "w", encoding="utf-8") as f:

@@ -133,7 +133,10 @@
 
     // The canvas only needs the full 500px when the semantic branch is drawn; a
     // crash-only arm would otherwise render with 300px of empty space under it.
-    const W = 1000, H = semantic ? 500 : (opts.note ? 215 : 190);
+    // A Stage AA side probe is drawn ABOVE the trunk, so the whole crash row shifts down
+    // to make room for it; every other configuration keeps the original geometry.
+    const topPad = (opts.auxBranch && opts.auxBranch.kind === "probe") ? 60 : 0;
+    const W = 1000, H = (semantic ? 500 : (opts.note ? 215 : 190)) + topPad;
     const svg = document.createElementNS(NS, "svg");
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.setAttribute("width", W);
@@ -156,7 +159,7 @@
     }
 
     /* ---- crash path (top row, always active) ---- */
-    const cy = 60, ch = 60, ccy = cy + ch / 2;
+    const cy = 60 + topPad, ch = 60, ccy = cy + ch / 2;
     const frames = block(20, cy, 110, ch, "16 frames", "1280×720", {stroke:MUTED});
     const trunk  = block(170, cy, 150, ch, "V-JEPA2 ViT-L", mods.trunk.sub, styleOf(mods.trunk));
     const tproc  = block(360, cy, 140, ch, "temporal processor", mods.tproc.sub, styleOf(mods.tproc));
@@ -174,6 +177,42 @@
 
     // LoRA -> trunk: the connection that was previously missing entirely.
     if (showLora) svg.appendChild(arrow(245, cy + ch + 15, 245, cy + ch, GREEN));
+
+    // Stage AA / AA-H auxiliary branch: train-only, dashed AMBER, discarded at inference
+    // just like the semantic branch below - but structurally different (no Predictor, no
+    // captions), so it gets its own small callout rather than reusing `semantic`.
+    //   kind: "probe"  - Stage AA: a FROZEN linear probe reads one encoder layer partway
+    //                    through the trunk; backprop from L_aux reaches only that layer
+    //                    and earlier ones. Drawn ABOVE the trunk (LoRA already occupies
+    //                    the space below it).
+    //   kind: "head"   - Stage AA-H: a forward hook on the temporal processor's own
+    //                    MultiheadAttention reads its attention weights directly; the aux
+    //                    gradient flows through the same path L_crash does. Drawn BELOW
+    //                    the temporal processor (mirrors where LoRA sits under the trunk).
+    if (opts.auxBranch){
+      const ab = opts.auxBranch;
+      if (ab.kind === "probe"){
+        const by = 14, bh = 46;
+        const probe = block(170, by, 150, bh, `side probe · layer ${ab.layer}`,
+          ab.target, {stroke: AMBER, fill: "#3a2410", dash: "6 4"});
+        svg.appendChild(probe);
+        svg.appendChild(arrow(245, cy, 245, by + bh, AMBER));
+        const laux = block(360, by, 110, bh, "L_aux", "BCE(p, R)", {stroke: AMBER, fill: "#3a2410", dash: "6 4"});
+        svg.appendChild(laux);
+        svg.appendChild(arrow(320, by + bh/2, 360, by + bh/2, AMBER));
+      } else if (ab.kind === "head"){
+        const by = cy + ch + 15, bh = 34;
+        const hook = block(360, by, 140, bh, "attention hook", "MultiheadAttention",
+          {stroke: AMBER, fill: "#3a2410", dash: "6 4"});
+        svg.appendChild(hook);
+        svg.appendChild(arrow(430, cy + ch, 430, by, AMBER));
+        const laux = block(535, by, 110, bh, "L_aux", ab.mode, {stroke: AMBER, fill: "#3a2410", dash: "6 4"});
+        svg.appendChild(laux);
+        svg.appendChild(arrow(500, by + bh/2, 535, by + bh/2, AMBER));
+        svg.appendChild(label(655, by + bh/2 + 4, `label = ${ab.label}`,
+          {size: 10.5, color: AMBER, anchor: "start", weight: 400, italic: true}));
+      }
+    }
 
     // Shape labels sit ABOVE the whole row (cy - 10, clear of every box's top edge
     // at y=cy), not just above the arrow's own midline (ccy) - the gaps between

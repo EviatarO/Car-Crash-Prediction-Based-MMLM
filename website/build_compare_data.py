@@ -46,6 +46,7 @@ E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
 AAT = MMLM_AI / "outputs" / "aa_token_aux"
+AAH = MMLM_AI / "outputs" / "aa_head_attn"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 TEST_MANIFEST = MMLM_AI / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 
@@ -74,6 +75,19 @@ TEST_SCORES = {
     # per arm in POOL1761_ARMS - these two are deliberately NOT added there).
     "AA-occ-unfrozen": (AAT / "AA-occ-unfrozen-check3" / "test_results_ep02.jsonl", "ground_truth"),
     "AA-rel-unfrozen": (AAT / "AA-rel-unfrozen-check3" / "test_results_ep02.jsonl", "ground_truth"),
+    # Stage AA frozen-head side probe (2026-09-13/24) and Stage AA-H head-attention aux
+    # (2026-09-24/26) - test677 only, same reason as the two unfrozen-head arms above:
+    # none of these have a pool1761_scores/{arm}.jsonl dump.
+    "AA-rel": (AAT / "AA-rel" / "test_results_ep03.jsonl", "ground_truth"),
+    "AA-occ": (AAT / "AA-occ" / "test_results_ep03.jsonl", "ground_truth"),
+    "AA-rel-L23": (AAT / "AA-rel-L23" / "test_results_ep08.jsonl", "ground_truth"),
+    "AA-ctrl-unfrozen": (AAT / "AA-ctrl-unfrozen-check3" / "test_results_ep02.jsonl", "ground_truth"),
+    "AA-ctrl-seed1": (AAH / "AA-ctrl-seed1" / "train" / "test_results_ep04.jsonl", "ground_truth"),
+    "AA-ctrl-seed2": (AAH / "AA-ctrl-seed2" / "train" / "test_results_ep01.jsonl", "ground_truth"),
+    "AA-H-rank-R_all": (AAH / "AA-H-rank-R_all" / "train" / "test_results_ep02.jsonl", "ground_truth"),
+    "AA-H-rank-R_pos": (AAH / "AA-H-rank-R_pos" / "train" / "test_results_ep02.jsonl", "ground_truth"),
+    "AA-H-rank-partner_pos": (AAH / "AA-H-rank-partner_pos" / "train" / "test_results_ep02.jsonl", "ground_truth"),
+    "AA-H-mass-R_pos": (AAH / "AA-H-mass-R_pos" / "train" / "test_results_ep08.jsonl", "ground_truth"),
 }
 POOL1761_ARMS = ["A0", "A1", "A1-compress256", "B-v1", "B-v2", "B-v3", "P1"]
 # a1cont is the crash-only control started from the identical A1 weights - it is what V10
@@ -136,10 +150,13 @@ def build_test():
         "arms": arms, "rows": out,
         "columns": ["video_id", "window", "gt"],
         "note": "Held-out Nexar private test set - every arm was scored on exactly these "
-                "677 clips. The recovery family is complete here: a1cont (same weights, "
-                "no caption term), V10 and V12 (real captions), and v12shuf (the same "
-                "captions permuted within class). v12 vs v12shuf isolates caption "
-                "CONTENT; a1cont is the floor with no captions at all.",
+                "677 clips. Recovery family: a1cont (no caption term), V10/V12 (real "
+                "captions), v12shuf (captions permuted within class). Stage AA: token "
+                "aux via a side probe (AA-rel/occ/L23, plus the unfrozen-head checks and "
+                "their control). Stage AA-H: aux loss on the crash head's own attention "
+                "(AA-H-*), read against the two noise-floor seeds AA-ctrl-seed1/2 and "
+                "A1-compress256 (same recipe, seed 0). A single-seed difference here is "
+                "within seed noise unless it is large - see each arm's report.",
     }
 
 

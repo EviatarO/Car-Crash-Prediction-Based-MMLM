@@ -40,6 +40,7 @@ E4 = MMLM_AI / "outputs" / "e4_vjepa_reason"
 A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
 AAT = MMLM_AI / "outputs" / "aa_token_aux"
+AAH = MMLM_AI / "outputs" / "aa_head_attn"
 
 # A1 deliberately reads its ORIGINAL evaluation (a1_1761, epoch 4 - the run the published
 # 0.900 came from), not the a1fail321 re-score of the same weights. The two differ: the
@@ -117,6 +118,17 @@ EXPERIMENTS = [
          path=AAT / "AA-rel-unfrozen-check3" / "test_results_ep02.jsonl",
          gt_key="ground_truth", summary=AAT / "AA-rel-unfrozen-check3" / "test_summary.json",
          epoch=2, source="aa_token_aux/AA-rel-unfrozen-check3 (epoch 2)"),
+    # Stage AA-H (2026-09-24/26): supervise the crash head's own attention instead of a
+    # side probe. Best-performing arm of the whole screen on mean-over-8 AP (see the
+    # Experiments page), but on the pooled 1,344-clip re-analysis at matched recall it is
+    # a NULL result vs its same-seed control, not a win - shown here for completeness of
+    # the timeline, not as a headline improvement. Full detail: Experiments page, this
+    # arm's report, and docs_agents/EXPERIMENTS.md's 2026-09-26 re-analysis.
+    dict(order=12, arm="AA-H-rank-R_pos",
+         label="AA-H-rank-R_pos · head-attention aux (null result)",
+         path=AAH / "AA-H-rank-R_pos" / "train" / "test_results_ep02.jsonl",
+         gt_key="ground_truth", summary=None,
+         source="aa_head_attn/AA-H-rank-R_pos/train (epoch 2)"),
 ]
 SEMANTIC_LAMBDA = 0.2   # current --semantic-weight; a landing-page field, not baked into the SVG
 
@@ -136,6 +148,7 @@ EXPECTED = {
     "v12shuf": dict(n=677, tp=244, fn=94, fp=36, tn=303),
     "AA-occ-unfrozen": dict(n=677, tp=264, fn=74, fp=45, tn=294),
     "AA-rel-unfrozen": dict(n=677, tp=276, fn=62, fp=51, tn=288),
+    "AA-H-rank-R_pos": dict(n=677, tp=287, fn=51, fp=55, tn=284),
 }
 # Every arm must be pinned - an unpinned arm silently skips the drift assert, which is the
 # only thing standing between a changed score file and a wrong number on the landing page.
