@@ -1482,3 +1482,277 @@ dev clips and all `test_*.jsonl` manifests, 1362 ids). Nothing was tuned on them
   constant 0/1 bug before 2026-09-17.
 
 Outputs: `outputs/aa1_v2_18clips/` (see ARCHITECTURE.md file table).
+
+## Stage AA token-relevance auxiliary loss (2026-09-19 to 2026-09-24) — negative result
+
+Question: does a per-token BCE aux loss, teaching the ViT-L's intermediate tokens which detected
+car is relevant to a possible collision, beat **A1-compress256** (test AP 0.9128 private / 0.9096
+public — the reference control throughout)? Architecture/data-flow: ARCHITECTURE.md. Design
+history: `~/.claude/plans/CCP based BADAS/2026-09-19_Child-Plan-AA-token-relevance-aux.md`.
+
+### Groundwork
+- **AA.2 detection**: `aa1_run_set.py --set pool1761 --stages 0,1` on the full 1,761-window
+  training pool = 1,107 unique videos (543 pos / 564 neg, counted from the manifest, not the
+  "~587" estimate in an earlier plan draft), local, `outputs/aa1_pool1761/` (1.7 GB).
+- **AA.4 labels**: `aa4_token_labels.py`, 1,761/1,761 windows, `dataset/aa_token_labels/` — `rel`
+  (soft, top-5 selection score / 2) and `occ` (hard, any tracked vehicle) per-token targets, plus
+  `box_h`/`path_gap` static-geometry baseline features.
+- **Phase 3 probe** (`aa1_token_probe.py`, frozen trunk, local GPU): fit + evaluate a
+  LayerNorm+Linear(1024,1) probe per layer (11/17/23 checked) on base BADAS-Open and on
+  A1-compress256, train/val split matching the 1,761-pool's `clip_level_split`. Confirms the
+  relevance signal is present and above a static-geometry baseline (not saturated) — the go-ahead
+  for training. Local speed 1.1-3.7 s/window on a quiet machine (an earlier ~20 s/window estimate
+  was measured under contention, not representative — see the "no repeated polling" memory note).
+
+### Training runs (all pod, RTX PRO 4500; recipe = A1-compress256's exact config — LoRA
+r16/α32/dropout0.05 on `query,key,value`, lr 2e-4 constant, grad_accum 8, compress256, pool1761,
+seed 0 — plus the aux loss, unless noted)
+
+**Full 8-epoch runs, frozen crash head:**
+| Arm | aux_layer | λ (targets ~0.1 grad-norm pull) | val-selected rank-1 test AP | mean over 8 ckpts |
+|---|---|---|---|---|
+| AA-rel | 17 | 3.6 | 0.9125 | 0.8957 |
+| AA-occ (control) | 17 | 0.73 | 0.9152 | 0.8995 |
+| AA-rel-L23 | 23 | 2.76 | 0.8931 | 0.9007 |
+
+**3-epoch checks, `--unfreeze-head --head-lr-mult 1.0 --head-lr-schedule constant`:**
+| Arm | λ | val-selected rank-1 test AP (epoch 2 every time) |
+|---|---|---|
+| AA-ctrl-unfrozen (no aux) | — | 0.9070 |
+| AA-occ-unfrozen | 0.59 | 0.9101 |
+| AA-rel-unfrozen | 2.43 | 0.9068 |
+
+**None separates from its control.** Stopped by user decision (2026-09-24) rather than extending
+the unfrozen arms to 8 epochs — layer choice (17→23) and head-unfreeze both failed to produce the
+separation the "frozen head is the bottleneck" hypothesis predicted, so extending training further
+without new evidence had nothing to select on.
+
+### Diagnostics — why, not just that it failed (frozen-head AA-rel/AA-occ, epoch-3 checkpoints,
+base = BADAS-Open pretrained, probed on a held-out 400-window sample unless noted)
+
+1. **Test-score correlation vs A1-compress256**: AA-rel pearson=0.99 vs A1-compress256, mean
+   |Δ|=0.02-0.03, 16-17/677 flips at threshold 0.5 — almost no change reached the final
+   prediction. Reference/noise floor: A1-compress256 epoch2 vs its own epoch3 (same run) pearson
+   =0.96, 65 flips — ordinary epoch-to-epoch drift is *bigger* than the whole aux loss's effect.
+2. **LoRA weight-change vs A1-compress256 at epoch 3**: layers 0-17 (aux-reached) differ by
+   80-170% of A1's own update magnitude; layers 18-23 (crash-loss-only) differ by only 30-57%. No
+   same-seed A1 rerun exists, so the 30-57% figure is also this comparison's noise-floor upper
+   bound. Reading: the aux loss's weight change is real in the early layers and does not
+   propagate to the later ones.
+3. **Token-relevance probe on AA-rel/AA-occ's own trained epoch-3 weights, layers 17 vs 23**
+   (`aa1_token_probe.py --checkpoint <label> --lora-adapter ...`): AA-rel's layer-17
+   rel-Spearman gain over base (**+0.098**) clearly exceeds AA-occ's control gain (**+0.054**) —
+   the aux loss did teach something layer-17-specific. At layer 23 the two arms' gains are nearly
+   equal (**+0.056 vs +0.049**) — AA-rel's specific gain does not survive to where the crash head
+   actually reads. Tapping layer 23 directly (AA-rel-L23) did not fix this either — moving the tap
+   closer to the output is not, by itself, the fix.
+4. **Gradient-norm vs loss-value sizing disagree** — see ARCHITECTURE.md's "λ sizing" note. λ was
+   sized to a defensible ~10-12% gradient-norm pull, but the weighted loss VALUE
+   (`λ*aux_loss`) exceeded `crash_loss` for most of AA-rel's 8 epochs (0.80 vs 0.58 at epoch 1,
+   0.72 vs 0.21 at epoch 8) — worth stating plainly in any write-up even though gradient-norm is
+   the correct criterion for what moves the weights.
+5. **BADAS crash head architecture, corrects an earlier wrong guess** (read directly from
+   `nexight/src/train/video_training.py`): `nn.MultiheadAttention` (8 heads) self-attention over
+   2560 tokens → LayerNorm → **plain mean pool** (no single learned query) → MLP classifier. Also
+   resolves the long-open 2048-vs-2560/concat-order question: `torch.cat([present, future], dim=1)`
+   — 2048 real + 512 predicted, present-then-future, confirmed from source.
+
+**Not run**: an attention-mass diagnostic (does the crash head's attention to the relevant car
+actually shift under any condition — designed, not built); paired bootstrap CIs for any arm vs
+A1-compress256; continuing the 3-epoch unfrozen checks to 8 epochs; a layer 13-19 probe sweep
+(deferred by the user — "keep it for future work if we will not succeed with layer 17").
+
+### Code fixes found and landed during this thread (both matter beyond Stage AA)
+- **`f3c064a`** — the global (non-per-layer) crash-vs-aux gradient-norm diagnostic silently never
+  ran for any run before this fix: filtering `None` independently on the crash- and aux-gradient
+  lists before concatenating them meant their lengths never matched, so the reporting guard was
+  always false and `epoch_metrics.jsonl`'s `aux_grad_norm_crash`/`aux_grad_norm_aux` stayed `null`
+  for every run. The separate per-layer `grad_trace.jsonl` diagnostic (used for all numbers above)
+  was unaffected. Found by the user asking a pointed diagnostic question, not caught proactively.
+- **`1c56fe2`** — `--unfreeze-head` resume via `--lora-init` reloaded LoRA correctly but silently
+  reset the head to its frozen starting weights (`load_head_state()` was only ever called at
+  test-scoring time, never on resume). Found proactively while answering "can we continue if we
+  see good training partway through" — fixed via new `--head-init`, required alongside
+  `--unfreeze-head` when resuming past epoch 1, before it could corrupt any real
+  check-then-continue workflow.
+- **`1cb7d48`** — `aa1_token_probe.py --checkpoint` widened from a closed `{base,a1compress256}`
+  choice to a free-form label, needed to run the post-hoc probe (diagnostic #3 above) on AA-rel's
+  and AA-occ's own trained checkpoints.
+
+## Stage AA-H — head-attention/decision-gradient supervision (2026-09-24/25), Stage 1: noise floor
+
+New direction after Stage AA's null result: instead of a side probe on an intermediate ViT-L
+layer, supervise what the crash HEAD's own attention (or decision gradient) reads — see the
+child plan `~/.claude/plans/CCP based BADAS/2026-09-24_Child-Plan-AA-H-head-attention-
+supervision.md` for the full design (3 loss variants: attn_rank, attn_mass, gradcam) and the
+literature review that motivated it (RARE, FAX, GAIN, CAMAL — methods that supervise the
+classifier's own attention/gradient, not a side probe, are the ones that worked in the wild).
+
+**Stage 1 (noise floor, pod, RTX PRO 4500)**: 2 runs of A1-compress256's exact recipe, split-seed
+held at 0 (same train/val partition), only init_seed varied (1, 2). No new losses — this measures
+how much test AP moves from LoRA-init randomness alone, before any Stage 2/3 arm can be judged.
+
+| Arm | init_seed | val-selected rank-1 test AP (private) | mean AP over 8 ckpts | public AP |
+|---|---|---|---|---|
+| A1-compress256 (control) | 0 | 0.9128 | 0.8957 | 0.9096 |
+| AA-ctrl-seed1 | 1 | 0.8924 | 0.8910 | 0.9017 |
+| AA-ctrl-seed2 | 2 | 0.9111 | 0.8958 | 0.9087 |
+
+**Rank-1 noise floor is large (range 0.0204)** — bigger than the plan's own "+0.01 real
+progress" bar. **Mean-over-8 noise floor is tight (range 0.0048)** — a much more trustworthy
+signal for whether a Stage 2/3 arm actually moved something, since it isn't sensitive to which
+single epoch validation happens to pick. Recommendation carried into Stage 2/3: lead with
+mean-over-8 when judging an arm, treat rank-1 as secondary.
+
+Outputs: `outputs/aa_head_attn/AA-ctrl-seed{1,2}/train/test_summary.json` (all 8 checkpoints,
+per-TTE breakdown), `.../scores_public/AA-ctrl-seed{1,2}.metrics.json`. Ran in ~65 min total
+(much faster than the ~3.5h estimate — ~536-540s/epoch, at or below A1-compress256's own
+historical ~1,165s/epoch average). Large per-epoch LoRA adapters stay pod-only
+(`/workspace`, persistent volume); only metadata synced locally.
+
+**Two real bugs found and fixed during Stage 0 verification** (both would have silently
+corrupted a real run — full detail in the child plan's status block):
+1. **gradcam's autograd-graph-ancestry bug** — differentiated against `patches[0]`
+   (`forward_clip`'s post-hoc return slice) instead of `badas._captured["patches"]` (the actual
+   ancestor tensor in the graph). PyTorch raised loudly ("not used in the graph"); fixed.
+2. **partner-label re-identification's float-timestamp tolerance bug** — `decode_frames` snaps
+   to the nearest real frame (~12-33ms drift from the requested time); a `1e-6` tolerance
+   silently zeroed re-identification (0/70 matches, no error). Fixed by tracking "started in the
+   real first frame" as an index-based flag instead of comparing floats.
+
+## Stage AA-H, Stage 2a — screening `attn_rank` across 3 label choices (2026-09-25)
+
+Same recipe as Stage 1 (A1-compress256's exact config), seed 0, `--aux-mode attn_rank`,
+`--aux-margin 0.5` (a thin-sample approximation — see PROJECT_STATE.md's disclosed caveat), each
+label's own λ sized by a 1-epoch full-pool pilot targeting a 0.3x gradient-norm pull, then the
+loss ramped on for epochs 1-3 and off for 4-8 (`--aux-schedule warm_on_off`, the default).
+
+| Label (what counts as "relevant") | λ* | rank-1 test AP (private) | mean AP over 8 ckpts | public AP | public FP (n=667) |
+|---|---|---|---|---|---|
+| A1-compress256 / AA-ctrl-seed1 (control) | — | 0.8924 | 0.8910 | 0.9017 | 62 |
+| AA-ctrl-seed2 (control) | — | 0.9111 | 0.8958 | 0.9087 | 54 |
+| **R_all** — existing rel score, every clip | 0.1645 | 0.9159 | 0.8991 | 0.9119 | 67 |
+| **R_pos** — same score, crash clips only | 0.6965 | 0.9124 | **0.9018** | 0.9102 | 66 |
+| **partner_pos** — hindsight crash-partner, crash clips only | 0.5036 | 0.9130 | 0.8951 | 0.9092 | 66 |
+
+**Verdict: attn_rank fails the plan's own screen gate (AP clears noise floor AND mechanism moved
+AND no FP increase) for all three labels — the FP condition is what breaks it.** R_pos's
+mean-over-8 (0.9018) edges the control range (0.8910-0.8958) by +0.006, R_all by +0.003 — both
+marginal (roughly one noise-spread-width), not a clean win. partner_pos (0.8951) sits *inside*
+the control range: no AP lift at all from the label closest to the user's actual FP concern. All
+three land at public FP=66-67 vs both controls' 54-62 — every attn_rank arm is worse on false
+alarms than either control seed. Making the label more precise did not fix this; if anything
+partner_pos (most precise) gave the least AP lift of the three. Full reasoning and the
+mechanism-vs-FP explanation in the child plan's 2026-09-25 status block.
+
+**Mechanism check (per-epoch `epoch_metrics.jsonl`, all 3 labels)**: `rho_P/V` (mean attention
+received by relevant-car tokens ÷ mean attention received by other-vehicle tokens) and `rho_P/B`
+(same, vs background) both rise sharply during the aux-on window (epochs 1-3) and partly persist
+after it switches off (epochs 4-8), confirming the loss does move the head's own attention as
+designed. But R_all/R_pos show strong **P-vs-vehicle** separation (rho_pv up to ~4.6 for R_pos),
+while partner_pos's rho_pv barely moves (2.3→2.3) and its entire gain is P-vs-**background**
+(rho_pb up to ~5.7) — partner_pos never teaches the head to prefer the actual collision partner
+over other nearby traffic, only over empty scenery, which lines up with why it produced no AP
+lift and did not reduce FP. `val_ap` stayed in the normal 0.94-0.95 band throughout for all three
+(no crash-task damage). `n_aux_missing=733/1761` (R_pos) and similar for partner_pos confirm the
+negative-clip skip is working as designed.
+
+**Third real bug, found live on the pod (not caught by local testing)**: the crash-vs-aux
+gradient-cosine probe — what the λ pilot reads via `epoch_metrics.jsonl`'s
+`aux_grad_norm_crash`/`aux_grad_norm_aux` — was gated to `aux_head is not None`, always False for
+the new AA-H modes (no trainable projector). Widened the gate, which then exposed a second,
+worse bug underneath: whenever a window's aux term is skipped (R_pos/partner_pos on a negative
+clip - about half the pool), `aux_loss` is a disconnected `torch.tensor(0.0)` with no `grad_fn`;
+the probe tried to differentiate through it, crashed, and **permanently disabled itself for the
+rest of the epoch** from the first such window. R_pos's first pilot attempt got
+`aux_grad_cos_n_sampled=0` for the entire epoch and silently fell back to an **uncalibrated
+lambda=1.0**, which then trained a full 8-epoch run on that bad value before being caught (by
+manually checking the sample count printed in the log, not by any automated guard — that run
+was killed once found). Fixed by requiring `aux_loss.requires_grad` before the probe attempts
+anything. Verified two ways: (1) an isolated control-flow test reproducing the exact
+`RuntimeError` message from the pod and confirming the fix skips cleanly instead, (2) live
+re-runs on the pod: R_pos's corrected pilot got `aux_grad_cos_n_sampled=80` (lambda*=0.6965),
+`partner_pos`'s got 74 (lambda*=0.5036). The corrected driver script also now aborts a label's
+full run outright if a pilot ever returns 0 samples again, rather than silently using a
+fallback lambda.
+
+Outputs: `outputs/aa_head_attn/AA-H-rank-{R_all,R_pos,partner_pos}/{pilot,train,scores_public}/`.
+Pod driver scripts: `run_stage2a_1_2.sh` (R_all + the FIRST, buggy R_pos attempt - its `train/`
+output was deleted once the bug was found), `run_stage2a_3plus.sh` (the corrected R_pos re-run +
+partner_pos, includes the 0-samples abort guard).
+
+## Stage AA-H, Stage 2b — `attn_mass` with R_pos (2026-09-25/26): worse FP than `attn_rank`
+
+Same recipe as Stage 2a, `--aux-mode attn_mass --aux-label R_pos --aux-weight 0.5518` (1-epoch
+pilot, same 0.3x gradient-norm target), `--aux-schedule warm_on_off` (on epochs 1-3, off 4-8).
+This was the user's own follow-up after `attn_rank` failed - `attn_mass` (FAX-style, maximizes
+attention *mass* on relevant tokens directly) is mechanistically different from `attn_rank`'s
+margin/ranking objective, and the hypothesis was that it might not share the same FP failure.
+
+| Checkpoint | private test AP | public AP | public FP (n=667) | recall | specificity |
+|---|---|---|---|---|---|
+| control (2 seeds) | 0.8924 / 0.9111 | 0.9017 / 0.9087 | 62 / 54 | 0.811/0.802 | 0.816/0.836 |
+| **val-selected epoch 8 (operational pick)** | 0.8841 (worst of 8) | 0.8802 | **79** | 0.832 | 0.763 |
+| epoch 4 (best private test_ap, diagnostic only) | 0.9163 | 0.9029 | **121** | 0.949 | 0.637 |
+
+**Mean-over-8 AP = 0.9020** - nominally the best mean-over-8 in the whole AA-H investigation
+(edges `attn_rank`/R_pos's 0.9018). **This is misleading: at threshold 0.5, this arm has the worst
+FP of anything tried, at every checkpoint tested.** The mechanism hypothesis was right (this loss
+does force genuine attention reallocation, not a cheap margin trick) but the outcome hypothesis
+was wrong (it doesn't help FP - it's worse).
+
+**Two compounding problems:**
+1. **Epoch selection broke.** `val_ap` (51-clip val set) selected epoch 8 as best
+   (val_ap=0.9432, the highest of all 8 epochs), but epoch 8 has the *worst* private test_ap
+   (0.8841 of 677 clips) and a degenerate `optimal_threshold=0.0857`. The small val set stopped
+   tracking the larger test set once this loss is present - the most extreme case yet of the
+   rank-1 noise problem documented since Stage 1.
+2. **Even the genuinely best checkpoint (epoch 4) is worse on FP than anything else tried.**
+   FP=121 - almost double `attn_rank`'s worst arm (67) and double both control seeds. Recall
+   0.949 at the cost of specificity 0.637 - the model says "crash" much more often, not more
+   correctly.
+
+**Mechanism reading (epoch_metrics.jsonl):** `rho_P/V` explodes to **195.85 at epoch 3**
+(entropy collapsing 6.86→4.31 - attention goes from broad to sharply peaked on relevant tokens),
+far beyond anything `attn_rank` produced (peak ~4.6), and **doesn't unwind** after the loss turns
+off at epoch 4 (`rho_P/V` stays at 105→40→26→17→20 through epochs 4-8 with `lambda_last=0.0`).
+The aggressive, persistent attention concentration this loss produces by design is the same thing
+driving the FP blowout - a head that's learned to attend almost exclusively to "relevant" tokens
+appears to fire more readily on anything that pattern-matches "relevant," the same close-car-
+triggers-alarm failure mode as the original Stage AA side-probe, reached by a different mechanism
+and worse in degree.
+
+**Pod-handling note:** the driver script's `runpodctl stop pod` call fired correctly at job end
+(confirmed via RunPod API: `desiredStatus: EXITED` at the matching timestamp) - but the pod was
+then deleted (not just stopped) by a separate manual dashboard action before results were synced.
+No data lost: `/workspace` is on network volume `0hnvco2s4j` (EU-RO-1), independent of any
+specific pod; a fresh pod attached to the same volume retrieved everything intact.
+
+Outputs: `outputs/aa_head_attn/AA-H-mass-R_pos/{pilot,train,scores_public,
+scores_public_ep04_diag}/`. Driver script: `run_stage2b_mass_Rpos.sh`.
+
+**Reading for what's next:** two independent loss families (`attn_rank`, `attn_mass`) now agree
+that pushing the crash head's attention toward the labeled-relevant object does not reduce false
+alarms - `attn_mass` makes it measurably worse. **User decision 2026-09-26: close Stage AA-H, do
+not run `gradcam`.**
+
+### Post-mortem: which negatives does `attn_mass` turn into false positives? (2026-09-26)
+
+Cheap post-hoc check, no pod time - cross-referenced `attn_mass`-epoch4's 121 public FPs against
+`AA-ctrl-seed2`'s per-clip scores on the same 333 public negatives (both jsonl already synced
+locally):
+
+- 67 of the 333 negatives flip from TN (control, score<0.5) to FP (attn_mass-ep4, score>=0.5).
+- **Median control score among the 67 flipped clips: 0.212. Median control score across ALL 333
+  negatives: 0.051** - a ~4x elevation. These are not random clips; they are disproportionately
+  the negatives the plain classifier already found borderline/ambiguous (still correctly called
+  safe, but with noticeably elevated risk score), not clips it was confidently correct on.
+
+**This directly confirms the diagnosis change below**: `attn_mass` isn't failing on arbitrary
+clips - it's taking exactly the negatives that already look like "close call" cases (a car got
+near or entered the lane but didn't collide) and tipping them over the threshold. Forcing more
+attention onto the labeled-relevant object amplifies the existing proximity-to-risk association
+the classifier already had, rather than teaching it to distinguish "closing in dangerously" from
+"nearby but not converging" - because the relevance/partner label used as the aux target encodes
+*which object matters*, not *whether its trajectory implies a hit*, so there's no signal in the
+loss that could teach that distinction in the first place.

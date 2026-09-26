@@ -912,3 +912,252 @@ sample_clips(n_pos, n_neg, seed) -> dict;  main(--set gen18, --stages 0,1,3)
 ### v1 baseline — `aa1_detect_track_rank.py` (committed `812e884`)
 G-DINO → BoT-SORT → calibrated virtual horizon corridor; threat = `max(alpha·in_path, rho·ttc_lat_inv)`.
 **Rejected** (DECISIONS.md). Its decode/window helpers are reused.
+
+## Stage AA token-relevance auxiliary loss (2026-09-19 to 2026-09-24) — negative result
+
+Teaches the ViT-L's intermediate tokens *which detected car is relevant to a possible collision*
+via a per-token BCE side-loss, alongside the normal crash CE loss, hoping to beat A1-compress256
+with zero added inference cost. **Result: does not beat A1-compress256** — see EXPERIMENTS.md for
+all 6 runs' numbers and the diagnostics explaining why. Full design history/rationale (including a
+rigorous review that reshaped an external "spatiotemporal attention supervision" proposal into
+this plan) lives in the child plan:
+`~/.claude/plans/CCP based BADAS/2026-09-19_Child-Plan-AA-token-relevance-aux.md` — read its
+"Status 2026-09-24" block first, it is the up-to-date summary; the rest of that file is design
+history, superseded where the status block disagrees with it.
+
+### Data flow
+```
+            MAIN PATH (training AND inference, unchanged from A1-compress256)
+  16 frames -> compress256 -> patch embed -> 2048 tokens x 1024 -> enc layer[0..16] -> enc layer[17]
+                                                                          |
+       same tensor continues, untouched --------------------------------+
+                                                                          v
+                             enc layer[18..23] -> layernorm -> predictor (+512 future tokens) -> 2560
+                                                                          v
+                                                  crash head (FROZEN or unfrozen, see runs) -> P(crash)
+                                                                          v
+                                                        LOSS 1 = CE vs crash label
+
+            AUX PATH (TRAINING ONLY -- absent at inference)
+      forward hook reads layer[N]'s output (N=17 default, N=23 tried once)
+                    |  2048 tokens x 1024
+      LayerNorm(1024, no affine) + Linear(1024 -> 1)   [FROZEN after Phase 3 probe fit]
+                    v  2048 logits -> sigmoid -> r_hat per token (8x16x16 grid)
+        LOSS 2 = BCE-with-logits(r_hat, R)   R = 'occ' (hard, any vehicle) or 'rel' (soft, top-5
+                                              selection score / 2), from AA.4 labels
+
+  L = crash_weight*LOSS_1 + aux_weight(lambda)*LOSS_2
+  LOSS 1 gradient -> every LoRA adapter.   LOSS 2 gradient -> encoder LoRA in layers 0..N only
+  (confirmed via the per-layer gradient trace: zero gradient in layers N+1..23 and the predictor
+  stack, by construction of where the aux graph ends).
+```
+The hook, aux head, and aux loss term are all absent from the inference path — same cost/latency
+as A1-compress256. Token index <-> (tubelet 0-7, row 0-15, col 0-15) <-> a 16x16 patch of the
+256x256 compressed frame pair; `x*256/1280, y*256/720` then `/16` maps a detection box to tokens.
+
+### Why the aux head is a single shared Linear(1024,1), not per-position weights
+Applied identically to every token (like a 1x1 conv), 1,025 weights total. A per-position head
+(`Linear(2048*1024 -> 2048)`) would have ~2.1B weights and memorize the 1,761 windows rather than
+learn a position-invariant "is this patch relevant" readout. The head is fit once in Phase 3
+(`aa1_token_probe.py`, frozen trunk) and then **frozen** for the actual training runs — letting it
+train alongside LoRA would let it absorb the aux loss on its own, exactly like the semantic-
+alignment Predictor did in the earlier semantic-supervision thread (see `P1`/`B-v*` sections
+above) — the point is to force the *trunk representation itself* to make relevance linearly
+readable, not to build a better relevance head.
+
+### Runs (full numbers, diagnostics: EXPERIMENTS.md)
+Recipe = A1-compress256's exact config (LoRA r16/α32/dropout0.05 on `query,key,value`, lr 2e-4
+constant, grad_accum 8, compress256, pool1761, seed 0) + the aux loss, unless noted:
+- **AA-rel** / **AA-occ** — 8 epochs, frozen crash head, `aux_layer=17`, λ sized to a ~10-12%
+  gradient-norm pull. Neither beats A1-compress256.
+- **AA-rel-L23** — same but `aux_layer=23` (closer to the crash head's actual input, per the user's
+  explicit "run layer 23 first" instruction after layer-17's non-propagation was found). Does not
+  fix it either.
+- **AA-ctrl/occ/rel-unfrozen-check3** — 3-epoch checks with `--unfreeze-head --head-lr-mult 1.0
+  --head-lr-schedule constant` (testing whether a frozen crash head, unable to recalibrate to a
+  LoRA-shifted feature distribution, was the bottleneck — see the pre-existing calibration finding
+  in PROJECT_STATE.md's SemTest-200/A1-failure-recovery sections). None separates from its control.
+
+### λ sizing: gradient-norm vs loss-value disagree (state this plainly in any write-up)
+λ is sized so `λ*||g_aux|| / ||g_crash|| ~ 0.1` on shared LoRA layers, measured via a 1-epoch pilot
+— gradient norm is what actually moves the weights, the defensible criterion. But the **weighted
+loss VALUE** (`λ*aux_loss`) can exceed `crash_loss` for most of training under this sizing (AA-rel,
+λ=3.6: 0.80 vs 0.58 at epoch 1, still 0.72 vs 0.21 at epoch 8) — a genuine, surprising tension
+between the two natural ways to size a multi-task loss weight, worth flagging explicitly since
+eyeballing the raw loss curves alone would give the wrong impression of which term dominates.
+
+### New/changed code (signatures only)
+```python
+# semsup_common.py — TrainableBadasWrapper.__init__ gains:
+aux_layer: int | None = None   # installs a forward hook on `...encoder.layer.{aux_layer}`,
+                                # stores output (undetached) to self._captured["aux_tokens"]
+
+# semsup_train.py — new
+build_aux_head(device) -> nn.Sequential   # LayerNorm(1024, elementwise_affine=False) + Linear(1024,1)
+balanced_bce_loss(logits, target) -> Tensor
+load_aux_target(frames_dir, mode, labels_dir, device) -> Tensor | None   # cached npz loader
+write_grad_trace(...) -> None    # per-epoch grad_trace.jsonl: per-layer crash/aux grad norms,
+                                  # cosine, vanishing_ratio, leaked_into_later_layers,
+                                  # lora_weight_change_norm
+# new CLI: --aux-mode {none,occ,rel} --aux-layer 17 --aux-weight --aux-labels-dir --aux-head-init
+# L = crash_weight*crash_loss + semantic_weight*sem_loss + aux_weight*aux_loss
+
+# semsup_train.py — --head-init (new, fixes the --unfreeze-head resume bug, commit 1c56fe2)
+--head-init <path to a previous epoch's head_state.pt>
+# REQUIRED alongside --lora-init whenever resuming a run that has --unfreeze-head and is past
+# epoch 1 - otherwise load_head_state() is never called on resume and the head silently resets
+# to its frozen starting weights while LoRA continues, with no error.
+
+# aa1_token_probe.py (new, Phase 3 — frozen-trunk relevance probe)
+fit_probe(feat, target, steps=500, lr=1e-2, tag="") -> nn.Module   # full-batch GPU Adam; returns
+                                                                    # the SAME build_aux_head weights
+spearman_residual(...) -> float   # fits rel ~ static_geometry (box_h, path_gap) via LinearRegression
+                                   # on TRAIN object tokens, correlates the probe's VAL score with
+                                   # the residual -- isolates the non-static (motion/occlusion) part
+--checkpoint <free-form label>    # was closed to {base, a1compress256}; now any label, paired with
+                                   # --lora-adapter (required unless checkpoint == "base")
+--n-windows N                     # seeded random subsample -- --limit alone is biased because
+                                   # Caption_Train4500_Mixed_1761.jsonl is class-sorted
+```
+
+### Files that matter (Stage AA token-relevance)
+| Path | Purpose |
+|---|---|
+| `student_training/scripts/aa4_token_labels.py` | AA.4: per-window `rel`/`occ`/`box_h`/`path_gap` token-label arrays (`dataset/aa_token_labels/*.npz`); `render_check()` overlay for spot-checking a window's labels against the frame. |
+| `student_training/scripts/aa1_token_probe.py` | Phase 3: frozen/LoRA-loaded multi-layer relevance probe. Caches object + background tokens per window, fits `build_aux_head`, reports AUROC/Spearman vs a static-geometry baseline. Used both to select `aux_layer` before training and, post-hoc, to diagnose a trained checkpoint (does the aux signal survive at a later layer). |
+| `student_training/scripts/plot_grad_trace.py` | 4-panel figure from a run's `grad_trace.jsonl` (per-layer gradient norm, cosine, vanishing ratio, leak check). |
+| `student_training/scripts/aa1_run_set.py` (`pool1761` set) | AA.2: `--set pool1761 --stages 0,1` runs detection+tracking on the full 1,761-window training pool (1,107 unique videos), with 1s pre-roll so α/EMA are valid at tubelet 0 (`pool_video_ids()`, `kind="pool"`). |
+| `outputs/aa_token_aux/` | All Stage AA token-relevance outputs: `probe_base/`, `probe_a1compress256/`, `diag_{base,AA-rel,AA-occ}_n400/` (post-hoc probes on trained checkpoints), `AA-{rel,occ}[-L23]/`, `AA-{ctrl,occ,rel}-unfrozen-check3/` (train_metrics.json, epoch_metrics.jsonl, grad_trace.jsonl, test_results_epNN.jsonl per run — large per-epoch LoRA adapters stay pod-only on `/workspace`, not synced locally). |
+| `dataset/aa_token_labels/` | AA.4 output: one `.npz` per window (`rel`, `occ`, `box_h`, `path_gap` arrays), from `aa4_token_labels.py`. |
+
+### Corrections to prior architecture entries, confirmed while building this
+- **2048-vs-2560 token concat order, open since August, now CONFIRMED**: read directly from
+  `nexight/src/train/video_training.py` — `torch.cat([present_features, future_features], dim=1)`,
+  i.e. `[2048 real, 512 predicted]`, default `combination_method='concat'`. The earlier "not yet
+  verified" note in the 2026-09-14 PROJECT_STATE entry is resolved.
+- **BADAS crash head architecture, corrects an earlier wrong guess** (was assumed to be a
+  single-learned-query attention pool): it is `nn.MultiheadAttention` (8 heads) self-attention over
+  all 2560 tokens -> LayerNorm -> **plain mean pool** (no learned query) -> MLP classifier. A
+  token's influence on the crash score is "how much every other token attends to it, averaged" —
+  relevant when reasoning about why a layer-17-specific representation change might or might not
+  reach the final prediction.
+
+## Stage AA-H — head-attention/decision-gradient supervision (2026-09-24/25, IN PROGRESS)
+
+Replaces Stage AA's side-probe design (above) after its negative result. Instead of grading an
+intermediate ViT-L layer via a frozen side head, the aux loss reads the crash **head's own**
+attention table or decision gradient directly, so its gradient reaches every LoRA layer (0-23)
+plus the predictor by construction, not just layers 0..aux_layer. Full design, the literature
+review that motivated it (RARE/FAX/GAIN/CAMAL), and the live status block:
+`~/.claude/plans/CCP based BADAS/2026-09-24_Child-Plan-AA-H-head-attention-supervision.md` —
+**read that file's status block for current numbers**, this section covers the architecture only.
+
+### The new head-attention hook
+`semsup_common.py`'s `TrainableBadasWrapper.__init__` gains `capture_head_attention: bool =
+False`. BADAS's crash head (`temporal_processor`, an `AttentionProcessor`) computes
+`attn_out, _ = self.attention(x, x, x)` internally and **discards** the attention weights (`_`)
+before returning — so a forward hook on `temporal_processor` itself (the existing `pooled` tap)
+cannot see them. The fix hooks the INNER `nn.MultiheadAttention` submodule
+(`temporal_processor.attention`) directly: its own forward return value IS
+`(attn_output, attn_output_weights)`, so a forward hook there captures the (1, 2560, 2560)
+row-normalized table (`self._captured["head_attn"]`), undetached, with a full gradient path back
+through the LoRA-unfrozen trunk. The pre-existing pre-hook `self._captured["patches"]` (the
+head's raw, still-batched input, (1, 2560, 1024)) already gives the tensor variant C
+(`gradcam`) needs — no new hook required for that. Verified on real BADAS: shape, row-sums=1,
+inert when `capture_head_attention=False`, gradient reaches encoder layers 0 and 23 and the
+predictor stack, none reaches the frozen head.
+
+### Three loss variants (`aa_head_losses.py`, pure/model-free, unit-tested on synthetic tensors)
+Token sets per window: **P** = relevant tokens (`R > 0` or the hindsight partner), **V** =
+other-vehicle tokens, **B** = background. `token_sets_from_labels()` returns `None` (skip this
+window's aux term) whenever P is empty, or `positives_only=True` and the clip is negative.
+- **`rank_loss`** (RARE-style): `L = max(0, m - ln(rho_P/rho_V)) + max(0, m - ln(rho_P/rho_B))`,
+  `rho_S` = mean attention received over token set S. A term is exactly 0 (no gradient) once its
+  margin is met — cannot over-push.
+- **`mass_loss`** (FAX-style): `L = -ln(sum_k p_k * R_hat_k)`, `p` = attention over the 2048 real
+  tokens renormalized to sum to 1, `R_hat` = soft relevance / its max. Always positive-valued;
+  guarded by the on/off lambda schedule and `attention_entropy()` (logged, not optimized) against
+  collapsing all attention onto one patch.
+- **`gradcam_loss`** (GAIN/CAMAL-style): `c_k = ReLU(sum_d (dCrashLogit/dX)_kd * X_kd)`,
+  normalized to [0,1] by its own max; `L = mean(c over V∪B) - mean(c over P)`. **Always
+  positives-only** regardless of `--aux-label` (shapes crash EVIDENCE, must never see a no-crash
+  window). Computed via `torch.autograd.grad(crash_logit, X, create_graph=True)` — a cheap
+  second-order term since `crash_logit` depends on `X` only through the small frozen head, not
+  the full ViT-L stack.
+  **Bug fixed 2026-09-25**: must differentiate w.r.t. `badas._captured["patches"]` (the raw,
+  still-batched tensor), NOT the `patches` variable `forward_clip()`/`forward()` return
+  (`patches[0]`, a slice created AFTER the unsliced tensor already fed the head — a sibling node
+  in the autograd graph, not an ancestor of `crash_logit`; calling `autograd.grad` against it
+  raises "not used in the graph"). `gradcam_loss` already squeezes a batch dim, so passing the
+  raw (1,2560,1024) tensor is correct as-is.
+- `lambda_schedule(epoch_frac, lam_max, warmup_frac=0.5, on_epochs=3.0)`: ramps 0->max over the
+  first half of epoch 1, holds through epoch 3, then drops to exactly 0 (HASTE/REPA's early-stop
+  finding — the aux gradient helps early and becomes a brake later; matches this project's own
+  aux-vs-crash cosine drift in the original Stage AA runs).
+
+### `semsup_train.py` wiring
+`--aux-mode` gains `attn_rank`/`attn_mass`/`gradcam` (the old `occ`/`rel` side-probe modes are
+untouched, byte-identical). New: `--aux-label {R_all,R_pos,partner_pos}` (which token set backs
+P — see DECISIONS.md for why R is used only as WHERE to look, never as a crash signal),
+`--aux-margin`, `--aux-schedule {constant,warm_on_off}` (default `warm_on_off`),
+`--aux-warmup-frac`, `--aux-on-epochs`, `--aux-label-shuffle` (Stage 3 control: redirects each
+window's label lookup to a different window's, via a fixed seeded derangement,
+`build_aux_shuffle_map()`). `load_aux_h_arrays()` resolves a window's (P, V, B, soft-rel-tensor)
+given the chosen label; `load_aux_h_arrays`/`token_sets_from_labels` treat a missing/empty label
+as "skip this window's aux term", never as an error.
+
+**Bug fixed 2026-09-25 (found LIVE on the pod, not caught by local testing)**: the
+crash-vs-aux gradient-cosine probe block (`epoch_metrics.jsonl`'s `aux_grad_norm_crash`/
+`aux_grad_norm_aux` — what the lambda pilot reads) was gated to `aux_head is not None`, which is
+**always False** for the new AA-H modes (they have no trainable projector). Widened to
+`(aux_head is not None or args.aux_mode in AA_H_MODES)`. This surfaced a SECOND bug: whenever a
+window's aux term is skipped (e.g. `--aux-label R_pos` on a negative clip — roughly half the
+pool), `aux_loss` is a disconnected `torch.tensor(0.0)` with no `grad_fn`; the probe tried to
+differentiate through it anyway, crashed, and **permanently disabled itself for the rest of the
+epoch** starting from the first such window. Fixed by requiring `aux_loss.requires_grad` before
+the probe attempts anything (skips that window's diagnostic only, not a permanent failure). Real
+consequence before the fix: R_pos's first pilot got `aux_grad_cos_n_sampled=0` all epoch and
+silently fell back to an uncalibrated `lambda=1.0`, which then trained for a full 8 epochs
+before being caught — see EXPERIMENTS.md.
+
+### `aa_head_attention_diag.py` (new)
+Stage-0 measurement script: for a given checkpoint (base BADAS-Open, or base + a LoRA adapter),
+measures `rho_P/rho_V`, `rho_P/rho_B`, attention entropy, and the share of attention landing on
+the 512 predictor ("future") tokens, over a sampled set of windows. Used to (a) set
+`attn_rank`'s margin from a real measurement (`current ratio + ln(1.5)`, per the plan — **only
+run at 19-window scale so far, not the planned 200**, see PROJECT_STATE.md's disclosed
+approximation), (b) check post-hoc whether a trained checkpoint's attention on relevant cars
+actually moved. Reuses `TrainableBadasWrapper(..., capture_head_attention=True)` and the same
+train/val split convention as `aa1_token_probe.py`.
+
+### `aa4_partner_labels.py` (new) — the hindsight crash-partner label (`--aux-label partner_pos`)
+For each positive video, decodes a short extension past AA.2's cached span (which stops at
+`t_event - 0.5s`, since BADAS's own windows never look closer) out to `t_event + 0.3s`, runs
+YOLOPv2 detection on it, tracks it with a minimal greedy IoU tracker
+(`track_extension()` — a fresh LOCAL track-id space, NOT the cached stitched tracks' ids),
+**re-identifies** each local track against the cached tracks' last-known boxes at the boundary
+(`reidentify_tracks()`, IoU-matched), and picks the partner as the re-identified track with the
+largest box still visible near the very end of the extension (ties broken by proximity to the
+last-known ego path). Writes a `partner` array into each of that video's EXISTING window `.npz`
+files (`aa4_token_labels.py`'s own output — `rel`/`occ`/`box_h`/`path_gap` untouched), using the
+SAME box-to-token machinery restricted to the partner tid.
+
+**Bug fixed 2026-09-25**: `track_extension()`'s local tracks were matched against the
+REQUESTED extension start time (`t_ext_start`) with a `1e-6` float tolerance to decide "did this
+track start in the first extension frame" — but `decode_frames()` snaps to the nearest real
+frame, landing up to ~1/fps (33ms) later than requested. This silently excluded EVERY local
+track from re-identification (0/70 matches, no error) on the first real video tested. Fixed by
+having `track_extension()` return `first_frame_tids` (an index-based flag: "did this track get a
+box in frame index 0", set during tracking, never compared as a float) instead of comparing
+timestamps after the fact. Verified on 4 real videos post-fix (17-32 re-identified tracks each).
+At pool scale (543 positive videos, run locally, ~30 min): 498 found a partner, 88.6% of windows
+got a usable label (>> the plan's 60% gate).
+
+### Files that matter (Stage AA-H)
+| Path | Purpose |
+|---|---|
+| `student_training/scripts/aa_head_losses.py` | The 3 loss formulas (rank/mass/gradcam), `token_sets_from_labels`, `mean_attention_received`, `attention_entropy`, `lambda_schedule`. Model-free, unit-tested (`test_aa_head_losses.py`, 28 synthetic checks). |
+| `student_training/scripts/aa_head_attention_diag.py` | Per-checkpoint attention-mass diagnostic (margin measurement + post-hoc "did the mechanism move" check). |
+| `student_training/scripts/aa4_partner_labels.py` | L3 hindsight crash-partner label generation — writes `partner` into existing `aa4_token_labels.py` `.npz` files. |
+| `outputs/aa_head_attn/` | Stage 1 (`AA-ctrl-seed{1,2}/`) and Stage 2a (`AA-H-rank-{R_all,R_pos,partner_pos}/`, each with `pilot/`, `train/`, `scores_public/`) — same schema as `outputs/a1_compress256/` and `outputs/aa_token_aux/`. Large per-epoch LoRA adapters stay pod-only; only metadata synced locally. |
+| `run_stage1.sh`, `run_stage2a_1_2.sh`, `run_stage2a_3plus.sh` (on the pod, `outputs/aa_head_attn/`) | Self-contained driver scripts: pilot -> compute lambda* (0.3x gradient-norm target) -> full 8-epoch run + private test scoring -> public scoring, chained across labels/seeds, nohup+disowned so they survive SSH disconnects. `run_stage2a_3plus.sh` additionally aborts a label's full run if its pilot gets 0 gradient samples (guards against a repeat of the lambda=1.0 bug). |

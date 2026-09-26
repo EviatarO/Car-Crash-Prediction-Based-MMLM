@@ -1,6 +1,193 @@
 <!-- handoff-month: 2026-09 -->
 # Project State
 
+## ⚠️ 2026-09-26 status update — Stage AA-H CLOSED, diagnosis revised
+
+**User decision: close Stage AA-H (no `gradcam` run), reassess the diagnosis.** The diagnosis
+that motivated this whole stage — "the crash head underperforms because it doesn't attend enough
+to the relevant/threat object" — is **rejected**. Both loss families genuinely moved the head's
+attention onto the labeled-relevant object (confirmed via `rho_P/V`), and both made FP *worse*,
+with a dose-response: the more aggressively attention was forced (`attn_mass` >> `attn_rank`), the
+worse FP got. That rules out attention misallocation as the bottleneck — if it were the real
+problem, forcing more attention there should help, not reliably hurt more.
+
+**Revised diagnosis (backed by data, see EXPERIMENTS.md's 2026-09-26 post-mortem):** the 67 public
+negatives `attn_mass` turns into false positives have a **median control-model score of 0.212 vs
+0.051 across all 333 negatives** — they're disproportionately the "close call" negatives the plain
+classifier already found borderline, not random clips. Forcing attention onto the relevant object
+amplifies the model's existing proximity-to-risk association instead of teaching it to distinguish
+"closing in dangerously" from "nearby but not converging" — because the relevance/partner label
+never encoded that distinction (it encodes *which* object matters, not *whether* its trajectory
+implies a hit). No amount of attention/gradient-location supervision can teach a distinction the
+training signal doesn't carry.
+
+**Implication for what's next (not yet scoped as a plan):** the bottleneck looks like evidence
+integration given the already-identified relevant object, not attention placement. This points
+back toward directly supervising **kinematic evidence of collision** (closing rate, TTC,
+trajectory convergence) — the deferred Stage 2 kinematic-target design (α, g, closing_rate, lane)
+from before Stage AA existed — rather than more attention/gradient-shaping variants. See
+DECISIONS.md's "Stage AA-H closed, diagnosis revised" entry for full reasoning.
+
+**Nothing running or billing.** All Stage AA/AA-H pod work is done; data is safe on network volume
+`0hnvco2s4j`. RunPod API key is on file for whenever the next stage needs pod time.
+
+## ⚠️ 2026-09-26 status update (superseded by the closure block above, kept for detail) — Stage AA-H Stage 2b DONE: `attn_mass` is WORSE than `attn_rank`, both loss families now fail
+
+**`attn_mass` + R_pos (the user's own follow-up hypothesis after Stage 2a) is done. It's a
+stronger, more negative result than `attn_rank`: FP=79-121 (vs control's 54-62) at every
+checkpoint tested, despite the best mean-over-8 AP (0.9020) of the whole investigation — AP alone
+would call this the winner; FP at threshold 0.5 says it's the worst. `rho_P/V` explodes to 195.85
+(vs `attn_rank`'s ~4.6 peak) and never unwinds after the aux loss switches off. Also exposed the
+worst val_ap/rank-1 selection failure yet: val_ap picked the epoch with the *worst* test AP of all
+8.** Full table and mechanism reasoning in EXPERIMENTS.md's Stage 2b entry and the child plan's
+2026-09-26 status block.
+
+**STOP — two independent loss families now agree "make the head attend more to the labeled-
+relevant object" doesn't reduce false alarms. Awaiting user decision: try `gradcam` (the third
+literature option, gradient-based rather than attention-based) or close Stage AA-H entirely.** See
+DECISIONS.md's "AA-H next step" open question.
+
+**Pod handling note:** the driver script's own `runpodctl stop pod` auto-stop worked correctly at
+job end — but the pod was then deleted (not stopped) by a manual dashboard action before results
+were pulled. No data lost (`/workspace` is on network volume `0hnvco2s4j`, independent of any
+pod) — a fresh pod attached to the same volume retrieved everything. **New pod
+(`h4uxgf5c3hu4dw`) has already been stopped via the RunPod API after syncing results — nothing
+running or billing right now.**
+
+## ⚠️ 2026-09-25 status update — Stage AA-H Stage 2a DONE: `attn_rank` fails the FP gate on all 3 labels
+
+New direction after Stage AA's negative result (below): instead of a side probe on an
+intermediate ViT-L layer, supervise what the crash **head's own attention** (or decision
+gradient) reads. Full design, literature review (RARE/FAX/GAIN/CAMAL), and the current status
+block: `~/.claude/plans/CCP based BADAS/2026-09-24_Child-Plan-AA-H-head-attention-supervision.md`
+— **read that file's own status block first**, it is more current than this summary.
+
+**Stage 0 (local) and Stage 1 (pod, noise floor) are DONE.** Stage 1 measured how much test AP
+moves from LoRA-init randomness alone (2 seeds of A1-compress256's exact recipe, split held
+fixed): **mean-over-8-checkpoints AP noise floor is tight (0.8910–0.8958, range 0.0048)**;
+**rank-1 (single best-validated checkpoint) noise floor is much wider (0.8924–0.9128, range
+0.0204)**. Rule adopted for judging every arm below: **lead with mean-over-8, treat rank-1 as
+secondary** — rank-1 alone can't distinguish a real effect from a re-roll of the random init.
+
+**Stage 2a (screening the `attn_rank` loss with 3 label choices, seed 0) — DONE, all 3 labels.
+Verdict: does not clear the plan's screen gate; do not carry `attn_rank` into Stage 3.**
+
+| Label | λ* | rank-1 test AP (private) | mean AP over 8 ckpts | public AP | public FP (n=667) |
+|---|---|---|---|---|---|
+| AA-ctrl-seed1 (control) | — | 0.8924 | 0.8910 | 0.9017 | 62 |
+| AA-ctrl-seed2 (control) | — | 0.9111 | 0.8958 | 0.9087 | 54 |
+| R_all (every clip) | 0.1645 | 0.9159 | 0.8991 | 0.9119 | 67 |
+| R_pos (crash clips only) | 0.6965 | 0.9124 | **0.9018** | 0.9102 | 66 |
+| partner_pos (hindsight crash-partner) | 0.5036 | 0.9130 | 0.8951 | 0.9092 | 66 |
+
+**Why it fails:** the mean-over-8 AP lift is marginal at best (R_pos +0.006, R_all +0.003 over
+the control range) and absent for `partner_pos` (0.8951, inside the control range) — the label
+closest to the user's original FP concern gave the *least* lift. Worse, **all three arms have
+more public-set false positives than either control seed** (66-67 vs 54-62) — the exact FP-growth
+failure mode that motivated moving off Stage AA's side-probe design in the first place is still
+present. The attention mechanism does move as designed (`rho_P/V`/`rho_P/B` both rise sharply
+during the aux-on epochs 1-3 and partly persist after), but for `partner_pos` that movement is
+entirely P-vs-background, not P-vs-other-vehicle — it never learns to prefer the true collision
+partner over other nearby traffic, which is why it didn't help FP. val_ap stayed in the normal
+0.94–0.95 range throughout for all three (no crash-task damage). Full numbers and reasoning in
+EXPERIMENTS.md's Stage 2a entry and the child plan's 2026-09-25 status block.
+
+**(Superseded by the 2026-09-26 block above — attn_mass has since been run and also failed.)**
+
+**RunPod API key and auto-stop are now set up** (as of 2026-09-25/26) — a Read/Write API key is
+on file, used via `runpodctl stop pod <id>` both from inside driver scripts and manually via the
+RunPod REST API when needed. Pod IDs are found via `curl .../v1/pods` (list) since
+`$RUNPOD_POD_ID` is consistently empty inside these containers. This removes the earlier "no
+auto-stop" risk for future stages, though a stopped pod can still be **deleted** by a manual
+dashboard action (happened once, 2026-09-25 — no data lost since `/workspace` is a network volume
+independent of any pod, but costs a pod-recreation cycle to get results back). All persistent
+data (frames, labels, captions, all `outputs/aa_head_attn/` results) lives on network volume
+`0hnvco2s4j` (EU-RO-1) and survives any pod being stopped or deleted.
+
+**Two real bugs found and fixed this session** (both would have silently corrupted a run — see
+EXPERIMENTS.md and the child plan for full detail):
+1. **gradcam's autograd-graph-ancestry bug** — differentiated against `patches[0]`
+   (`forward_clip`'s post-hoc return slice, a sibling node) instead of
+   `badas._captured["patches"]` (the actual ancestor tensor the crash head reads). PyTorch
+   raised loudly; fixed by using the raw captured tensor for both the `torch.autograd.grad`
+   call and `gradcam_loss`'s own `x` argument.
+2. **the crash-vs-aux gradient-cosine probe's `aux_loss.requires_grad` gap** — when a window's
+   aux term is skipped (e.g. `--aux-label R_pos`/`partner_pos` on a negative clip, or any
+   missing label), `aux_loss` is a disconnected `torch.tensor(0.0)` with no `grad_fn`. The probe
+   tried to differentiate through it anyway, crashed, and **permanently disabled itself for the
+   rest of the epoch** on the very first such window — R_pos's first pilot attempt hit this
+   almost immediately (`aux_grad_cos_n_sampled=0` all epoch) and silently fell back to an
+   **uncalibrated λ=1.0**, which then ran a full 8-epoch training job on bad data before being
+   caught by manually checking the sample count (not by any automated guard). **Killed that run,
+   fixed by requiring `aux_loss.requires_grad` before the probe attempts anything**, verified
+   both by an isolated control-flow test and live on the pod (R_pos's re-run pilot got
+   `aux_grad_cos_n_sampled=80`, `partner_pos`'s got 74). The corrected driver script
+   (`run_stage2a_3plus.sh`) also aborts a label's full run outright if a future pilot ever gets
+   0 samples again, instead of silently using a fallback lambda.
+
+**Known approximation, moot now:** `attn_rank`'s margin was set to **0.5** for all of Stage 2a
+from a thin sample (19 windows, not the full planned 200-window Stage-0 diagnostic). Since
+`attn_rank` failed the screen gate on FP regardless of label, re-measuring this margin more
+precisely is not worth doing unless `attn_rank` gets revisited later.
+
+**(Superseded — Stage 2b has since run, see the 2026-09-26 block above. Current STOP point is
+whether to try `gradcam` or close Stage AA-H; nothing is running or billing.)**
+
+## ⚠️ 2026-09-24 status update — Stage AA token-relevance aux loss: negative result, read this first
+
+**Champion is still A1-compress256, test AP 0.9128 (private) / 0.9096 (public).** Stage AA tested
+whether teaching the ViT-L's intermediate tokens *which detected car matters* (a per-token BCE aux
+loss, alongside the crash CE loss) could lift it. **Six training runs, three independent fixes
+(layer choice, head-unfreeze, corrected gradient diagnostic), none separated from its control.**
+Full numbers, per-run diagnostics, and the code fixes: `EXPERIMENTS.md`'s "Stage AA token-relevance
+aux loss" section. Rejected variants: `DECISIONS.md`. Architecture (hook point, loss wiring, data
+flow): `ARCHITECTURE.md`'s matching section. The experiment's own child plan (superseded design
+history + a full status block) is the source-of-truth working doc:
+`~/.claude/plans/CCP based BADAS/2026-09-19_Child-Plan-AA-token-relevance-aux.md`.
+
+**What was built and confirmed to work:**
+- AA.2 detection + AA.4 token labels on the full 1,761-window pool (1,107 videos) — `rel` (soft,
+  top-5 selection score / 2) and `occ` (hard, any tracked vehicle) per-token targets, 2048 tokens
+  (8 tubelets × 16×16), `dataset/aa_token_labels/`.
+- `aa1_token_probe.py` (Phase 3): frozen-trunk linear probe confirms the aux signal IS present and
+  layer-17-specific after training (AA-rel's layer-17 rel-Spearman gain over base +0.098 vs
+  AA-occ's control gain +0.054) — **but that gain does not survive to layer 23 or to the crash
+  head's actual input** (+0.056 vs +0.049 at layer 23, nearly equal). This is the core finding:
+  the aux loss teaches something real and localized, it just doesn't propagate to where the
+  prediction is made.
+- `semsup_train.py --aux-mode {occ,rel} --aux-layer --aux-weight --aux-labels-dir
+  --aux-head-init`: per-token aux BCE added to the crash loss, λ sized via a gradient-norm pilot
+  (target ~10-12% pull on shared LoRA layers — the defensible criterion; note the loss VALUE
+  ratio disagrees, see EXPERIMENTS.md), full per-layer gradient/weight-change diagnostics
+  (`grad_trace.jsonl`, `plot_grad_trace.py`).
+
+**Two fixes landed this session that matter for ANY future run in this codebase, not just AA:**
+- `semsup_train.py` (`1c56fe2`): `--unfreeze-head` + `--lora-init` resume previously reloaded
+  LoRA correctly but silently reset the head to its frozen starting weights (`load_head_state()`
+  was only ever called at scoring time). **Any past "check N epochs, then continue" workflow using
+  `--unfreeze-head` should be treated as suspect** unless it used a single unbroken run. Fixed via
+  new `--head-init`.
+- `f3c064a`: the global crash-vs-aux gradient-norm diagnostic (`epoch_metrics.jsonl`'s
+  `aux_grad_norm_crash`/`aux_grad_norm_aux`) silently never ran for any prior AA run (`null` for
+  all of them) due to a `None`-filtering bug — the per-layer `grad_trace.jsonl` diagnostic was
+  unaffected and is what the reported numbers above rely on.
+
+**Website**: A1-compress256, AA-occ-unfrozen, AA-rel-unfrozen published (landing page, experiment
+detail, cross-experiment comparison) — commit `6812927`, verified rendering in-browser, not yet
+pushed. Known gap: `train_aux`/`aux_grad_cos` fields are in `experiments_data.js` but **no chart
+draws them** (`experiments.html`'s loss chart only plots `train_total`/`train_sem`) — the aux-loss-
+vs-epoch curve is not visible on the site even though the data exists. Also fixed in this pass: a
+stale hardcoded `"11 arms · A0 → v12shuf"` picker-hint string in `experiments.html`, now derived
+from the arm list so it can't go stale again.
+
+**Not yet decided (open question for next session):** given layer choice (17 vs 23) and
+head-unfreeze both failed to move AP, the remaining options are (a) a much larger λ concentrated
+at layer 17 with a frozen head — where AA-rel already showed a real, if non-propagating, effect,
+(b) an attention-mass diagnostic (designed, not built) — does the crash head's actual attention to
+the relevant car shift under any condition, or (c) accept "no AP gain from this aux signal, via
+three different fixes" as the reportable negative result itself. Layer 13-19 probe sweep
+(deferred earlier by the user) is lower priority than these three.
+
 ## ⚠️ 2026-09-14 status update — NEW CHAMPION, read this first
 
 **Every arm in this file (A0=0.853 through every semantic-supervision arm below) was
@@ -503,29 +690,53 @@ python aa1_detect_track_rank.py --all --out-dir ../../outputs/aa1_smoke_18clips 
 curl -sL https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt -o third_party/yolopv2_ref/weights/yolopv2.pt
 # Professor progress report (docx + figures)
 python reports/_scripts/_build_progress_report.py
+
+# Stage AA token-relevance aux loss (run from student_training/scripts/)
+python aa1_run_set.py --set pool1761 --stages 0,1        # AA.2: detect+track the 1,761-pool (1,107 videos), local
+python aa4_token_labels.py                                # AA.4: per-window rel/occ/box_h/path_gap npz labels
+python aa1_token_probe.py --checkpoint base --n-windows 1761 \
+    --aux-layer 17 --out outputs/aa_token_aux/probe_base   # Phase 3: frozen-trunk relevance probe (GPU, ~1-4s/window)
+python aa1_token_probe.py --checkpoint <label> --lora-adapter <epoch_dir>/lora_adapter \
+    --aux-layer 17 --out outputs/aa_token_aux/<label>       # same probe on a trained checkpoint (diagnostic)
+python plot_grad_trace.py <run_dir>/grad_trace.jsonl <out.png>   # per-layer gradient-norm/cosine figure
+
+# semsup_train.py aux-loss flags (add to any normal training invocation)
+--aux-mode {none,occ,rel} --aux-layer 17 --aux-weight <lambda> \
+    --aux-labels-dir dataset/aa_token_labels --aux-head-init <probe_head.pt>
+# resuming a run that used --unfreeze-head, past epoch 1: MUST also pass --head-init
+# (pointing at the last epoch's head_state.pt) alongside --lora-init/--optimizer-init,
+# or the head silently resets to its frozen starting weights with no error.
 ```
 
 ## Git state
-Branch `main`, HEAD `eb08c15` (Stage 3 + ego-path geometry), in sync with origin.
-
-Uncommitted:
-- Modified: `student_training/scripts/aa1_{collision,lanes,stage2,stage3,track_stage1}.py`
-  (ego-path fixes, target-curve redesign, removal of grid/overlay/timeline outputs).
-- Untracked: `student_training/scripts/aa1_run_set.py`, `docs_agents/history/`.
-- This handoff's `docs_agents/` edits.
-
-The user pushes; commit only when asked.
+Branch `main`, HEAD `6812927` (website: add AA-occ-unfrozen and AA-rel-unfrozen arms) — **still
+the HEAD, no new commits this session**. **5 commits ahead of last-known `origin/main`**
+(`a0341a0`..`6812927`) — not pushed; `git fetch` has no push-key access in this environment, the
+user pushes. **Uncommitted as of 2026-09-25** (not yet committed — ask the user before
+committing, per standing instructions): `student_training/scripts/semsup_common.py`,
+`semsup_train.py` (modified — the new Stage AA-H aux modes + both bug fixes), new files
+`aa_head_losses.py`, `aa_head_attention_diag.py`, `aa4_partner_labels.py`,
+`test_aa_head_losses.py`, plus `dataset/aa_token_labels/*.npz` (now carry a `partner` array for
+positive-video windows) and the new `outputs/aa_head_attn/` directory (Stage 1 + Stage 2a
+results, synced from the pod).
 
 ## Next step
-1. Wait for the user's review of the 36 overlays and the new `target_curves.png`; get GT labels for
-   00903/00932/01035 and the 00283 answer (id1 vs id2).
-2. On go-ahead, Stage 4: define the targets (α, g, closing_rate, lane) per selected object, token
-   masks, and per-dimension validity; then decide AA.2 and the deferred negative-decode gap.
-3. Open ego-path failures (spare-tire glare, crosswalk seed) — only with the user's direction; two
-   attempts (slope-sign filter, lower static-pixel threshold) were rejected (DECISIONS.md).
+**Active thread: Stage AA-H (2026-09-26 status block above) — Stages 2a AND 2b are both DONE and
+analyzed, both failed (attn_rank and attn_mass). This is a STOP point awaiting user decision on
+`gradcam` vs closing AA-H, not a resume-and-continue point.** Nothing is running or billing. This
+supersedes the 2026-09-24 Stage AA (side-probe) status
+block right below, which is a paused, separate design that Stage AA-H replaced after finding
+the literature pattern (RARE/FAX/GAIN/CAMAL: supervise the classifier's own attention/gradient,
+not a side probe). The old AA.1-era material further below is fully superseded, not a separate
+open thread.
 
-The pre-2026-09-13 V13-caption / concept-head fork is superseded in priority by the father plan
-(Stage AA) and is not being pursued.
+If instead resuming the earlier AA.1-era open items (lower priority, listed for completeness):
+1. GT labels still unconfirmed: gen18 00903/00932/01035, dev 00283 (id1 vs id2).
+2. Open ego-path failures (spare-tire glare, crosswalk seed) — two attempts already rejected
+   (DECISIONS.md); only revisit with explicit user direction.
+
+The pre-2026-09-13 V13-caption / concept-head fork remains deprioritized behind Stage AA and is
+not being pursued.
 
 ## Known bugs / gotchas (all fixed — don't re-hit these)
 - **`| tail -N` on a backgrounded command masks the real exit code.** Redirect straight to a

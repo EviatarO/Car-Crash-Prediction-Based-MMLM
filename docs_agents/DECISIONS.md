@@ -409,10 +409,119 @@
 - **Ending the drawn path at the first car/dot marker** → hides where the path actually goes.
 - **Selection score as a training target or fit to the crash label** → leaks the label; it only picks which 5 objects get supervised.
 
+### Stage AA token-relevance aux loss (2026-09-19 to 2026-09-24)
+- **Hard 0/1 top-5 mask instead of a soft relevance target** → equals the all-vehicles/`occ` mask
+  whenever a scene has ≤5 cars (most scenes), teaching nothing about *which* car matters. Used a
+  soft target instead: `r = selection_score / 2` for top-5 objects, 0 elsewhere.
+- **Clip the soft target at `min(score, 1)` instead of dividing by 2** → the score's max is 2
+  (1×1×(1+1)); clipping at 1 would give a stopped car directly ahead and the same car closing fast
+  the identical target, erasing the motion term the aux loss is meant to teach.
+- **A trainable (not frozen) aux head** → would let the head absorb the loss on its own without
+  reshaping the trunk representation, exactly like the semantic-alignment Predictor did in the
+  earlier semantic-supervision thread. Fit once (Phase 3, frozen trunk), then frozen for training.
+- **A per-position aux head (`Linear(2048*1024 -> 2048)`)** → ~2.1B weights, would memorize the
+  1,761 windows and lose position-invariant weight sharing. Used one shared `Linear(1024,1)`
+  applied per token (1,025 weights), like a 1x1 conv.
+- **Deep supervision (tap every layer 14-18) as the default** → stronger but riskier for the crash
+  task than a single tap; kept as a Stage-2 ablation only if a single tap proved too weak (it was
+  never reached — a single tap already showed the "doesn't propagate" failure mode).
+- **Sizing λ by loss VALUE ratio instead of gradient-norm ratio** → the two disagree (see
+  EXPERIMENTS.md's "gradient-norm vs loss-value" diagnostic); gradient norm is what actually moves
+  the weights, so it is the criterion used, even though it makes the loss curves look aux-
+  dominated by value. Documented as a real tension, not resolved by picking one and hiding the other.
+- **Extending the 3-epoch unfrozen checks (AA-ctrl/occ/rel-unfrozen) to 8 epochs without new
+  evidence** → rejected by explicit user decision ("stop here for now", 2026-09-24): head-unfreeze
+  already failed to separate any arm from its control at epoch 2-3, so there was nothing to select
+  on by running longer without first changing something about the method.
+- **Continuing to AA-rel-L23 as "the fix" once layer-17's non-propagation was diagnosed** → tried
+  (user: "run layer 23 first"), did not fix it — moving the tap closer to the crash head's input is
+  not by itself sufficient; ruled out as a standalone fix, not as a direction worth combining with
+  a larger λ.
+
+### Stage AA-H head-attention supervision (2026-09-24/25)
+- **A side probe reading `R` on every window, unconditionally** → replaced with 3 explicit label
+  choices (`R_all`, `R_pos`, `partner_pos`) after the user pointed out `R` answers "which car
+  might matter", not "is a crash coming" — a close car in normal traffic scores the same as a
+  real threat, risking a loss that teaches "close car -> alarm" (see EXPERIMENTS.md's Stage 2a
+  entry). `gradcam` is ALWAYS positives-only regardless of `--aux-label`, since it shapes crash
+  EVIDENCE directly and must never see a no-crash window.
+- **Trusting a pilot's printed lambda\* without checking `aux_grad_cos_n_sampled` first** →
+  rejected after R_pos's first pilot silently returned a fallback `lambda=1.0` (the gradient
+  probe had crashed and disabled itself on the very first negative-clip window, see
+  EXPERIMENTS.md's third bug). The corrected driver script now aborts a label's full run outright
+  if the pilot's sample count is 0, rather than trusting whatever number gets printed.
+- **Re-estimating the ego path from the extension's own (lane-poor, near-crash) frames for
+  partner-label selection** → used the LAST ego-path estimate from the cached span instead - the
+  path does not move enough in under ~1.5s to justify re-estimating from worse data.
+- **Restricting partner-label candidates to tracks visible AT the very last extension frame
+  only** → widened to "within `END_WINDOW_S` (0.25s) of the last frame", since detector flicker
+  right at the moment of impact can drop a real partner for 1-2 frames.
+- **`attn_rank` (RARE-style ranking loss) as the aux loss, any of the 3 labels** → screened out
+  2026-09-25 (Stage 2a complete, all 3 labels run). Fails the plan's own gate: FP is worse than
+  both control seeds for all three (66-67 vs 54-62 on the public set), despite the attention
+  mechanism moving as designed (rho_P/V, rho_P/B both rise during the aux-on window). AP lift is
+  marginal at best (R_pos +0.006 mean-over-8) and absent for `partner_pos` (0.8951, inside the
+  control range) — the most FP-conscious label gave the *least* AP lift, because its rho_P/V
+  never moved (its gain was entirely P-vs-background, not P-vs-other-vehicle). Full table and
+  reasoning in EXPERIMENTS.md's Stage 2a entry and the child plan's 2026-09-25 status block.
+  Recommend not carrying `attn_rank` into Stage 3; open question below on whether to try
+  `gradcam` (Stage 2c) instead, or close the whole AA-H direction.
+- **`attn_mass` (FAX-style mass loss) with R_pos** → screened out 2026-09-26 (Stage 2b complete).
+  User's own follow-up hypothesis after `attn_rank` failed — mechanistically different (forces
+  genuine attention-mass reallocation, not a cheap ranking margin) so might not share the FP
+  failure. The mechanism prediction was right (`rho_P/V` explodes to 195.85, far beyond
+  `attn_rank`'s ~4.6, and doesn't unwind after the loss switches off) but the outcome prediction
+  was wrong: FP is *worse* than `attn_rank` at every checkpoint tested (val-selected epoch 8:
+  FP=79; the genuinely-best-by-test-AP epoch 4: FP=121, both vs control's 54-62 and `attn_rank`'s
+  worst arm at 67). Mean-over-8 AP (0.9020) is nominally the best of the whole AA-H investigation —
+  which is the clearest demonstration yet of why AP alone isn't the gate: this arm looks best on
+  AP and is worst on FP. Also exposed the worst rank-1/val_ap selection failure seen so far (val_ap
+  picked the epoch with the *worst* test AP of all 8). Full detail in EXPERIMENTS.md's Stage 2b
+  entry and the child plan's 2026-09-26 status block.
+
 ## Unresolved design questions
 
+- **`attn_rank`'s margin (0.5) is a thin-sample approximation** (2026-09-25) — measured from only
+  19 windows, not the planned 200-window Stage-0 diagnostic (`aa_head_attention_diag.py` exists,
+  smoke-tested, never run past 20 windows at scale). Moot — Stage AA-H is closed (below).
+
+### Stage AA-H closed, diagnosis revised (2026-09-26)
+
+- **Original diagnosis — "the crash head underperforms because it doesn't attend enough to the
+  relevant/threat object; fix by forcing attention there"** → **rejected.** Both loss families
+  moved the mechanism (attention genuinely shifted onto the labeled-relevant object, confirmed via
+  `rho_P/V`/`rho_P/B`) and both made public-set FP *worse* than the plain classifier, with a clear
+  dose-response: `attn_mass` (which concentrated attention far more aggressively than `attn_rank`,
+  rho_P/V 195.85 vs ~4.6) produced far more FP (79-121 vs 66-67). If under-attending to the threat
+  object were the real bottleneck, forcing more attention there should help or at least not hurt
+  monotonically — instead it reliably hurts more the harder it's forced. That direction of effect
+  rules out "attention misallocation" as the bottleneck.
+- **Revised diagnosis, backed by a direct post-hoc check** (EXPERIMENTS.md's 2026-09-26
+  post-mortem): the 67 public negatives that `attn_mass` flips from TN to FP have a **median
+  control-model score of 0.212, vs 0.051 across all 333 negatives** — a ~4x elevation. These are
+  disproportionately the negatives that already looked like "close call" cases to the plain
+  classifier (a car got near/entered the lane but didn't collide), not random or previously-
+  confident-correct clips. Forcing extra attention onto the relevant object doesn't teach the
+  model to tell "closing in dangerously" apart from "nearby but not converging" — it amplifies the
+  proximity-to-risk association the classifier already had, because the relevance/partner label
+  used as the aux target encodes **which object matters**, never **whether its trajectory implies
+  a hit**. There is no signal in any of the 3 label variants or 2 loss families tried that could
+  teach that distinction, regardless of where the loss pushes attention.
+  **Practical implication:** the bottleneck is evidence integration/thresholding given the object
+  already identified as relevant, not attention placement. This points back toward directly
+  supervising **kinematic evidence of collision** (closing rate, TTC, trajectory convergence) —
+  the deferred Stage 2 kinematic-target design (α, g, closing_rate, lane) from before Stage AA
+  existed — rather than any further attention/gradient-location supervision. Not yet scoped as a
+  new plan; this is a diagnosis, not a committed next stage.
+
 - ~~How should Stage AA.1's virtual-corridor threat ranking handle wide intersections (A: widen corridor, B: size/proximity signal, C: CLRerNet)?~~ **RESOLVED 2026-09-15: none of the three** — the corridor was replaced by per-frame YOLOPv2 drivable/lane path tracing (see rejected options above).
-- **Stage 4 go-ahead:** targets α, g, closing_rate, lane per selected object — proceed, or change the target set after the overlay review? Open, user decision.
+- ~~Stage 4 go-ahead: targets α, g, closing_rate, lane per selected object — proceed, or change the target set after the overlay review?~~ **SUPERSEDED 2026-09-19**: Stage AA's actual Stage 1 used a single per-token relevance/occupancy BCE channel instead (see the Stage AA token-relevance section above); the α/g/closing_rate/lane kinematic channels remain the deferred **Stage 2** design (not started — Stage 1 itself did not beat A1-compress256, so Stage 2 is on hold pending a decision on Stage 1's negative result, see PROJECT_STATE.md's 2026-09-24 status block).
+- **Stage AA next step (new, 2026-09-24, user decision pending):** given that both layer choice
+  (17 vs 23) and head-unfreeze failed to fix the non-propagation, which of (a) a much larger λ
+  concentrated at layer 17 with a frozen head, (b) an attention-mass diagnostic (does the crash
+  head's actual attention to the relevant car shift under any condition — designed, not built), or
+  (c) accepting "no AP gain from this aux signal, via three different fixes" as the reportable
+  result — should be pursued next? Not decided.
 - **Ground truth for gen18 positives 00903, 00932, 01035 and dev 00283 (id1 vs id2):** which object is hit? Needed to score the selection; user to supply.
 - **Target-curve plot shows the 5 longest-lived tracks, not the selected top-5:** switch to selected objects? Open.
 - **Spare-tire false lane (00486, 00505):** accept, mask by hand-tuned rule, or fine-tune YOLOPv2 lane head? Open; two filters already rejected.

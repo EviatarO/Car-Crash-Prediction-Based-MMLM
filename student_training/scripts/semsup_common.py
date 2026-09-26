@@ -181,7 +181,8 @@ class TrainableBadasWrapper:
     def __init__(self, stagea_cfg: dict, lora_target_modules: list | None = None,
                  lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
                  unfreeze_module_substrings: list | None = None,
-                 preprocess_mode: str = "crop", aux_layer: int | None = None):
+                 preprocess_mode: str = "crop", aux_layer: int | None = None,
+                 capture_head_attention: bool = False):
         from e4_stageA_badas_open_eval import load_badas, preprocess_clip, PREPROCESS_MODES
         if preprocess_mode not in PREPROCESS_MODES:
             raise ValueError(f"preprocess_mode {preprocess_mode!r} not in {PREPROCESS_MODES}")
@@ -225,6 +226,43 @@ class TrainableBadasWrapper:
 
         probe.register_forward_pre_hook(_pre_hook)
         probe.register_forward_hook(_post_hook)
+
+        # Stage AA-H (child plan 2026-09-24-AA-H-head-attention-supervision): the crash
+        # HEAD's own attention table, not a side probe on some intermediate ViT-L layer.
+        # `probe` (temporal_processor) is BADAS's AttentionProcessor: `attn_out, _ =
+        # self.attention(x, x, x)` - it REQUESTS the attention weights (nn.MultiheadAttention
+        # defaults to need_weights=True, average_attn_weights=True) but discards them as `_`
+        # before returning, so hooking `probe` itself (as `_post_hook` above does) cannot see
+        # them - they never leave AttentionProcessor.forward(). Hook the INNER
+        # nn.MultiheadAttention submodule instead: its own forward() return value IS
+        # (attn_output, attn_output_weights), so a forward hook there captures the (1, 2560,
+        # 2560) row-normalized table directly, with grad (no .detach() - same reasoning as the
+        # pre/post hooks above). `_captured["patches"]` (the pre-hook a few lines up) already
+        # gives X, the SAME tensor the head's decision-gradient loss (variant C) needs -
+        # no new hook required for that.
+        self.capture_head_attention = capture_head_attention
+        if capture_head_attention:
+            import torch
+            head_attn_module = getattr(probe, "attention", None)
+            if head_attn_module is None or not isinstance(head_attn_module, torch.nn.MultiheadAttention):
+                raise RuntimeError(
+                    "capture_head_attention=True but the probe module has no "
+                    "'.attention' nn.MultiheadAttention submodule to hook - check "
+                    "BADAS's temporal_processor implementation (AttentionProcessor)."
+                )
+
+            def _head_attn_hook(_module, _args, output):
+                weights = output[1] if isinstance(output, (tuple, list)) else None
+                if weights is None:
+                    raise RuntimeError(
+                        "capture_head_attention=True but the head's MultiheadAttention "
+                        "returned no weights - it must be called with need_weights=True "
+                        "(BADAS's AttentionProcessor.forward already does this)."
+                    )
+                self._captured["head_attn"] = weights
+
+            head_attn_module.register_forward_hook(_head_attn_hook)
+            print(f"  [wrapper] head-attention hook on '{type(probe).__name__}.attention'")
 
         self.lora_enabled = lora_target_modules is not None
         if self.lora_enabled:

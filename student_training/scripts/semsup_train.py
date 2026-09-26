@@ -85,6 +85,12 @@ from metrics_core import metrics_from_arrays  # noqa: E402
 # Lifted to module level in semsup_b1_probe.py 2026-08-17 (P1 plan, change #2)
 # specifically so this import is possible - was nested inside that file's main().
 from semsup_b1_probe import clip_level_retrieval_acc  # noqa: E402
+# Stage AA-H (child plan 2026-09-24): pure, model-free loss functions for the
+# crash-HEAD-attention/decision-gradient aux modes (attn_rank/attn_mass/gradcam).
+from aa_head_losses import (  # noqa: E402
+    token_sets_from_labels, rank_loss, mass_loss, attention_entropy, gradcam_loss,
+    lambda_schedule, mean_attention_received,
+)
 
 
 def build_caption_bank(examples, siglip_model, siglip_tok, device, batch=64):
@@ -182,12 +188,19 @@ def _load_aux_npz(path_str: str):
     """Cached (a run touches the same window's label file at most once per epoch, and
     windows repeat every epoch) - avoids re-reading+re-decompressing the same .npz
     N_EPOCHS times. Returns None for a missing file (not every window has one - see
-    --aux-mode's help) instead of raising, so one missing label never kills the run."""
+    --aux-mode's help) instead of raising, so one missing label never kills the run.
+    `partner` (hindsight crash-partner tokens, aa4_partner_labels.py, positive clips
+    only) is OPTIONAL - most .npz files predate that script and simply don't have the
+    key, which is not an error (--aux-label partner_pos treats a missing `partner`
+    array the same as a missing file: n_aux_missing, crash loss unaffected)."""
     p = Path(path_str)
     if not p.exists():
         return None
     with np.load(p) as z:
-        return {"rel": z["rel"].copy(), "occ": z["occ"].copy()}
+        out = {"rel": z["rel"].copy(), "occ": z["occ"].copy()}
+        if "partner" in z.files:
+            out["partner"] = z["partner"].copy()
+        return out
 
 
 def load_aux_target(frames_dir: str, mode: str, labels_dir: str, device):
@@ -198,6 +211,57 @@ def load_aux_target(frames_dir: str, mode: str, labels_dir: str, device):
         return None
     arr = arrs["occ"].astype(np.float32) if mode == "occ" else arrs["rel"]
     return torch.from_numpy(arr).to(device)
+
+
+def load_aux_h_arrays(frames_dir: str, labels_dir: str, aux_label: str, is_positive: bool,
+                       device, shuffle_map: dict | None = None):
+    """(P, V, B, rel_t) for the Stage AA-H attn_rank/attn_mass/gradcam losses, where P/V/B
+    are boolean (2048,) masks and rel_t is the raw SOFT relevance array those masks were
+    derived from (mass_loss needs the soft value, not just P's membership) - or None if
+    this window should contribute no aux loss this step. See --aux-label's help for
+    R_all/R_pos/partner_pos. `shuffle_map` (--aux-label-shuffle, Stage 3 control):
+    frames_dir -> a DIFFERENT frames_dir whose label array is read instead, seeded once
+    for the whole run in main() - see build_aux_shuffle_map()."""
+    lookup_dir = shuffle_map.get(frames_dir, frames_dir) if shuffle_map else frames_dir
+    arrs = _load_aux_npz(str(Path(labels_dir) / f"{lookup_dir}.npz"))
+    if arrs is None:
+        return None
+    positives_only = aux_label in ("R_pos", "partner_pos")
+    if aux_label == "partner_pos":
+        if "partner" not in arrs:
+            return None
+        rel = arrs["partner"].astype(np.float32)
+    else:
+        rel = arrs["rel"]
+    occ = arrs["occ"].astype(np.float32)
+    rel_t = torch.from_numpy(rel).to(device)
+    occ_t = torch.from_numpy(occ).to(device)
+    sets = token_sets_from_labels(rel_t, occ_t, positives_only=positives_only,
+                                   has_positive=is_positive)
+    if sets is None:
+        return None
+    P, V, B = sets
+    return P, V, B, rel_t
+
+
+def build_aux_shuffle_map(examples, seed: int) -> dict:
+    """--aux-label-shuffle (Stage 3 control): a fixed seeded derangement over the distinct
+    frames_dir values in `examples` - every window's label lookup is redirected to a
+    DIFFERENT window's label file, for the whole run. Built once (not per-epoch/per-step)
+    so the shuffle is constant across the run, matching make_semtest200_shuffled.py's
+    within-run-fixed convention for this kind of content-vs-presence control."""
+    import random
+    keys = sorted({ex["frames_dir"] for ex in examples})
+    rng = random.Random(seed)
+    perm = keys[:]
+    # simple derangement: shuffle, then fix any self-mapped slots by rotating them by 1 -
+    # good enough for a diagnostic control, not cryptographic.
+    rng.shuffle(perm)
+    for i, k in enumerate(keys):
+        if perm[i] == k:
+            j = (i + 1) % len(perm)
+            perm[i], perm[j] = perm[j], perm[i]
+    return dict(zip(keys, perm))
 
 
 def balanced_bce_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -658,17 +722,64 @@ def main():
                           "--semantic-weight > 0 and --semantic-loss infonce (cosine's "
                           "degenerate-optimum problem applies here too, and was never fixed "
                           "for cosine).")
-    ap.add_argument("--aux-mode", default="none", choices=["none", "occ", "rel"],
-                     help="Stage AA token-relevance aux (child plan 2026-09-19-AA-token-"
-                          "relevance-aux). 'none' (default): no aux branch, byte-identical to "
-                          "every arm before this flag existed. 'occ': target = does any tracked "
-                          "vehicle cover this patch (hard 0/1, ALL tracked vehicles - the "
-                          "localization-only control, AA-occ). 'rel': target = the AA.1 "
-                          "selection score / 2 for the top-5 objects only, 0 elsewhere (soft "
-                          "0..1 - the treatment, AA-rel). Labels come from aa4_token_labels.py's "
-                          ".npz files (--aux-labels-dir), looked up by the window's own "
-                          "frames_dir. A window with no label file just contributes 0 aux loss "
-                          "(logged as n_aux_missing) - the crash loss is unaffected.")
+    ap.add_argument("--aux-mode", default="none",
+                     choices=["none", "occ", "rel", "attn_rank", "attn_mass", "gradcam"],
+                     help="Stage AA token-relevance aux. 'none' (default): no aux branch, "
+                          "byte-identical to every arm before this flag existed. 'occ'/'rel': "
+                          "the ORIGINAL side-probe design (child plan 2026-09-19) - target = a "
+                          "frozen LayerNorm+Linear head reading an intermediate ViT-L layer "
+                          "(--aux-layer). 'attn_rank'/'attn_mass'/'gradcam': the Stage AA-H "
+                          "design (child plan 2026-09-24) - the loss reads the CRASH HEAD's own "
+                          "attention table or decision gradient instead of a side probe, so it "
+                          "backprops into LoRA across ALL 24 encoder layers + the predictor, not "
+                          "just layers 0..aux_layer. See aa_head_losses.py for the three "
+                          "formulas. Labels always come from aa4_token_labels.py's .npz files "
+                          "(--aux-labels-dir; --aux-label selects WHICH array) looked up by the "
+                          "window's own frames_dir. A window with no usable label just "
+                          "contributes 0 aux loss (logged as n_aux_missing) - the crash loss is "
+                          "unaffected.")
+    ap.add_argument("--aux-label", default="rel", choices=["R_all", "R_pos", "partner_pos"],
+                     help="Which token set backs P (the 'relevant' set) for attn_rank/"
+                          "attn_mass/gradcam. R_all: aa4_token_labels.py's `rel` array on every "
+                          "clip (positives AND negatives) - only valid for attn_rank/attn_mass, "
+                          "which say WHERE to look, never THIS IS A CRASH. R_pos: same `rel` "
+                          "array, but the aux term is skipped on negative clips (RARE's design: "
+                          "its ranking loss only ever sees accident videos). partner_pos: the "
+                          "NEW hindsight crash-partner label from aa4_partner_labels.py (`partner` "
+                          "array), positive clips only - the car the ego actually hits, not "
+                          "merely a close/relevant one. gradcam ALWAYS behaves as positives-only "
+                          "regardless of this flag (it shapes crash EVIDENCE, so it must never "
+                          "run on a no-crash window) - see the plan's FP-risk discussion.")
+    ap.add_argument("--aux-margin", type=float, default=0.4,
+                     help="attn_rank's margin m (log-ratio target: relevant tokens must receive "
+                          "at least e^m times the attention of non-relevant ones). Set from a "
+                          "Stage-0 measurement of the CURRENT ratio on the frozen/control model "
+                          "(start: current + ln(1.5)), never guessed.")
+    ap.add_argument("--aux-schedule", default="warm_on_off", choices=["constant", "warm_on_off"],
+                     help="lambda(t) shape for the NEW attn_rank/attn_mass/gradcam modes (the "
+                          "old occ/rel side-probe modes are unaffected - they stay constant, "
+                          "matching every prior AA-rel/AA-occ run). 'constant': lambda is "
+                          "--aux-weight for the whole run (old AA-rel/AA-occ behavior). "
+                          "'warm_on_off' (default): ramps 0->max over the first "
+                          "--aux-warmup-frac of epoch 1, holds max through --aux-on-epochs, then "
+                          "drops to exactly 0 for the rest of the run - see aa_head_losses."
+                          "lambda_schedule()'s docstring for why (HASTE/REPA's early-stop "
+                          "finding; matches this project's own aux-vs-crash cosine drift).")
+    ap.add_argument("--aux-warmup-frac", type=float, default=0.5,
+                     help="warm_on_off schedule: fraction of epoch 1 over which lambda ramps "
+                          "linearly from 0 to --aux-weight.")
+    ap.add_argument("--aux-on-epochs", type=float, default=3.0,
+                     help="warm_on_off schedule: lambda stays at --aux-weight through this many "
+                          "epochs (fractional epoch, continuous), then drops to 0. Pass a value "
+                          ">= --epochs (or use --aux-schedule constant) to keep the aux loss on "
+                          "for the whole run.")
+    ap.add_argument("--aux-label-shuffle", action="store_true",
+                     help="Stage 3 control: each window's aux label array is replaced by a "
+                          "DIFFERENT window's (seeded by --seed, fixed for the whole run) before "
+                          "computing P/V/B. Shows whether any measured gain comes from where the "
+                          "relevant cars actually are, vs. a generic regularization effect of "
+                          "having ANY aux loss. No effect on occ/rel (the original side-probe "
+                          "arms never had this control).")
     ap.add_argument("--aux-layer", type=int, default=17,
                      help="0-indexed encoder layer whose OUTPUT the aux head reads (default 17 "
                           "= 'layer 18', 1-indexed, per the child plan). Backprop from the aux "
@@ -978,19 +1089,35 @@ def main():
         target_modules = args.lora_target_modules[3:]
     else:
         target_modules = [s.strip() for s in args.lora_target_modules.split(",") if s.strip()]
+    # Stage AA-H modes (attn_rank/attn_mass/gradcam) read the crash head's own attention/
+    # decision gradient - no side probe, no aux_layer hook, but the wrapper needs the NEW
+    # head-attention hook installed. The ORIGINAL occ/rel modes keep using aux_layer exactly
+    # as before (untouched, so every existing AA-rel/AA-occ recipe still reproduces).
+    AA_H_MODES = {"attn_rank", "attn_mass", "gradcam"}
+    if args.aux_mode == "gradcam" and args.aux_label == "R_all":
+        raise ValueError(
+            "--aux-mode gradcam requires a positives-only --aux-label (R_pos or "
+            "partner_pos) - it shapes what counts as crash EVIDENCE, so it must never "
+            "run on a no-crash window (see the plan's FP-risk discussion). R_all is "
+            "only valid for attn_rank/attn_mass, which say WHERE to look, not "
+            "THIS IS A CRASH.")
     badas = TrainableBadasWrapper(
         stagea_cfg, lora_target_modules=target_modules,
         lora_r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         unfreeze_module_substrings=["temporal_processor", "classifier"] if args.unfreeze_head else None,
         preprocess_mode=args.preprocess,
-        aux_layer=args.aux_layer if args.aux_mode != "none" else None,
+        aux_layer=args.aux_layer if args.aux_mode in ("occ", "rel") else None,
+        capture_head_attention=args.aux_mode in AA_H_MODES,
     )
 
-    # Stage AA token-relevance aux head: built AFTER the wrapper (needs `device`),
-    # ALWAYS frozen - it must never absorb the aux loss itself, only shape what the
-    # LoRA-unfrozen layers below it write into their tokens (see --aux-mode's help).
+    # Stage AA token-relevance aux head (occ/rel ONLY): built AFTER the wrapper (needs
+    # `device`), ALWAYS frozen - it must never absorb the aux loss itself, only shape what
+    # the LoRA-unfrozen layers below it write into their tokens (see --aux-mode's help).
+    # attn_rank/attn_mass/gradcam have NO trainable projector at all - they read the head's
+    # own attention/gradient directly (aa_head_losses.py) - so aux_head stays None for them;
+    # the training-loop guard below is `args.aux_mode != "none"`, not `aux_head is not None`.
     aux_head = None
-    if args.aux_mode != "none":
+    if args.aux_mode in ("occ", "rel"):
         aux_head = build_aux_head(device)
         if args.aux_head_init:
             aux_head.load_state_dict(torch.load(args.aux_head_init, map_location=device))
@@ -1188,6 +1315,16 @@ def main():
         print(f"[data] train={len(train_ex)}  val={len(val_ex)} "
               f"(clip-level split, split_seed={args.split_seed})")
 
+    # Stage AA-H (child plan 2026-09-24): --aux-label-shuffle's fixed seeded derangement,
+    # built once over the TRAIN set only (val never sees the aux loss). See --aux-mode's
+    # help for AA_H_MODES; built unconditionally when requested regardless of aux_mode so
+    # a later --aux-mode switch on the same command line can't silently pick up a stale map.
+    aux_shuffle_map = (build_aux_shuffle_map(train_ex, args.seed)
+                        if args.aux_label_shuffle else None)
+    if aux_shuffle_map is not None:
+        print(f"[aux] --aux-label-shuffle: {len(aux_shuffle_map)} windows redirected to a "
+              f"different window's label array (seed={args.seed})")
+
     # Built here, not at optimizer construction, because total_steps needs
     # len(train_ex) - only known after the pool is loaded and split. If resuming
     # (--start-epoch > 1), remaining_epochs covers only what's left to run, so the
@@ -1301,8 +1438,16 @@ def main():
         total_aux, n_aux_missing = 0.0, 0
         aux_cos_sum, aux_cos_n, aux_cos_neg = 0.0, 0, 0
         aux_gnorm_crash, aux_gnorm_aux = 0.0, 0.0
-        aux_layer_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0]) if aux_head is not None else None
+        # Widened alongside the grad-cosine gate above (2026-09-25) - was `if aux_head is not
+        # None`, which left this None for attn_rank/attn_mass/gradcam and crashed the first
+        # time that block tried to use it (caught by a local smoke test before any pod use).
+        aux_layer_stats = (defaultdict(lambda: [0.0, 0.0, 0.0, 0])
+                           if (aux_head is not None or args.aux_mode in AA_H_MODES) else None)
         aux_gc_probe_failed = False
+        # Stage AA-H (attn_rank/attn_mass/gradcam) diagnostics - separate from the occ/rel
+        # accumulators above since these modes have no aux_head/aux_layer at all.
+        aux_h_entropy_sum, aux_h_rho_pv_sum, aux_h_rho_pb_sum, aux_h_n = 0.0, 0.0, 0.0, 0
+        aux_h_lambda_last = 0.0
         # `pending` counts SUCCESSFUL backward() calls since the last opt.step().
         # Driving the accumulation boundary off the enumerate() index instead would
         # desync the moment any example is skipped: some steps would average fewer
@@ -1400,22 +1545,128 @@ def main():
                 else:
                     n_aux_missing += 1
 
+            # --- Stage AA-H: crash-head attention/decision-gradient aux loss ---
+            # (child plan 2026-09-24). No aux_head/projector here - the loss reads the
+            # head's OWN attention table (badas._captured["head_attn"], from THIS SAME
+            # forward_clip() call above) or its OWN decision gradient wrt `patches`
+            # (also from this same call). aux_lambda_used defaults to args.aux_weight
+            # (constant schedule) and is overwritten by lambda_schedule() below when
+            # --aux-schedule warm_on_off - this is what the total-loss line further down
+            # actually multiplies aux_loss by, NOT args.aux_weight directly, so this must
+            # run (even at lambda=0) to get accurate diagnostics logged every step.
+            aux_lambda_used = args.aux_weight
+            if args.aux_mode in AA_H_MODES:
+                is_positive = bool(ex["label"])
+                sets = load_aux_h_arrays(ex["frames_dir"], args.aux_labels_dir,
+                                          args.aux_label, is_positive, device,
+                                          shuffle_map=aux_shuffle_map)
+                head_attn = badas._captured.get("head_attn")
+                if head_attn is None:
+                    raise RuntimeError(
+                        f"--aux-mode={args.aux_mode} but no head_attn was captured this "
+                        f"window - capture_head_attention must be True on the wrapper "
+                        f"(--dry-run-modules / check TrainableBadasWrapper construction).")
+                if sets is None:
+                    n_aux_missing += 1
+                else:
+                    P, V, B, rel_t = sets
+                    if args.aux_mode == "attn_rank":
+                        aux_loss = rank_loss(head_attn, P, V, B, args.aux_margin)
+                    elif args.aux_mode == "attn_mass":
+                        aux_loss = mass_loss(head_attn, rel_t)
+                    else:  # gradcam - ALWAYS positives-only regardless of --aux-label
+                        if not is_positive:
+                            n_aux_missing += 1
+                            aux_loss = torch.tensor(0.0, device=device)
+                        else:
+                            crash_logit = logits[0, 1]
+                            # MUST differentiate wrt badas._captured["patches"] (the RAW,
+                            # still-batched (1,2560,1024) tensor captured by the pre-hook),
+                            # NOT the local `patches` variable - forward_clip() returns
+                            # `patches[0]` (semsup_common.py), a SLICE created AFTER the
+                            # unsliced tensor already fed the head, so it is a sibling node
+                            # in the autograd graph, not an ancestor of crash_logit. Calling
+                            # autograd.grad against the slice raises "One of the
+                            # differentiated Tensors appears to not have been used in the
+                            # graph" (caught in the Stage-0 GPU smoke test - see the child
+                            # plan's status). gradcam_loss already squeezes a leading batch
+                            # dim, so passing the raw (1,2560,1024) tensor is correct as-is.
+                            x_for_grad = badas._captured["patches"]
+                            # create_graph=True: this grad is itself part of L_C's graph, so
+                            # L_C.backward() below reaches the LoRA trunk THROUGH grad_x too,
+                            # not just through x_for_grad directly - see the plan's Q6/Q4
+                            # note ("only through the small head, so cheap": crash_logit
+                            # depends on x_for_grad only via the frozen head, not the full
+                            # ViT-L stack, so this second-order term costs one extra small
+                            # backward, not a second full forward pass).
+                            grad_x, = torch.autograd.grad(
+                                crash_logit, x_for_grad, create_graph=True, retain_graph=True)
+                            VB = V | B
+                            aux_loss = gradcam_loss(grad_x, x_for_grad, P, VB)
+                    # Diagnostics logged whenever P/V/B were available this step, REGARDLESS
+                    # of which of the 3 losses ran - this is what Stage 0's attention-mass
+                    # diagnostic (and the per-run "did the mechanism move" gate) reads.
+                    aux_h_n += 1
+                    with torch.no_grad():
+                        aux_h_entropy_sum += attention_entropy(head_attn).item()
+                        r = mean_attention_received(head_attn)
+                        rho_P = r[:2048][P].mean().item()
+                        if V.any():
+                            aux_h_rho_pv_sum += rho_P / max(r[:2048][V].mean().item(), 1e-8)
+                        if B.any():
+                            aux_h_rho_pb_sum += rho_P / max(r[:2048][B].mean().item(), 1e-8)
+                if args.aux_schedule == "warm_on_off":
+                    epoch_frac = (epoch - 1) + (n / max(1, len(train_ex)))
+                    aux_lambda_used = lambda_schedule(
+                        epoch_frac, args.aux_weight,
+                        warmup_frac=args.aux_warmup_frac, on_epochs=args.aux_on_epochs,
+                        total_epochs=float(args.epochs))
+                aux_h_lambda_last = aux_lambda_used
+
             # --- crash-vs-aux gradient angle (diagnostic only, never optimized) --- Same
             # construction as the crash-vs-semantic probe below, kept as its OWN block (not
             # merged into it) so the semantic-arm probe is untouched byte-for-byte whether or
-            # not --aux-mode is set.
-            if (aux_head is not None and args.grad_cosine_every
+            # not --aux-mode is set. Gate widened to AA_H_MODES (2026-09-25, before any Stage 2
+            # pod run): this block is what --aux-weight's lambda pilot reads
+            # (aux_grad_norm_crash/aux_grad_norm_aux in epoch_metrics.jsonl -> lambda* =
+            # target_ratio * |g_crash|/|g_aux|, same procedure as AA-rel/AA-occ's original
+            # pilot) - it was previously gated to `aux_head is not None`, which is always False
+            # for attn_rank/attn_mass/gradcam (they have no trainable projector, see
+            # semsup_train.py's wrapper-construction comment), so a Stage 2 lambda pilot would
+            # have silently read null forever. Caught by re-reading this block before Stage 2,
+            # not by a failed run - see the child plan's status for why this matters.
+            # `and aux_loss.requires_grad` (2026-09-25, found live on the pod during Stage 2a's
+            # R_pos pilot - see the child plan's status): whenever THIS window's aux term was
+            # skipped (missing label, or --aux-label _pos on a negative clip - R_pos's design,
+            # see --aux-label's help), aux_loss is still the initial `torch.tensor(0.0,
+            # device=device)` set above, which has NO grad_fn - not connected to this step's
+            # graph at all. Calling torch.autograd.grad on it raised RuntimeError ("does not
+            # require grad and does not have a grad_fn"), which the except-block below
+            # correctly caught but then set aux_gc_probe_failed=True PERMANENTLY - disabling
+            # the probe for the REST OF THE EPOCH from the first such window onward. For R_pos
+            # (aux skipped on every negative clip, roughly half the pool) this reliably killed
+            # the probe within the first --grad-cosine-every steps, so the pilot's
+            # aux_grad_norm_crash/aux_grad_norm_aux stayed None all epoch and the lambda
+            # pilot's fallback (1.0) silently ran a FULL 8-epoch training job with an
+            # uncalibrated lambda - caught only by manually inspecting aux_grad_cos_n_sampled
+            # before trusting the printed lambda*, not by any automated check. This guard skips
+            # ONLY this window's diagnostic (not a "failure" - the next window with a live
+            # aux_loss tries again normally), instead of ever reaching the broken try/except.
+            if ((aux_head is not None or args.aux_mode in AA_H_MODES) and args.grad_cosine_every
                     and not aux_gc_probe_failed
-                    and n % args.grad_cosine_every == 0):
+                    and n % args.grad_cosine_every == 0
+                    and aux_loss.requires_grad):
                 try:
                     g_c = torch.autograd.grad(crash_loss, lora_params,
                                               retain_graph=True, allow_unused=True)
                     g_a = torch.autograd.grad(aux_loss, lora_params,
                                               retain_graph=True, allow_unused=True)
-                    # Unlike the sem block below, g_a is None for every layer past aux_layer BY
-                    # DESIGN (the aux graph ends there) - filtering None independently on each
-                    # side (as the sem block does) would compare two flattened vectors of
-                    # DIFFERENT lengths (fc over all 24 layers, fa over 0..aux_layer only), so
+                    # For occ/rel, g_a is None for every layer past aux_layer BY DESIGN (the aux
+                    # graph ends there). For attn_rank/attn_mass/gradcam, g_a is expected to be
+                    # non-None almost everywhere (the aux graph reaches every LoRA layer + the
+                    # predictor - see the Stage-0 smoke test). Either way, filtering None
+                    # independently on each side (as the sem block does) would compare two
+                    # flattened vectors of DIFFERENT lengths whenever they genuinely differ, so
                     # numel() never matches and this block silently never runs. Restrict BOTH to
                     # the positions where the aux gradient exists - the "shared trunk" the
                     # per-layer block below already gets right per-bucket.
@@ -1522,9 +1773,13 @@ def main():
             # At --crash-weight 0 (Stage A), crash_loss is still a free diagnostic of
             # whether the frozen head still fits the drifting representation; it
             # just contributes zero gradient.
+            # aux_lambda_used == args.aux_weight for occ/rel and for attn_rank/attn_mass/
+            # gradcam under --aux-schedule constant; it is the warm_on_off-scheduled value
+            # otherwise (see the Stage AA-H aux block above) - NEVER args.aux_weight
+            # directly, or the on/off schedule would be computed but silently unused.
             loss = (args.crash_weight * crash_loss
                     + args.semantic_weight * sem_loss_combined
-                    + args.aux_weight * aux_loss) / args.grad_accum
+                    + aux_lambda_used * aux_loss) / args.grad_accum
             loss.backward()
             total_crash += crash_loss.item()
             total_sem += sem_loss_combined.item()
@@ -1637,6 +1892,31 @@ def main():
                      f"steps  |g_crash|={aux_grad_norm_crash:.4f}  |g_aux|={aux_grad_norm_aux:.4f}  "
                      f"lambda*|g_aux|/|g_crash|={aux_rel:.3f}")
 
+        # Stage AA-H epoch summary (attn_rank/attn_mass/gradcam) - separate from the occ/rel
+        # block above since these modes have no aux_head. rho_PV/rho_PB are the SAME ratios
+        # attn_rank's margin targets (see --aux-margin's help) - watching them here is what
+        # tells us, per epoch, whether the mechanism actually moved.
+        avg_aux_h_entropy = aux_h_entropy_sum / aux_h_n if aux_h_n else float("nan")
+        avg_aux_h_rho_pv = aux_h_rho_pv_sum / aux_h_n if aux_h_n else float("nan")
+        avg_aux_h_rho_pb = aux_h_rho_pb_sum / aux_h_n if aux_h_n else float("nan")
+        if args.aux_mode in {"attn_rank", "attn_mass", "gradcam"}:
+            print(f"  [aux-H] aux_loss={avg_aux:.4f}  n_aux_missing={n_aux_missing}/{n}  "
+                  f"lambda_last={aux_h_lambda_last:.4f}  entropy={avg_aux_h_entropy:.3f}  "
+                  f"rho_P/V={avg_aux_h_rho_pv:.3f}  rho_P/B={avg_aux_h_rho_pb:.3f}")
+            if aux_cos_n:
+                # THE lambda-pilot readout: lambda* = target_ratio * |g_crash|/|g_aux|, same
+                # procedure as AA-rel/AA-occ's original pilot (see RUNBOOK_pod.md), just backed
+                # by the widened gate above instead of the old occ/rel-only one.
+                pilot_lambda_at_01 = (0.1 * aux_grad_norm_crash / aux_grad_norm_aux
+                                      if aux_grad_norm_aux else float("nan"))
+                pilot_lambda_at_03 = (0.3 * aux_grad_norm_crash / aux_grad_norm_aux
+                                      if aux_grad_norm_aux else float("nan"))
+                print(f"      [grad] cos(crash,aux)={aux_grad_cos_mean:+.4f}  "
+                     f"conflicting={100*aux_grad_cos_frac_neg:.1f}% of {aux_cos_n} sampled "
+                     f"steps  |g_crash|={aux_grad_norm_crash:.4f}  |g_aux|={aux_grad_norm_aux:.4f}  "
+                     f"lambda*(target=0.1x)={pilot_lambda_at_01:.4f}  "
+                     f"lambda*(target=0.3x)={pilot_lambda_at_03:.4f}")
+
         # `_j` centralises the NaN->null guard. json.dumps defaults to allow_nan=True
         # and emits a bare `NaN` token, which is INVALID json: python's own loads()
         # accepts it so it survives local inspection, but jq/JS/Go and most
@@ -1715,6 +1995,13 @@ def main():
                 "aux_grad_norm_crash": _j(aux_grad_norm_crash),
                 "aux_grad_norm_aux": _j(aux_grad_norm_aux),
                 "aux_grad_cos_n_sampled": aux_cos_n,
+                # Stage AA-H (attn_rank/attn_mass/gradcam) - null-safe the same way (0/nan by
+                # construction when --aux-mode is none or occ/rel).
+                "aux_h_lambda_last": _j(aux_h_lambda_last),
+                "aux_h_entropy": _j(avg_aux_h_entropy),
+                "aux_h_rho_pv": _j(avg_aux_h_rho_pv),
+                "aux_h_rho_pb": _j(avg_aux_h_rho_pb),
+                "aux_h_n": aux_h_n,
                 "n_failed": n_failed, "n_val_failed": n_val_failed,
                 # epoch_s = THIS epoch; elapsed_s = cumulative since run start.
                 # Only the cumulative one existed before, logged under a name that
