@@ -513,6 +513,33 @@
   the deferred Stage 2 kinematic-target design (α, g, closing_rate, lane) from before Stage AA
   existed — rather than any further attention/gradient-location supervision. Not yet scoped as a
   new plan; this is a diagnosis, not a committed next stage.
+- **CORRECTION (same day, pooled 1,344-clip re-analysis — EXPERIMENTS.md "Re-analysis 2026-09-26"):**
+  the FP-based parts of the three bullets above are **wrong or unsupported**. (1) `attn_rank` does
+  not raise FP: at matched recall its FPR equals its seed-0 twin A1-compress256; the "66-67 vs 54-62"
+  gap was seed-to-seed operating-point variation on half the test set. Verdict = null. (2)
+  `attn_mass` ep4's FP blowout is a calibration shift (AP and FPR@TPR.85 unchanged); only ep8 is truly
+  worse. (3) The flip analysis (0.21 vs 0.05) is equally explained by a monotone score shift, so it
+  is not evidence for the proximity confound. **What stands:** a 2x-40x attention shift left AP flat
+  → attention placement is not the bottleneck; the kinematic direction is a hypothesis.
+- **Comparing arms by FP/FN at threshold 0.5 across different training seeds** → rejected as a gate
+  (2026-09-26). It mixes calibration/operating point with discrimination. Use FPR at matched recall
+  (TPR 0.85/0.90) or a threshold chosen on val, and compare against the same-seed twin.
+- **Judging an arm from one training seed** → rejected. On the pooled 1,344 clips, paired test
+  noise is ±0.003 but seed variance is ~0.014 (seed1 vs seed0). Need ≥3 seeds per arm, compare means.
+- **Rank-1 selection by clip-level val_ap** → do not trust. Val is clip-averaged (+~0.03 vs
+  window-level), in-distribution, and flat while test degrades at late epochs; it picked attn_mass's
+  worst epoch. Prefer a fixed early epoch (2) or mean-over-epochs, or a val built to mimic test.
+
+## Unresolved (new, 2026-09-26)
+- **Negative-sampling mismatch:** Nexar test negatives are cut at the video midpoint ± noise
+  (dataset paper §4.1); our training negatives were deliberately moved away from the midpoint
+  (MID-10/-8/-4). Should the training pool add midpoint-aligned negatives (the clips that produced
+  43% FP) so train matches test? BADAS-2.0 attributes most of its FP reduction to hard negatives.
+  Cheap to try with crash-only training; not decided.
+- **Bounding-box looming under hood occlusion (user, 2026-09-26):** close cars lose their lower part
+  behind the ego hood, so box height stops growing (or shrinks) exactly when the car is closest.
+  Any kinematic target must detect truncation (box touching the hood/frame edge) and use
+  truncation-robust cues (top-edge motion, width, texture-scale expansion inside the visible box).
 
 - ~~How should Stage AA.1's virtual-corridor threat ranking handle wide intersections (A: widen corridor, B: size/proximity signal, C: CLRerNet)?~~ **RESOLVED 2026-09-15: none of the three** — the corridor was replaced by per-frame YOLOPv2 drivable/lane path tracing (see rejected options above).
 - ~~Stage 4 go-ahead: targets α, g, closing_rate, lane per selected object — proceed, or change the target set after the overlay review?~~ **SUPERSEDED 2026-09-19**: Stage AA's actual Stage 1 used a single per-token relevance/occupancy BCE channel instead (see the Stage AA token-relevance section above); the α/g/closing_rate/lane kinematic channels remain the deferred **Stage 2** design (not started — Stage 1 itself did not beat A1-compress256, so Stage 2 is on hold pending a decision on Stage 1's negative result, see PROJECT_STATE.md's 2026-09-24 status block).

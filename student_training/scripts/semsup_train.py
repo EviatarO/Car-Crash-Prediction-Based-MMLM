@@ -560,7 +560,16 @@ def evaluate_val(badas, examples, device, predictor=None, siglip_model=None,
               f"(n_pos={n_val_pos}/{n_val_clips} clips) - selection signal is worse "
               f"than guessing the majority class on this split")
 
+    # Per-window AP: the unit the test set uses (one window per clip), so this is the val number
+    # that is comparable to test_AP. Logged only - clip-level val_ap stays the selector because it
+    # tracked test better across epochs (Spearman, 6 runs, 2026-09-26).
+    win_pairs = [p for pairs in by_clip.values() for p in pairs]
+    win_labels = [l for _, l in win_pairs]
+    val_ap_window = (average_precision_score(win_labels, [s for s, _ in win_pairs])
+                     if len(set(win_labels)) >= 2 else float("nan"))
+
     retrieval_stats = {}
+    retrieval_stats["val_ap_window"] = val_ap_window
     retrieval_stats["val_prevalence"] = val_prevalence
     retrieval_stats["val_n_pos_clips"] = n_val_pos
     retrieval_stats["val_n_clips"] = n_val_clips
@@ -1851,6 +1860,7 @@ def main():
         print(f"  epoch {epoch}/{args.epochs}  crash_loss={avg_crash:.4f}  "
               f"sem_loss={avg_sem:.4f}  val_crash_loss={val_crash_loss:.4f}  "
               f"val_sem_loss={val_sem_loss:.4f}  val_ap={val_ap:.4f}  "
+              f"val_ap_window={retrieval_stats.get('val_ap_window', float('nan')):.4f}  "
               f"train_val_gap={train_val_gap:.4f}  lr={cur_lr:.2e}"
               + (f"  head_lr={head_lr:.2e}" if head_lr is not None else "")
               + f"  ({elapsed:.1f}s)")
@@ -1959,6 +1969,7 @@ def main():
                 "val_total_loss": _j(val_total_loss),
                 "train_val_gap": _j(train_val_gap),
                 "val_ap": _j(val_ap),
+                "val_ap_window": _j(retrieval_stats.get("val_ap_window", float("nan"))),
                 # prevalence floor for val_ap - see evaluate_val()'s WARN (project
                 # review 2026-09-06 §4.3): a val_ap below this is worse than
                 # guessing the majority class, not just "a low score".

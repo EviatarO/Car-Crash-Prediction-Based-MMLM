@@ -1756,3 +1756,85 @@ the classifier already had, rather than teaching it to distinguish "closing in d
 "nearby but not converging" - because the relevance/partner label used as the aux target encodes
 *which object matters*, not *whether its trajectory implies a hit*, so there's no signal in the
 loss that could teach that distinction in the first place.
+
+## Re-analysis 2026-09-26: pooled 1,344-clip test, val-vs-test gap, literature (CORRECTS parts of the Stage 2a/2b verdicts above)
+
+**Protocol.** Each arm at its val-selected epoch; private `test_results_epNN.jsonl` (677) + public
+`scores_public/*.jsonl` (667) pooled = the full Nexar test set (1,344 clips, 672/672, no id overlap).
+Paired bootstrap (5,000 resamples of clips) vs **A1-compress256 (same init/split seed 0 as every
+AA-H arm)**. FP compared at **matched recall** (FPR at TPR=0.85/0.90), not at threshold 0.5.
+Pooled per-arm files: scratchpad only (rebuild from the two sources above).
+
+| Arm | AP (1344) | Kaggle mAP | ΔAP vs A1-c256 [95% CI] | FPR@TPR.85 | FP/FN @0.5 |
+|---|---|---|---|---|---|
+| A0 (frozen BADAS-Open) | 0.861 | 0.869 | — | — | — |
+| **A1-compress256** (seed 0) | 0.911 | 0.916 | — | 0.188 | 126/103 |
+| AA-ctrl-seed1 | 0.897 | 0.899 | −0.014 [−0.021,−0.008] | 0.238 | 122/130 |
+| AA-ctrl-seed2 | 0.910 | 0.912 | −0.001 [−0.004,+0.002] | 0.196 | 99/137 |
+| attn_rank R_all | 0.914 | 0.918 | +0.003 [+0.000,+0.005] | 0.177 | 124/100 |
+| attn_rank R_pos | 0.911 | 0.916 | +0.000 [−0.003,+0.003] | 0.185 | 121/103 |
+| attn_rank partner_pos | 0.911 | 0.915 | −0.000 [−0.003,+0.002] | 0.185 | 121/102 |
+| attn_mass ep8 (val-selected) | 0.881 | 0.884 | −0.030 [−0.042,−0.018] | 0.265 | 156/117 |
+| attn_mass ep4 (diag) | 0.910 | 0.915 | −0.001 [−0.011,+0.006] | 0.176 | 218/40 |
+
+**Corrections to the verdicts above:**
+1. **`attn_rank` does NOT increase FP.** At matched recall its FPR equals or slightly beats its seed-0
+   twin (0.177-0.185 vs 0.188), and FP/FN at 0.5 are ~identical to A1-compress256. The earlier "66-67
+   vs 54-62" comparison was against seeds 1/2 on the public half only — seed-to-seed differences in
+   operating point (seed2: 99 FP / 137 FN) masquerading as a treatment effect. Correct verdict:
+   **null effect** (R_all +0.003 is paired-significant but ~5x smaller than training-seed variance).
+2. **`attn_mass` ep4's FP=121/218 is a calibration shift, not worse discrimination** (same AP, FPR at
+   matched recall 0.176 ≈ control). The genuinely harmful part is late-epoch degradation (ep8: −0.030,
+   CI excludes 0) plus val_ap selecting ep8.
+3. **The "close-call amplification" flip evidence is weak**: a monotone upward shift of all scores
+   also flips the highest-scoring negatives first, so median-ctrl-score 0.21 vs 0.05 among flipped
+   negatives is expected from calibration alone. It does not by itself support the proximity-confound
+   diagnosis.
+4. **What survives:** attention moved 2x (rank) to 40x (mass) with **zero change in ranking quality**
+   (AP flat within CI) → attention placement is not the bottleneck. The kinematic direction remains a
+   hypothesis, not a demonstrated one.
+
+**Resolution / noise (answers "is 677 enough?"):** single-arm AP 95% CI on 1344 ≈ ±0.017; paired ΔAP
+CI ≈ ±0.003 — pooling makes *test* noise small. The binding constraint is **training-seed variance**:
+seed1 vs seed0 = −0.014 (CI excludes 0), seed2 vs seed0 = −0.001. Caveat: the 1,344 clips come from
+only **568 source videos** (up to 3 TTE crops per video, Nexar paper §4.1), so clip-level bootstrap
+CIs are somewhat optimistic. Any future claim needs ≥3 seeds per arm, compared on seed means.
+
+**Why val_ap reads 0.94-0.95 while test is ~0.90:**
+- **Metric definition (~+0.03):** `evaluate_val` averages the scores of a video's 1-3 windows
+  (clip-level, 221 clips); test is one window per clip. Window-level val AP from `val_scores_ep*` is
+  0.91-0.93, not 0.95.
+- **In-distribution val, blind to late-epoch drift:** early epochs val≈test (seed2 ep1: 0.918 vs
+  0.911); later val stays flat while test falls (seed1 ep8: 0.918 vs 0.854). Val is drawn from the
+  same pool and sampling rules as train, so it cannot see the train→test shift that grows with
+  training → rank-1 selection picks late, degraded epochs.
+- **Negative-sampling mismatch (confirmed from the Nexar paper §4.1):** test negatives end at a fake
+  event time = **video midpoint + Gaussian noise**. `build_train4500_manifest.py` deliberately moved
+  our negatives *away* from the midpoint (MID-10/-8/-4) because midpoint windows produced 43% FP at
+  0.99+ confidence. So train/val never contain the kind of negative window the test set samples. A0
+  (untrained) has equal FPR@0.5 on val and test negatives (0.37/0.38); after fine-tuning val FPR drops
+  to 0.04-0.15 but test only to 0.13-0.30 — training fixes train-like negatives, not test-like ones.
+  (Nexar labels near-misses as POSITIVE; test negatives are regular driving, midpoint-cut.)
+
+**Literature context (Nexar test, 1,344 clips):**
+- BADAS-Open (1.5k videos): AP 0.86 (matches our A0 0.861). BADAS-1.0 (40k proprietary videos): AP
+  0.91, Kaggle mAP 0.925. BADAS-2.0 (178.5k labeled videos ≈2M clips + 2.25M unlabeled videos for
+  SSL): Kaggle mAP 0.940, FPR 10.9%→4.6%, largely attributed to mined **hard negatives**. Data scaling
+  is logarithmic (BADAS Fig. 6).
+- FLaRA (2026, same 1.5k train): AP 0.866; its aux future-latent loss adds +1.1 AP (0.855→0.866),
+  single run, no seed/CI analysis.
+- An LLM-agent search over 10,469 configurations (arXiv 2603.15916, V-JEPA2 features) converges to
+  AP 0.9245 on dashcam collision detection (power-law convergence).
+- **Our A1-compress256 (1.5k videos) = AP 0.911 / Kaggle mAP 0.916 ≈ BADAS-1.0 (40k videos).** We are
+  already at the level that cost Nexar ~27x our data; the next +0.025 cost them ~4.5x more labeled
+  data plus 2.25M videos of domain SSL. Realistic headroom from method changes at our scale: ~+0.01.
+
+**Follow-ups (same day):**
+- **Window-level vs clip-level val AP as epoch selector** (6 runs with per-epoch val+test dumps):
+  clip-level tracks test better (Spearman vs test AP higher in 5/6 runs; selected-epoch test AP 0.9056
+  clip vs 0.9018 window). `semsup_train.py` now LOGS `val_ap_window` (comparable to test, one window
+  per clip) in the epoch line and epoch_metrics.jsonl, but still SELECTS by clip-level `val_ap`.
+- **Test AP falls with every epoch past ~1-2** (AA-ctrl-seed2 private: 0.911, 0.906, 0.908, 0.902,
+  0.890, 0.891, 0.880, 0.872). Averaging epochs 1-3 = 0.9105; all 8 = 0.9040. Longer training hurts.
+- **3-seed ensemble** (seed0/1/2 controls, pooled 1,344): 0.9087 vs mean single seed 0.9057 vs best
+  seed 0.9109. Ensembling removes bad-seed risk but does not raise the ceiling.

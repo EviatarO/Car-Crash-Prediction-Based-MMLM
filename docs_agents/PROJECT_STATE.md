@@ -1,7 +1,24 @@
 <!-- handoff-month: 2026-09 -->
 # Project State
 
-## ⚠️ 2026-09-26 status update — Stage AA-H CLOSED, diagnosis revised
+## ⚠️ 2026-09-26 (later) — CORRECTION after pooled 1,344-clip re-analysis — read this first
+
+Full detail: EXPERIMENTS.md "Re-analysis 2026-09-26". Short version:
+- **`attn_rank` is a null result, not an FP regression** (at matched recall it equals its seed-0 twin
+  A1-compress256; the FP gap in the block below was seed operating-point noise on half the test set).
+  `attn_mass`: ep4 = calibration shift only; ep8 = genuinely worse (−0.030 AP) and val_ap selected it.
+- **Evaluation rules from now on:** pool private+public (1,344 clips); paired bootstrap vs the
+  same-seed twin; FP at matched recall; ≥3 training seeds (seed variance ~0.014 >> paired test noise
+  ~0.003); don't trust clip-level val_ap rank-1 selection.
+- **Why val_ap ≈ 0.95:** clip-averaged metric (+~0.03), in-distribution val, and a confirmed
+  train/test negative-sampling mismatch (test negatives are midpoint-cut; ours avoid the midpoint).
+- **Where we stand vs literature:** A1-compress256 = AP 0.911 / Kaggle mAP 0.916 on 1,344 clips ≈
+  BADAS-1.0 (40k videos). BADAS-2.0 needed ~178k labeled videos + 2.25M SSL videos for mAP 0.940.
+  Published small-data methods on this benchmark: 0.85-0.87.
+- **Candidate next steps (none started):** midpoint-aligned hard negatives in training (cheap,
+  crash-only); Stage K kinematic targets with truncation-aware looming; multi-seed protocol.
+
+## ⚠️ 2026-09-26 status update — Stage AA-H CLOSED, diagnosis revised (FP claims below partly corrected above)
 
 **User decision: close Stage AA-H (no `gradcam` run), reassess the diagnosis.** The diagnosis
 that motivated this whole stage — "the crash head underperforms because it doesn't attend enough
