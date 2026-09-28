@@ -1838,3 +1838,122 @@ CIs are somewhat optimistic. Any future claim needs ≥3 seeds per arm, compared
   0.890, 0.891, 0.880, 0.872). Averaging epochs 1-3 = 0.9105; all 8 = 0.9040. Longer training hurts.
 - **3-seed ensemble** (seed0/1/2 controls, pooled 1,344): 0.9087 vs mean single seed 0.9057 vs best
   seed 0.9109. Ensembling removes bad-seed risk but does not raise the ceiling.
+
+**Gradient propagation across training (2026-09-26, from epoch_metrics.jsonl / grad_trace.jsonl):**
+no aux loss had a vanishing gradient. On the shared LoRA parameters, |g_aux| stayed at 0.8-4.2 vs
+|g_crash| 2.6-5.8 for every AA-H arm over all 8 epochs (λ-weighted pull 0.25-0.55x while on, as
+designed). Stage AA probes: aux/crash norm ratio decays ~5x from the tap layer down to layer 0
+(e.g. AA-rel ep1 0.075 → 0.014) — attenuation, not vanishing. The consistent signal is
+**direction**: cos(g_crash, g_aux) ≈ 0 for every probe arm and every attn_rank arm (|cos| ≤ 0.03,
+~50% of steps conflicting = random sign), and only +0.05..+0.13 for attn_mass. The aux gradient
+arrives with full magnitude but points almost entirely in directions the crash loss is
+indifferent to — the mechanistic reason attention moved while AP did not. attn_mass's small
+positive alignment matches it being the only arm that changed outputs (calibration shift, late
+drop). Caveats: AA-H-rank-R_all has only 1-57 probe samples/epoch (pre-fix probe bug) — noisy;
+AA-H arms did not log per-layer grads (--per-layer-grads off); gradcam was never trained.
+**Use:** cos(g_crash, g_aux) from the 1-epoch λ pilot is a cheap pre-screen for any future aux
+target — near-zero predicts no AP effect.
+
+## Overnight run 2026-09-27: midpoint negatives beat control, full pool loses to it
+
+Two crash-only experiments, 3 seeds each (init_seed/seed 0/1/2, split_seed=0), 3 epochs each
+(keep-top-k 3), A1-compress256's exact recipe otherwise (LoRA r=16/α=32 on query,key,value,
+lr 2e-4 constant, compress256, crash head frozen, `lora_init=None` — fresh random LoRA init each
+run, same as every arm this session). Scored on BOTH private 677 and public 667 (pooled 1,344,
+no overlap) at every one of the 3 kept epochs. Driver: `outputs/overnight_2026-09-27/
+run_overnight.sh`; results: `outputs/overnight_2026-09-27/{midneg,fullpool}-seed{0,1,2}/`.
+
+**midneg**: `outputs/semantic_captions/Caption_Train4500_MidpointNeg_1761.jsonl` — same 1,761
+windows, same 564 negative videos, only the 905 negative windows are re-cut. Built by
+`build_midpoint_negatives.py`: per negative video, one fake-event time = true midpoint +
+N(0, 1.0s) (drawn once per video, seeded, so a video's multiple old buckets share one consistent
+fake event), then 3 sub-windows cut 0.5/1.0/1.5s before it — replacing MID-10/-4/-8's fixed
+off-midpoint offsets with the Nexar test protocol's own negative-sampling method (dataset paper
+§4.1). Old→new bucket mapping keeps the group index fixed (MID-10→grp0/0.5s, MID-4→grp1/1.0s,
+MID-8→grp2/1.5s). Extracted locally from the raw mp4s (905/905 windows, 0 errors, 0 floored).
+
+**fullpool**: `outputs/semantic_captions/Pool_Train4500_Full_4446.jsonl` — the full 4,446-window
+pool (1,482 videos, 2,223/2,223 balanced) instead of the mined 1,761. Original MID-10/-4/-8
+negative sampling, unchanged.
+
+**Result (mean over the 9 checkpoints per arm; ΔAP is PAIRED against the same seed's control at
+the same epoch — A1-compress256=seed0, AA-ctrl-seed1, AA-ctrl-seed2 — using their epoch 1-3
+checkpoints, newly scored on public this same day, see below):**
+
+| Arm | mean AP (pooled 1,344) | paired ΔAP vs matched control | positive pairs |
+|---|---|---|---|
+| control (A1-compress256 + ctrl-seed1/2) | 0.9077 | — (reference) | — |
+| **midpoint negatives** | **0.9158** | **+0.0082** | **9/9** |
+| full pool | 0.8986 | −0.0091 | 1/9 |
+
+Holds at every individual epoch too (3-seed mean per epoch): control 0.9070/0.9085/0.9076 (flat —
+seed noise, not a trend, since only 3 epochs were run here); midneg 0.9185/0.9157/0.9133 (beats
+control at all 3); fullpool 0.8998/0.9051/0.8907 (loses to control at all 3).
+
+**Confusion matrix @ threshold 0.5, pooled 1,344, averaged over 9 checkpoints:**
+
+| Arm | TP | FN | FP | TN | Recall | Specificity | Precision | Accuracy |
+|---|---|---|---|---|---|---|---|---|
+| control | 581.1 | 90.9 | 156.4 | 515.6 | 0.865 | 0.767 | 0.788 | 0.816 |
+| midpoint negatives | 535.4 | 136.6 | 103.8 | 568.2 | 0.797 | 0.846 | 0.838 | 0.821 |
+| full pool | 606.2 | 65.8 | 195.7 | 476.3 | 0.902 | 0.709 | 0.756 | 0.805 |
+
+Midpoint negatives cut FP 34% (156→104) and raise specificity 8pt, trading for more misses
+(91→137, i.e. a genuine operating-point shift toward caution, not just better ranking); overall
+accuracy still rises (0.816→0.821). Full pool moves the opposite way (more FP, worse specificity)
+— **correction to an earlier same-day note**: full pool's FPR at MATCHED RECALL (TPR 0.85) is
+0.208, essentially equal to control's 0.209 — its problem is lower AP/ranking quality, not a
+distinct FP-calibration defect. Per-checkpoint spread is wide for both non-control arms (midneg
+FN range 79-265, fullpool FP range 157-225) — not yet a single stable deployment threshold.
+
+**Per-TTE-horizon AP (pooled, mean over 9 checkpoints; each bucket's negatives are the fake-event
+protocol for ALL arms including control here, since these are Nexar's own test buckets, not a
+training-side split):**
+
+| Arm | TTE 0.5s (n=568) | TTE 1.0s (n=464) | TTE 1.5s (n=312) | Kaggle mAP (mean of 3) |
+|---|---|---|---|---|
+| control | 0.9262 | 0.9216 | 0.8852 | 0.9110 |
+| midpoint negatives | 0.9395 | 0.9265 | 0.8705 | 0.9122 |
+| full pool | 0.9094 | 0.9142 | 0.8890 | 0.9042 |
+
+Midpoint negatives win clearly at 0.5s/1.0s but LOSE at 1.5s (0.8705 vs control's 0.8852, largest
+seed spread of the three, sd 0.0114) — on overall AP the gain is +0.008, but on the officially
+weighted Kaggle mAP (equal weight per horizon) it shrinks to +0.001, since the 1.5s loss cancels
+most of the 0.5s/1.0s gain. **1.5s TTE is the weakest bucket for every arm** (0.87-0.89 vs
+0.91-0.94 elsewhere) and is now the highest-value target: a method that lifts 1.5s without
+regressing the other two would move both overall AP and Kaggle mAP together.
+
+**Selection-bias note**: the single best checkpoint observed anywhere this session is
+midneg-seed0-epoch1 at pooled AP 0.9237 — this is NOT the number to report. It is 1 of 9
+midneg draws (3 seeds x 3 epochs) and sits within ordinary seed noise at epoch 1 alone (3-seed
+sd=0.0045). The reportable number is the mean (0.9158 over 9, or 0.9185 at epoch 1 across 3
+seeds), stated with its spread.
+
+**Loss curves (crash_loss) confirm real learning, not stagnation**: every seed's train crash_loss
+drops monotonically through all 3 epochs (e.g. midneg-seed0: 0.692→0.499→0.446), while val/test AP
+plateaus or wobbles after epoch 1 and `train_val_gap` grows for 2/3 seeds — classic early
+overfitting: epoch 1 captures most of the transferable signal, epochs 2-3 mostly sharpen
+confidence on training-specific patterns. Consistent with Stage 1's 8-epoch finding (test AP
+declines almost every epoch past 1-2).
+
+**Comparison with literature, same pooled 1,344-clip Nexar test set:**
+
+| Model | Training data | Overall AP | Kaggle mAP |
+|---|---|---|---|
+| BADAS-Open (paper 0.86; our reproduction) | 1.5k videos | 0.861 | 0.869 |
+| **Ours, midpoint negatives (mean of 9)** | **same 1.5k videos** | **0.916** | **0.912** |
+| BADAS-1.0 (paper) | 40k videos | 0.91 | 0.925 |
+| BADAS-2.0 (paper) | 178.5k labeled + 2.25M unlabeled (SSL) | — | 0.940 |
+
+We reproduce BADAS-Open almost exactly (0.861 vs 0.86 paper), which calibrates the pipeline for
+this cross-paper comparison. Our overall AP matches/slightly beats BADAS-1.0 on 1/27th its data;
+Kaggle mAP is 0.013 behind, entirely attributable to the 1.5s weak point above.
+
+**Architecture note (2026-09-27, in response to "did we change the architecture"): no.** Every
+arm this entire project uses BADAS-Open's published architecture unmodified at inference — LoRA
+(r=16, on query/key/value, 0.84% of params) is a training-time adapter that merges into the
+existing weight matrices (W = W0 + (alpha/r)*B*A); nothing is added to the forward graph. Gains
+to date come from preprocessing (full-frame vs crop, +0.013 AP), data curation (curated 1,761 >
+full 4,446), and negative-sampling protocol (this entry). No BADAS-2.0 architecture element
+(distillation, SSL pretraining) has been adopted — see DECISIONS.md's open items for which of
+BADAS-2.0's §5.3 (two-phase KD) and §6.1 (training-free attention heatmaps) ideas are candidates.

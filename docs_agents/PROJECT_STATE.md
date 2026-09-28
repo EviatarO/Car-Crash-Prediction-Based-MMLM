@@ -1,6 +1,38 @@
 <!-- handoff-month: 2026-09 -->
 # Project State
 
+## ⚠️ 2026-09-27 — Overnight run DONE: midpoint negatives confirmed a real gain; 1.5s TTE is the new priority
+
+**Read this block first.** Two crash-only variants, 3 seeds x 3 epochs each, evaluated on the
+pooled 1,344-clip set (private 677 + public 667), paired against matched-seed/epoch controls:
+
+- **Midpoint negatives** (re-cut training negatives to match the Nexar test protocol — fake event
+  at video midpoint + noise, 3 sub-windows 0.5/1.0/1.5s before it, same 564 videos/905 windows,
+  only the cut point changes) — **mean AP +0.0082, 9/9 seed x epoch pairs positive.** Public-set
+  FP at threshold 0.5 down 34% (156→104 avg), specificity +8pt. **Confirmed real, not noise.**
+- **Full pool** (4,446 windows instead of the curated 1,761, unchanged negative sampling) —
+  **mean AP −0.0091, 8/9 pairs negative.** More data with the OLD sampling does not help; the
+  win above is specifically from fixing the sampling mismatch, not pool size.
+- **New weak point found:** midpoint negatives IMPROVE 0.5s/1.0s TTE sharply but slightly HURT
+  1.5s TTE (0.8852→0.8705). On overall AP the net gain is +0.008; on the officially-weighted
+  Kaggle mAP (equal weight per horizon) it shrinks to +0.001, since the 1.5s loss cancels most of
+  the gain. **1.5s TTE is now the weakest bucket for every arm tried (0.87-0.89 vs 0.91-0.94) and
+  the highest-value next target** — see DECISIONS.md's "Unresolved (new, 2026-09-27)".
+- **Current best result vs literature (pooled 1,344 clips):** ours (midpoint neg, mean of 9) =
+  AP 0.916 / Kaggle mAP 0.912, vs BADAS-Open (paper) 0.86, BADAS-1.0 (40k videos, paper) AP 0.91 /
+  mAP 0.925. We reproduce BADAS-Open almost exactly (0.861), which calibrates this comparison.
+  **Not yet publication-ready as a headline number** — needs the epoch fixed in advance (not
+  picked from test-informed prior runs) and confirmed on 2+ more fresh seeds; see DECISIONS.md.
+- **Do NOT report the single best checkpoint (midneg-seed0-ep1, AP 0.9237)** — it's 1 of 9 draws,
+  within ordinary seed noise. Report the mean with its spread.
+- Full tables (CM, per-TTE, per-epoch-per-seed breakdown): EXPERIMENTS.md's "Overnight run
+  2026-09-27" entry. Driver/results: `outputs/overnight_2026-09-27/`.
+- **Pod state:** nothing running or billing. Lesson learned and saved to memory
+  (`pod_results_download_before_stop.md`): future driver scripts must sync results to local BEFORE
+  calling `runpodctl stop pod`, to avoid the resume-just-to-fetch-results cycle hit twice this run.
+- **No architecture change anywhere this project** — LoRA merges into existing weight matrices at
+  inference; every gain to date is preprocessing/data/sampling, not a new module.
+
 ## ⚠️ 2026-09-26 (later) — CORRECTION after pooled 1,344-clip re-analysis — read this first
 
 Full detail: EXPERIMENTS.md "Re-analysis 2026-09-26". Short version:

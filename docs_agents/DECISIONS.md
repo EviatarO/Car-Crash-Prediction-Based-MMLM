@@ -530,12 +530,38 @@
   window-level), in-distribution, and flat while test degrades at late epochs; it picked attn_mass's
   worst epoch. Prefer a fixed early epoch (2) or mean-over-epochs, or a val built to mimic test.
 
-## Unresolved (new, 2026-09-26)
-- **Negative-sampling mismatch:** Nexar test negatives are cut at the video midpoint ± noise
-  (dataset paper §4.1); our training negatives were deliberately moved away from the midpoint
-  (MID-10/-8/-4). Should the training pool add midpoint-aligned negatives (the clips that produced
-  43% FP) so train matches test? BADAS-2.0 attributes most of its FP reduction to hard negatives.
-  Cheap to try with crash-only training; not decided.
+- ~~**Negative-sampling mismatch**: should training add midpoint-aligned negatives so train matches
+  the Nexar test protocol?~~ **RESOLVED 2026-09-27: yes, do it — confirmed to help.** 3 seeds x 3
+  epochs, pooled 1,344-clip eval, paired against matched-seed controls: mean AP +0.0082, 9/9 seed x
+  epoch pairs positive; FP at threshold 0.5 down 34% (156→104), specificity +8pt. Full pool
+  (4,446 windows, unchanged MID-10/-4/-8 sampling) was ALSO tried as a separate variable in the same
+  run and LOSES to the curated 1,761 pool (mean AP −0.0091, 8/9 pairs negative) — more data, same
+  sampling, does not help; the win is specifically from fixing the sampling mismatch, not from pool
+  identity. One regression found: 1.5s-TTE AP drops slightly (0.8852→0.8705) even as 0.5s/1.0s rise
+  sharply, so on the equally-weighted Kaggle mAP the net gain shrinks to +0.001 (vs +0.008 on overall
+  AP). See EXPERIMENTS.md's "Overnight run 2026-09-27" entry for full tables.
+
+## Unresolved (new, 2026-09-27)
+- **1.5s TTE is now the priority target.** It's the weakest bucket for every arm tried
+  (0.87-0.89 AP vs 0.91-0.94 at 0.5s/1.0s), and midpoint negatives made it slightly worse — a method
+  that lifts 1.5s without regressing the other two horizons would move both overall AP and Kaggle
+  mAP together, and would be the strongest candidate result to write up. Candidate approaches,
+  cheapest first, none started: (1) local diagnosis — which 1.5s positives does midneg newly miss,
+  scene type, human-visible-danger timing, attention pointing-game on those clips; (2) horizon-
+  weighted crash loss (upweight 1.5s positives); (3) BADAS-2.0 §5.3-style two-phase knowledge
+  distillation using our own 3-seed ensemble as a soft-label teacher (KL + BCE, then BCE-only phase)
+  — soft/graded targets carry the most information exactly on borderline early-horizon clips;
+  (4) longer temporal stride to capture earlier build-up within the 16-frame window. Judge every
+  variant on Kaggle mAP AND per-bucket AP over 3+ seeds so a 1.5s gain can't hide a 0.5s/1.0s loss.
+- **BADAS-2.0 ideas evaluated, 2026-09-27 (paper: "Beyond the Beep")**: §5.3 two-phase knowledge
+  distillation (student learns from a frozen teacher's soft probabilities + feature matching, then a
+  BCE-only sharpening phase) is a plausible fit for the 1.5s problem above, using our own seed
+  ensemble as teacher (no external BADAS-1.0/2.0 weights available). §6.1 training-free attention
+  heatmaps (late-layer self-attention, temporally weighted toward the alert frame, evaluated via
+  "pointing game" accuracy against ground-truth danger boxes) is a candidate DIAGNOSTIC tool (do our
+  1.5s misses look in the wrong place, or the right place with low confidence) — NOT a supervision
+  signal, since Stage AA-H already showed supervising attention doesn't move ranking. BADAS-2.0's
+  self-supervised pretraining on 2.25M videos is not feasible at our scale.
 - **Bounding-box looming under hood occlusion (user, 2026-09-26):** close cars lose their lower part
   behind the ego hood, so box height stops growing (or shrinks) exactly when the car is closest.
   Any kinematic target must detect truncation (box touching the hood/frame edge) and use
