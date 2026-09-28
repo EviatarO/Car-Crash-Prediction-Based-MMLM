@@ -47,6 +47,7 @@ A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
 AAT = MMLM_AI / "outputs" / "aa_token_aux"
 AAH = MMLM_AI / "outputs" / "aa_head_attn"
+OVN = MMLM_AI / "outputs" / "overnight_2026-09-27"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 TEST_MANIFEST = MMLM_AI / "dataset" / "manifests" / "test_manifest_hires.jsonl"
 
@@ -88,6 +89,19 @@ TEST_SCORES = {
     "AA-H-rank-R_pos": (AAH / "AA-H-rank-R_pos" / "train" / "test_results_ep02.jsonl", "ground_truth"),
     "AA-H-rank-partner_pos": (AAH / "AA-H-rank-partner_pos" / "train" / "test_results_ep02.jsonl", "ground_truth"),
     "AA-H-mass-R_pos": (AAH / "AA-H-mass-R_pos" / "train" / "test_results_ep08.jsonl", "ground_truth"),
+    # Overnight run 2026-09-27 (docs_agents/EXPERIMENTS.md "Overnight run 2026-09-27"): midpoint
+    # negatives (re-cut training negatives to match the Nexar test protocol) vs full pool (4,446
+    # windows, old negative sampling), 3 seeds each. Each points at its own val-selected epoch
+    # (1-3), same convention as every other arm here. Midpoint negatives found real, consistent
+    # AP gains overall but a slight loss specifically at TTE 1.5s - these per-clip dumps are what
+    # lets that be inspected window-by-window (filter window=TTE 1.5s, filter the arm column to
+    # "wrong", then play each clip).
+    "midneg-seed0": (OVN / "midneg-seed0" / "train" / "test_results_ep02.jsonl", "ground_truth"),
+    "midneg-seed1": (OVN / "midneg-seed1" / "train" / "test_results_ep02.jsonl", "ground_truth"),
+    "midneg-seed2": (OVN / "midneg-seed2" / "train" / "test_results_ep01.jsonl", "ground_truth"),
+    "fullpool-seed0": (OVN / "fullpool-seed0" / "train" / "test_results_ep01.jsonl", "ground_truth"),
+    "fullpool-seed1": (OVN / "fullpool-seed1" / "train" / "test_results_ep01.jsonl", "ground_truth"),
+    "fullpool-seed2": (OVN / "fullpool-seed2" / "train" / "test_results_ep03.jsonl", "ground_truth"),
 }
 POOL1761_ARMS = ["A0", "A1", "A1-compress256", "B-v1", "B-v2", "B-v3", "P1"]
 # a1cont is the crash-only control started from the identical A1 weights - it is what V10

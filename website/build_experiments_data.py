@@ -56,6 +56,7 @@ A1F = MMLM_AI / "outputs" / "a1fail321"
 A1C = MMLM_AI / "outputs" / "a1_compress256"
 AAT = MMLM_AI / "outputs" / "aa_token_aux"
 AAH = MMLM_AI / "outputs" / "aa_head_attn"
+OVN = MMLM_AI / "outputs" / "overnight_2026-09-27"
 CAPS = MMLM_AI / "outputs" / "semantic_captions"
 MANIFESTS = MMLM_AI / "dataset" / "manifests"
 TEST_MANIFEST = MANIFESTS / "test_manifest_hires.jsonl"
@@ -106,6 +107,12 @@ EXPECTED_CM = {
     "AA-H-rank-R_pos": dict(n=677, tp=287, fn=51, fp=55, tn=284),
     "AA-H-rank-partner_pos": dict(n=677, tp=288, fn=50, fp=55, tn=284),
     "AA-H-mass-R_pos": dict(n=677, tp=277, fn=61, fp=77, tn=262),
+    "midneg-seed0": dict(n=677, tp=260, fn=78, fp=45, tn=294),
+    "midneg-seed1": dict(n=677, tp=269, fn=69, fp=47, tn=292),
+    "midneg-seed2": dict(n=677, tp=202, fn=136, fp=16, tn=323),
+    "fullpool-seed0": dict(n=677, tp=300, fn=38, fp=77, tn=262),
+    "fullpool-seed1": dict(n=677, tp=288, fn=50, fp=75, tn=264),
+    "fullpool-seed2": dict(n=677, tp=314, fn=24, fp=107, tn=232),
 }
 
 
@@ -1268,6 +1275,12 @@ EXPECTED_CM_PUBLIC = {
     "AA-H-rank-R_pos":       dict(n=667, tp=282, fn=52, fp=66, tn=267),
     "AA-H-rank-partner_pos": dict(n=667, tp=282, fn=52, fp=66, tn=267),
     "AA-H-mass-R_pos":       dict(n=667, tp=278, fn=56, fp=79, tn=254),
+    "midneg-seed0":   dict(n=667, tp=259, fn=75, fp=48, tn=285),
+    "midneg-seed1":   dict(n=667, tp=269, fn=65, fp=52, tn=281),
+    "midneg-seed2":   dict(n=667, tp=205, fn=129, fp=17, tn=316),
+    "fullpool-seed0": dict(n=667, tp=297, fn=37, fp=91, tn=242),
+    "fullpool-seed1": dict(n=667, tp=288, fn=46, fp=82, tn=251),
+    "fullpool-seed2": dict(n=667, tp=309, fn=25, fp=118, tn=215),
 }
 
 

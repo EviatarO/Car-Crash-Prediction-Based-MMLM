@@ -258,7 +258,9 @@ section.block .lede{color:var(--muted);font-size:16.5px;max-width:640px;
 .pickgroup-t{font-family:var(--mono);font-size:12.1px;letter-spacing:.2em;
              text-transform:uppercase;color:var(--cyan);padding:16px 22px 10px}
 .pickrow{display:block;width:100%;text-align:left;padding:14px 22px;
-         border-top:1px solid #1d2748;transition:.12s;cursor:pointer}
+         border-top:1px solid #1d2748;transition:.12s;cursor:pointer;
+         background:transparent;border-left:none;border-right:none;border-bottom:none;
+         font:inherit;color:inherit;appearance:none}
 .pickrow:hover{background:rgba(0,191,255,.06)}
 .pickrow-k{display:block;font-weight:700;font-size:16.5px;color:var(--white)}
 .pickrow-d{display:block;color:var(--muted);font-size:14.3px;margin-top:4px;line-height:1.5}
