@@ -115,6 +115,11 @@ def main():
                           "midpoint - the Nexar paper doesn't publish this value")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true", help="plan + print only, extract nothing")
+    ap.add_argument("--complete-horizons", action="store_true",
+                     help="cut ALL of 0.5/1.0/1.5s for every negative video (existing windows are "
+                          "skipped, same seeded fake event so they are reproduced exactly) and write "
+                          "a separate LookAhead_NegWindows manifest; the training captions file is "
+                          "NOT touched")
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in open(SRC_CAPTIONS, encoding="utf-8")]
@@ -131,9 +136,12 @@ def main():
 
     out_rows, plan, errors = [], [], []
     meta_cache = {}
-    for r in neg_rows:
+    if args.complete_horizons:
+        work = [({"video_id": v, "gt_verdict": "NO"}, g) for v in video_ids for g in (0, 1, 2)]
+    else:
+        work = [(r, OLD_GRP[r["horizon_label"]]) for r in neg_rows]
+    for r, grp in work:
         vid = r["video_id"]
-        grp = OLD_GRP[r["horizon_label"]]
         label, suffix, h = NEW_BUCKET[grp]
         try:
             if vid not in meta_cache:
@@ -193,6 +201,16 @@ def main():
 
     print(f"extraction done: new={n_new} skip={n_skip} err={n_err}")
     assert n_err == 0, f"{n_err} window(s) failed to extract - fix before training on this pool"
+
+    if args.complete_horizons:
+        manifest = PROJECT_ROOT / "outputs" / "semantic_captions" / "LookAhead_NegWindows_564x3.jsonl"
+        with open(manifest, "w", encoding="utf-8") as f:
+            for p in plan:
+                f.write(json.dumps({"video_id": p["video_id"], "frames_dir": p["frames_dir"],
+                                    "horizon_label": NEW_BUCKET[p["grp"]][0],
+                                    "t_seconds": round(p["t_new"], 3)}) + "\n")
+        print(f"[wrote] {manifest} ({len(plan)} windows; captions file untouched)")
+        return
 
     final_rows = pos_rows + out_rows
     assert len(final_rows) == len(rows), \

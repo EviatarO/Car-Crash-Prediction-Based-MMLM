@@ -50,9 +50,13 @@ def main():
     ap.add_argument("--train-root", default=str(ROOT / "dataset/train"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--names-file", default=None, help="only extract windows whose directory name is listed (one per line)")
     args = ap.parse_args()
 
     rows = collect(Path(args.train_root))
+    if args.names_file:
+        keep_names = {l.strip() for l in open(args.names_file, encoding="utf-8") if l.strip()}
+        rows = [r for r in rows if r["name"] in keep_names]
     if args.limit:
         rows = rows[: args.limit]
     print(f"windows: {len(rows)} | pos {sum(r['label'] for r in rows)} | neg {sum(1 - r['label'] for r in rows)}")
