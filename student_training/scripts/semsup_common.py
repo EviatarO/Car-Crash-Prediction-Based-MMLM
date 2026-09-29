@@ -211,6 +211,10 @@ class TrainableBadasWrapper:
                 "Run --dry-run-modules on the pod and set the tap point manually."
             )
         self._captured = {}
+        # Stage 2 (look-ahead): the crash classifier, grabbed BEFORE peft reparents the model, and
+        # an optional LookAheadHead whose vote is mixed into the returned logits (see forward_clip).
+        self._classifier = getattr(self.nn_model, "classifier", None)
+        self.lookahead = None
 
         def _pre_hook(_module, args):
             self._captured["patches"] = args[0]   # NOTE: no .detach() -> keeps grad
@@ -378,6 +382,13 @@ class TrainableBadasWrapper:
 
             aux_module.register_forward_hook(_aux_hook)
 
+    def attach_lookahead(self, head):
+        """Stage 2: mix head's vote on the predicted +0.5 s vector into every forward_clip()
+        (training, validation, in-process test scoring and score_checkpoints_on_test.py)."""
+        if self._classifier is None:
+            raise RuntimeError("no .classifier module found on the BADAS model - cannot attach look-ahead")
+        self.lookahead = head
+
     def head_state_dict(self):
         """State dict of ONLY the unfrozen head params (e.g. temporal_processor +
         classifier), keyed by their names inside self.nn_model (peft-prefixed).
@@ -419,6 +430,13 @@ class TrainableBadasWrapper:
         patches = self._captured.get("patches")
         if patches is None:
             raise RuntimeError("probe pre-hook did not fire - tap point is wrong.")
+        if self.lookahead is not None:
+            z = self._captured["pooled"].reshape(1, -1)
+            z_hat = self.lookahead.predict(z)
+            dtype = next(self._classifier.parameters()).dtype
+            vote = self._classifier(z_hat.to(dtype)).float()
+            self._captured["z_hat"] = z_hat
+            logits = logits.float() + self.lookahead.g * vote
         return logits, patches[0]                        # (1,2), (P, D)
 
     def prefetch_clips(self, examples, num_workers=8, prefetch=16, key="frame_paths"):

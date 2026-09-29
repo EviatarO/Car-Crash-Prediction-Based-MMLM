@@ -80,6 +80,7 @@ from semsup_common import (  # noqa: E402
     load_training_examples, clip_level_split, PROJECT_ROOT,
 )
 from vjepa_reason import ResamplerProjector  # noqa: E402
+from lookahead import LookAheadHead, load_features, build_pair_targets  # noqa: E402
 from e4_stageA_badas_open_eval import load_manifest, frame_paths_for  # noqa: E402
 from metrics_core import metrics_from_arrays  # noqa: E402
 # Lifted to module level in semsup_b1_probe.py 2026-08-17 (P1 plan, change #2)
@@ -692,6 +693,22 @@ def main():
                           "applies to positive AND negative windows by each window's own horizon "
                           "(negatives carry TTE_/MIDTEST- horizon labels too), so the class balance "
                           "inside every horizon is unchanged and only the emphasis BETWEEN horizons moves.")
+    ap.add_argument("--lookahead-features", default=None,
+                     help="Stage 2 (1.5s plan): features.npz of FROZEN BADAS-Open pooled vectors (from "
+                          "lookahead_extract_features.py). Enables the Look-Ahead head: a small MLP predicts "
+                          "the vector of the window 0.5 s later (targets = these frozen vectors) and the "
+                          "crash classifier votes on it. Off by default.")
+    ap.add_argument("--lookahead-weight", type=float, default=0.0,
+                     help="lambda on the look-ahead loss MSE(z_hat, z_future)/copy_scale (1.0 = no better "
+                          "than copying). 0 = head + mixing exist but the aux term is not optimized "
+                          "(also what the gradient pilot uses).")
+    ap.add_argument("--lookahead-hidden", type=int, default=256)
+    ap.add_argument("--lookahead-shuffle", action="store_true",
+                     help="control: each window's look-ahead target is the future vector of a DIFFERENT "
+                          "video (same class and horizon step), fixed seeded derangement")
+    ap.add_argument("--lookahead-no-mix", action="store_true",
+                     help="aux-only arm: gate g frozen at 0, so the predicted future never votes and the "
+                          "logits equal the plain model's; the aux loss only shapes the trunk")
     ap.add_argument("--crash-weight", type=float, default=1.0,
                      help="weight on the crash CE term in the optimized loss (default 1.0, "
                           "matching every prior run). 0.0 = Stage A of the P1 two-stage design "
@@ -1255,6 +1272,18 @@ def main():
                   f"(sem_patch_weight={args.sem_patch_weight}  "
                   f"sem_pooled_weight={args.sem_pooled_weight})")
 
+    lookahead = None
+    if args.lookahead_features:
+        lookahead = LookAheadHead(1024, args.lookahead_hidden, gate_frozen=args.lookahead_no_mix).to(device)
+        badas.attach_lookahead(lookahead)
+        la_params = [p for p in lookahead.parameters() if p.requires_grad]
+        trainable += la_params
+        aux_params += la_params
+        print(f"[cfg] look-ahead head: {sum(p.numel() for p in lookahead.parameters()):,} params, hidden="
+              f"{args.lookahead_hidden}, lambda={args.lookahead_weight}, gate "
+              f"{'frozen at 0 (aux-only arm)' if args.lookahead_no_mix else 'learnable, init 0'}, "
+              f"targets {'SHUFFLED (control)' if args.lookahead_shuffle else 'true partner windows'}")
+
     # Learnable InfoNCE temperature(s) (same contract as semsup_b1_probe.py). Must be
     # in the optimizer's param list or they silently stay at their init value. The
     # pooled tap gets its OWN temperature (log_tau_pooled) rather than sharing
@@ -1345,6 +1374,17 @@ def main():
         train_ex, val_ex = clip_level_split(examples, val_frac=args.val_frac, seed=args.split_seed)
         print(f"[data] train={len(train_ex)}  val={len(val_ex)} "
               f"(clip-level split, split_seed={args.split_seed})")
+
+    la_targets, la_copy_scale = None, 1.0
+    if lookahead is not None:
+        la_feats = load_features(args.lookahead_features)
+        _t, la_copy_scale, _miss = build_pair_targets(train_ex, la_feats, shuffle=args.lookahead_shuffle,
+                                                       seed=args.seed)
+        la_targets = {fd: torch.from_numpy(v).to(device).reshape(1, -1) for fd, v in _t.items()}
+        n_pos = sum(1 for e in train_ex if e["frames_dir"] in la_targets and e["label"] == 1)
+        print(f"[lookahead] {len(la_targets)} train windows have a +0.5s target ({n_pos} pos / "
+              f"{len(la_targets) - n_pos} neg); {_miss} lacked features; copy_scale={la_copy_scale:.5f}")
+        assert len(la_targets) > 0, "look-ahead enabled but no training window has a partner target"
 
     # Stage AA-H (child plan 2026-09-24): --aux-label-shuffle's fixed seeded derangement,
     # built once over the TRAIN set only (val never sees the aux loss). See --aux-mode's
@@ -1473,7 +1513,7 @@ def main():
         # None`, which left this None for attn_rank/attn_mass/gradcam and crashed the first
         # time that block tried to use it (caught by a local smoke test before any pod use).
         aux_layer_stats = (defaultdict(lambda: [0.0, 0.0, 0.0, 0])
-                           if (aux_head is not None or args.aux_mode in AA_H_MODES) else None)
+                           if (aux_head is not None or args.aux_mode in AA_H_MODES or lookahead is not None) else None)
         aux_gc_probe_failed = False
         # Stage AA-H (attn_rank/attn_mass/gradcam) diagnostics - separate from the occ/rel
         # accumulators above since these modes have no aux_head/aux_layer at all.
@@ -1657,6 +1697,15 @@ def main():
                         total_epochs=float(args.epochs))
                 aux_h_lambda_last = aux_lambda_used
 
+            # --- Stage 2 look-ahead aux loss: z_hat (from THIS forward_clip) vs the frozen +0.5s vector ---
+            if lookahead is not None:
+                aux_lambda_used = args.lookahead_weight
+                la_t = la_targets.get(ex["frames_dir"])
+                if la_t is None:
+                    n_aux_missing += 1        # 0.5 s windows: no partner, still vote via the mixed logits
+                else:
+                    aux_loss = ((badas._captured["z_hat"] - la_t) ** 2).mean() / la_copy_scale
+
             # --- crash-vs-aux gradient angle (diagnostic only, never optimized) --- Same
             # construction as the crash-vs-semantic probe below, kept as its OWN block (not
             # merged into it) so the semantic-arm probe is untouched byte-for-byte whether or
@@ -1686,7 +1735,7 @@ def main():
             # before trusting the printed lambda*, not by any automated check. This guard skips
             # ONLY this window's diagnostic (not a "failure" - the next window with a live
             # aux_loss tries again normally), instead of ever reaching the broken try/except.
-            if ((aux_head is not None or args.aux_mode in AA_H_MODES) and args.grad_cosine_every
+            if ((aux_head is not None or args.aux_mode in AA_H_MODES or lookahead is not None) and args.grad_cosine_every
                     and not aux_gc_probe_failed
                     and n % args.grad_cosine_every == 0
                     and aux_loss.requires_grad):
@@ -1917,6 +1966,9 @@ def main():
         aux_grad_cos_frac_neg = aux_cos_neg / aux_cos_n if aux_cos_n else float("nan")
         aux_grad_norm_crash = aux_gnorm_crash / aux_cos_n if aux_cos_n else float("nan")
         aux_grad_norm_aux = aux_gnorm_aux / aux_cos_n if aux_cos_n else float("nan")
+        if lookahead is not None:
+            print(f"  [lookahead] aux_loss(rel to copy)={avg_aux:.4f}  g={lookahead.g.item():+.4f}  "
+                  f"windows without target={n_aux_missing}/{n}")
         if aux_head is not None:
             print(f"  [aux]   aux_loss={avg_aux:.4f}  n_aux_missing={n_aux_missing}/{n}")
             if aux_cos_n:
@@ -2054,6 +2106,8 @@ def main():
         if aux_head is not None:
             write_grad_trace(out_dir, epoch, args.aux_layer, aux_layer_stats, aux_cos_n,
                              ep_dir / "lora_adapter")
+        if lookahead is not None:
+            torch.save(lookahead.state_dict(), ep_dir / "lookahead.pt")
         if predictor is not None:
             torch.save(predictor.state_dict(), ep_dir / "predictor.pt")
         if pooled_head is not None:
@@ -2150,6 +2204,9 @@ def main():
         adapter_sd = load_file(str(out_dir / f"epoch_{epoch:02d}" / "lora_adapter"
                                    / "adapter_model.safetensors"))
         set_peft_model_state_dict(badas.nn_model, adapter_sd)
+        if lookahead is not None:
+            lookahead.load_state_dict(torch.load(out_dir / f"epoch_{epoch:02d}" / "lookahead.pt",
+                                                 map_location=device))
         # --unfreeze-head (project review 2026-09-06 §4.1): the head is mutated
         # in-process across training, so without this reload, scoring epoch k's
         # adapter after N epochs pairs it with epoch N's head - only the LAST

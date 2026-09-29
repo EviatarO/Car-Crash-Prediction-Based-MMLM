@@ -62,6 +62,7 @@ from semsup_common import (  # noqa: E402
     load_lora_adapter_checked,
 )
 from metrics_core import metrics_from_arrays  # noqa: E402
+from lookahead import LookAheadHead  # noqa: E402
 
 # The two module-name substrings that make up the crash head - see
 # semsup_common.py's --unfreeze-head comment. Used only to snapshot/restore the
@@ -222,6 +223,7 @@ def main():
             print(f"\n[score] {name}: frozen baseline, no adapter attached "
                   f"({len(orig_lora_sd)} LoRA tensors reset to zero-init)")
             sibling_head = None
+            badas.lookahead = None
         else:
             adapter_path = Path(path)
             sft = (adapter_path / "adapter_model.safetensors") if adapter_path.is_dir() else adapter_path
@@ -233,6 +235,18 @@ def main():
             # between arms. strict=True: a mismatched adapter raises instead of loading
             # partially.
             load_lora_adapter_checked(badas.nn_model, sft, strict=True)
+            # Stage 2: a look-ahead checkpoint carries lookahead.pt next to lora_adapter/; without it
+            # the plain (mixed-logit-free) model is scored. Never leak one arm's head into the next.
+            la_file = (adapter_path if adapter_path.is_dir() else adapter_path.parent).parent / "lookahead.pt"
+            if la_file.exists():
+                la_sd = torch.load(la_file, map_location="cpu")
+                la_head = LookAheadHead(1024, la_sd["net.1.weight"].shape[0]).to(device)
+                la_head.load_state_dict(la_sd)
+                la_head.eval()
+                badas.attach_lookahead(la_head)
+                print(f"  [lookahead] loaded {la_file} (g={la_head.g.item():+.4f})")
+            else:
+                badas.lookahead = None
             # sibling head_state.pt convention (semsup_train.py writes both under the
             # same epoch_XX/ dir): adapter_path is .../epoch_XX/lora_adapter, so the
             # sibling is adapter_path.parent / "head_state.pt".
