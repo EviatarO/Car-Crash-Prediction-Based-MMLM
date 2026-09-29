@@ -808,10 +808,13 @@ badas.nn_model.create_or_update_model_card = lambda *a, **k: None
 **Look-Ahead head (Stage 2, off by default).** `z` = the pooled 1024-d vector the crash classifier
 consumes (probe output). `z_hat = z + MLP(z)` (LayerNorm→1024→256→GELU→1024, last layer zero-init),
 `logits = logits(z) + g * classifier(z_hat)` with `g` a learnable scalar init 0 → at step 0 the
-model equals BADAS-Open exactly. Training-only target: FROZEN BADAS-Open vector of the same video's
-window 0.5 s later (1.5→1.0, 1.0→0.5), loss `MSE/copy_scale` (1.0 = no better than copying), weight
-`--lookahead-weight` set by the pilot's gradient-norm ratio (0.3·|g_crash|/|g_aux|). Frozen (not
-live) targets are a deliberate stable-target choice (no second forward pass).
+model equals BADAS-Open exactly. Training-only target: the CHANGE over 0.5 s, `z_partner − z_self`, from
+FROZEN BADAS-Open features (1.5→1.0, 1.0→0.5); loss `MSE(net(z), Δ)/copy_scale` (1.0 = predict no
+change; verified exactly 1.0 at zero-init), weight `--lookahead-weight` from the pilot's gradient-norm
+ratio (0.3·|g_crash|/|g_aux|). **Why deltas (fixed 2026-09-29 after the first launch):** the first
+version regressed z_hat onto the absolute frozen vector; the student's own z drifts under LoRA, so the
+loss rose to 2-3x "copy" from drift alone (and acted as an anchor to the frozen model). The archived
+v1 run is on pod amqvdiljl0esqi at /root/stage2_v1_frozenframe (pilot + partial la-full seed0).
 
 Constraints: the head is attached to the wrapper, so validation, in-training test scoring and
 `score_checkpoints_on_test.py` all use it; checkpoints carry `epoch_NN/lookahead.pt`, and the scorer

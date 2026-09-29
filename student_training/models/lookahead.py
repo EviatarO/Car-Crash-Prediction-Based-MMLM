@@ -29,6 +29,9 @@ class LookAheadHead(nn.Module):
         z = z.float()
         return z + self.net(z)
 
+    def delta(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z.float())
+
 
 # ----------------------------------------------------------------------------------------------
 # Pair construction (pure functions, no GPU) - unit-testable locally.
@@ -57,11 +60,11 @@ def load_features(npz_path):
 
 
 def build_pair_targets(examples, feats, shuffle: bool = False, seed: int = 0):
-    """{frames_dir: target vector}, copy_scale, n_no_features.
+    """{frames_dir: target change vector}, copy_scale, n_no_features.
 
-    target = frozen-BADAS-Open vector of the partner window. copy_scale = mean squared distance
-    between a window's vector and its partner's (the "just copy it" error), so the training loss
-    MSE/copy_scale reads like the Stage-0b rel_mse: 1.0 = no better than copying.
+    target = z_partner - z_self from the frozen BADAS-Open features (the change over 0.5 s).
+    copy_scale = mean squared change (the "just copy it" error), so the training loss
+    MSE(head delta, target)/copy_scale reads like the Stage-0b rel_mse: 1.0 = no better than copying.
     shuffle=True (control): each window gets the partner-vector of a DIFFERENT video with the same
     class and horizon step, by a fixed seeded derangement.
     """
@@ -75,7 +78,10 @@ def build_pair_targets(examples, feats, shuffle: bool = False, seed: int = 0):
             continue
         pairs[ex["frames_dir"]] = (p, ex["label"])
     copy_scale = float(np.mean([np.mean((feats[p] - feats[fd]) ** 2) for fd, (p, _) in pairs.items()])) if pairs else 1.0
-    targets = {fd: feats[p] for fd, (p, _) in pairs.items()}
+    # DELTA targets in the frozen frame (z_partner - z_self, both frozen BADAS-Open vectors): the student's
+    # own z drifts under LoRA, so regressing z_hat onto an absolute frozen vector would mostly penalize
+    # that drift (measured: loss 2-3x "copy" from the drift alone). The head predicts the CHANGE instead.
+    targets = {fd: feats[p] - feats[fd] for fd, (p, _) in pairs.items()}
     if shuffle and targets:
         groups = defaultdict(list)
         for fd, (_, lab) in pairs.items():

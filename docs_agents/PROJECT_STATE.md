@@ -26,7 +26,13 @@ Numbers for everything below: EXPERIMENTS.md "2026-09-29/30" entries.
   epoch 3 ≈0. Passes the literal pre-registered rule but is inside seed noise → treat as the
   baseline bar (Stage 2 should also be compared against it). Results pulled to
   `outputs/stage1_horizon_weights_2026-09-29/sym/`.
-- **Stage 2 (Look-Ahead head) — code done and committed, NOT run.** See ARCHITECTURE.md. Driver:
+- **Stage 2 (Look-Ahead head) — RUNNING unattended on pod amqvdiljl0esqi (started 2026-09-29 21:49
+  UTC, ~6.5 h, auto-stops after results are pulled; if nobody pulls it waits 2 h then stops, and a
+  copy of the small bundle goes to /workspace/stage2_results.tar.gz).** v1 of the loss was wrong
+  (frozen-frame drift, see ARCHITECTURE.md) and was replaced by drift-free delta targets before any
+  arm finished. Pilot (v1): cos(crash, look-ahead grad) = +0.54 on 1.5s crashes, +0.59 on 1.0s
+  crashes, −0.20 / −0.07 on 1.5s / 1.0s non-crash (58 samples) — re-measured by the v2 pilot.
+  Earlier status: code done and committed. See ARCHITECTURE.md. Driver:
   `outputs/stage2_lookahead_2026-09-30/run_stage2.sh` (pilot → la-full + la-shuf per seed 0-2 →
   la-auxonly). **Before launch:** scp `outputs/lookahead_0b_merged/features.npz` to
   `/root/lookahead_features.npz` on the pod. Pass rule pre-registered in DECISIONS.md.

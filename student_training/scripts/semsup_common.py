@@ -432,7 +432,9 @@ class TrainableBadasWrapper:
             raise RuntimeError("probe pre-hook did not fire - tap point is wrong.")
         if self.lookahead is not None:
             z = self._captured["pooled"].reshape(1, -1)
-            z_hat = self.lookahead.predict(z)
+            delta = self.lookahead.delta(z)
+            z_hat = z.float() + delta
+            self._captured["z_delta"] = delta
             dtype = next(self._classifier.parameters()).dtype
             vote = self._classifier(z_hat.to(dtype)).float()
             self._captured["z_hat"] = z_hat

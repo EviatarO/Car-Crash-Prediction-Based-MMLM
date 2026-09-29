@@ -1389,7 +1389,7 @@ def main():
                                                        seed=args.seed)
         la_targets = {fd: torch.from_numpy(v).to(device).reshape(1, -1) for fd, v in _t.items()}
         n_pos = sum(1 for e in train_ex if e["frames_dir"] in la_targets and e["label"] == 1)
-        print(f"[lookahead] {len(la_targets)} train windows have a +0.5s target ({n_pos} pos / "
+        print(f"[lookahead] {len(la_targets)} train windows have a +0.5s-CHANGE target ({n_pos} pos / "
               f"{len(la_targets) - n_pos} neg); {_miss} lacked features; copy_scale={la_copy_scale:.5f}")
         assert len(la_targets) > 0, "look-ahead enabled but no training window has a partner target"
 
@@ -1712,7 +1712,7 @@ def main():
                 if la_t is None:
                     n_aux_missing += 1        # 0.5 s windows: no partner, still vote via the mixed logits
                 else:
-                    aux_loss = ((badas._captured["z_hat"] - la_t) ** 2).mean() / la_copy_scale
+                    aux_loss = ((badas._captured["z_delta"] - la_t) ** 2).mean() / la_copy_scale
 
             # --- crash-vs-aux gradient angle (diagnostic only, never optimized) --- Same
             # construction as the crash-vs-semantic probe below, kept as its OWN block (not
