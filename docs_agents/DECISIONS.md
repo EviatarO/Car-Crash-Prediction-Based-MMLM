@@ -550,6 +550,33 @@
   (2026-09-29): 0.5 stays the standard threshold for CM/P/R/F1/Acc; AP/Kaggle mAP are threshold-free.
   Calibration is a later deployment question only, reported separately if ever done.
 
+### 1.5s-TTE plan (2026-09-29/30) — rejected options
+- **Read the website CM chart's TP drop as lost detection** → rejected: at matched FPR every arm has
+  the same TP per TTE; the drop is a score shift (median negative 0.34 → 0.07-0.10).
+- **Horizon-weighted crash loss on positives only (Chan-style, inverted to favor 1.5s)** → rejected
+  (seeds 0,1): no 1.5s AP gain, scores shift up (FP +57%). Changes the operating point, not ranking.
+- **Symmetric horizon weights as the 1.5s fix** → failing so far (seed 0 ties at 1.5s); final
+  verdict after seeds 1-2. Kept as the Stage-1 baseline row.
+- **Look-ahead pairs from the full 4,446 pool (option B, 741+741 videos)** → rejected by user:
+  adds 375 videos outside the curated pool, breaking "no new videos" and mixing in the pool that
+  already lost as training data. Use the 1,761 pool's videos + their missing horizons (option A).
+- **0.5 s windows as look-ahead SOURCES (0.5→0.0 pairs)** → rejected: would need new windows ending
+  at the event; 0.5 s windows still train the crash head and are the +0.5 s TARGET of 1.0 s windows.
+- **Train the look-ahead on positives only** → rejected: it learns "the future is more dangerous"
+  and invents crashes on normal driving (Stage 0b: 84%-positive pairs made negatives worse than copy).
+- **Kinematic (detection/lane) look-ahead target now** → deferred to Stage 4 (one variable at a time).
+- **Stage D (re-test attn_rank R_pos on the midneg recipe, 3 seeds)** → deferred, not run.
+- **Pilot with `--limit N`** → bug: captions files list all positives first; use `--limit-random`.
+
+### Stage 2 pre-registered pass rule (written 2026-09-30, BEFORE any Stage 2 run)
+- Primary comparison: **la-full vs la-shuf** (shuffled-future control), seeds 0-2, **epoch 1**,
+  pooled 1,344 clips. PASS iff mean paired 1.5s AP > 0 AND 0.5 s and 1.0 s AP each not lower by
+  more than 0.005 AND FPR@85 not higher by more than 0.005. Checked by `stage_compare.py`.
+- Secondary: la-full vs plain midneg-seed{0,1,2} (not exactly paired — the head's init draws shift
+  the dropout/shuffle RNG), and la-auxonly (gate frozen) to separate "trunk shaping" from "vote".
+- A PASS on 3 seeds triggers Stage 3 (5 seeds). Pilot gate before full runs: probe n_sampled > 0;
+  report cos(crash, aux) per class/horizon — expected positive for pos_1.5 (earlier aux families ≈0).
+
 ## Unresolved (new, 2026-09-29)
 - **Which fixed epoch is the recipe?** Epoch 1 has the best 3-seed mean AP (0.9185 vs 0.9157 ep2,
   0.9133 ep3) but that ranking comes from the test set. Needs to be fixed from val (requires

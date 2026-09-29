@@ -1,6 +1,41 @@
 <!-- handoff-month: 2026-09 -->
 # Project State
 
+## ⚠️ 2026-09-30 — 1.5s-TTE plan in progress: Stage 0 passed, Stage 1 (loss weighting) fails, Stage 2 (Look-Ahead head) coded, NOT launched
+
+**Read this block first.** Plan file: `~/.claude/plans/wiggly-bubbling-newell.md` (Q&A + stages).
+Numbers for everything below: EXPERIMENTS.md "2026-09-29/30" entries.
+
+- **Midpoint negatives, 5-seed confirmation (seeds 3,4 added, epoch 1 pre-registered):** pooled AP
+  +0.0092 ± 0.0052 vs control, **5/5 seeds** (sign test p=0.03) → confirmed. Kaggle mAP +0.0037,
+  4/5 → **not confirmed** (1.5s AP −0.007, 2/5). Claim wording: "raises pooled AP and cuts false
+  alarms at matched recall; no reliable Kaggle mAP gain".
+- **Diagnosis of the chart "TP drop" (A1 → A1-compress256 → midneg):** it is a score/threshold
+  shift, not lost detection. At a matched false-alarm rate all arms find the same TP per TTE. Real
+  weakness: at FPR 10% only ~50% of 1.5s crashes are caught by any arm.
+- **Stage 0a (same-video test check): gate passes.** Of 1.5s crashes missed at FPR 10%, 94% are
+  caught by the same video's later (1.0s or 0.5s) clip → evidence exists later in the video.
+- **Stage 0b (frozen features, 1,761-pool videos, balanced pairs 1,086 pos / 1,128 neg): gate
+  passes.** Predicting the +0.5 s vector beats "copy" for crashes (error ratio 0.71/0.73), equals
+  copy for normal driving (1.05/1.00 — no invented danger). Frozen head AP on 1.5s windows: 0.769
+  now, 0.794 on the predicted future, 0.894 on the true future (oracle ceiling).
+- **Stage 1 (horizon-weighted crash loss, the cheap baseline Stage 2 must beat): fails.**
+  Crash-only weights (seeds 0,1): no 1.5s gain, scores shift up (more FP). Symmetric weights
+  (both classes by horizon, user's design): seed 0 ties plain midneg at 1.5s (0.8918 vs 0.8920).
+  Seeds 1-2 of the symmetric arm were running on pod hvv6hror7kqzwb at handoff time — pull + fold in.
+- **Stage 2 (Look-Ahead head) — code done and committed, NOT run.** See ARCHITECTURE.md. Driver:
+  `outputs/stage2_lookahead_2026-09-30/run_stage2.sh` (pilot → la-full + la-shuf per seed 0-2 →
+  la-auxonly). **Before launch:** scp `outputs/lookahead_0b_merged/features.npz` to
+  `/root/lookahead_features.npz` on the pod. Pass rule pre-registered in DECISIONS.md.
+- **Pod / volume constraints (new):** network volume 0hnvco2s4j is AT ITS 56 GB QUOTA — writes to
+  /workspace fail. All new run outputs go to the pod's container disk (/root, 40 GB) and are pulled
+  before stop. `runpodctl` on pods needs `RUNPOD_API_KEY` exported from /proc/1/environ (drivers do
+  this now). Pod capacity is often unavailable — retry loop over many GPU types.
+- **Git:** main has local commits since a9da412 not yet pushed by the user (e2378ac … 9a170a7).
+- **Next step:** fold Stage 1 symmetric seeds 1-2 into the table (`stage_compare.py`), then launch
+  Stage 2 (~6.5 h, ~$4.7) — start with pilot + seed-0 arms and STOP to review the pilot's
+  per-horizon gradient cosine before the rest.
+
 ## 2026-09-29 addendum — seed consistency understood; website partially updated
 
 - **Midpoint-negatives seed spread is a calibration offset, not a detection difference.**

@@ -2002,3 +2002,64 @@ seed0/1/2 = 1/1/3. These are what the website comparison page currently shows (m
 B-v1 08-08, B-v2 08-11, B-v3 08-13, P1 08-17, V12 08-29, a1cont/V10/v12shuf 09-05,
 A1-compress256 09-14, AA-rel/AA-occ/AA-rel-L23 09-23, AA-occ-unfrozen/AA-rel-unfrozen/
 AA-ctrl-unfrozen 09-24, AA-ctrl-seed1/2 + all AA-H arms 09-25, midneg/fullpool 09-27.
+
+## 2026-09-29/30 — 5-seed confirmation, 1.5s-TTE plan Stage 0 and Stage 1
+
+All test numbers: pooled 1,344 clips (private 677 + public 667), per-TTE AP = that horizon's positives
+vs its negatives, Kaggle mAP = mean of the 3, FPR@85 = false-alarm rate at the threshold giving 85%
+recall, FN/FP at threshold 0.5. Paired = same seed, same epoch. Epoch 1 pre-registered before seeds 3-4.
+Analysis script: `student_training/scripts/stage_compare.py` (generic, `--arm NAME=priv|pub` with
+`{seed}`/`{ep}` placeholders, `--ref`, prints the pass rule).
+
+### Midpoint negatives, seeds 3-4 (confirmation run, 2026-09-29)
+- Driver `outputs/confirm_seeds_2026-09-29/run_confirm.sh`; runs midneg-seed{3,4} + ctrl-seed{3,4}
+  (ctrl = old 1,761 Mixed pool), both 3-epoch recipe, `--dump-val-scores` on. Outputs (no weights)
+  in `outputs/confirm_seeds_2026-09-29/`.
+- Epoch 1, paired midneg − ctrl, seeds 0-4: pooled AP **+0.0092 ± 0.0052 (5/5)**; Kaggle mAP
+  +0.0037 ± 0.0067 (4/5; seed 4 −0.0063); 1.5s AP −0.0071 ± 0.0115 (2/5); FPR@85 −0.017.
+  Epoch 2: Kaggle ≈0; epoch 3: −0.005.
+- 5-seed epoch-1 means: midneg AP 0.9174±0.005, TTE 0.9427/0.9274/0.8742, Kaggle 0.9148±0.007;
+  control AP 0.9082±0.003, TTE 0.9285/0.9235/0.8813, Kaggle 0.9111±0.002.
+- Caveat: ctrl seeds 0-2 are the old 8-epoch runs' epochs 1-3; seeds 3-4 are 3-epoch runs. Same picture.
+
+### Chart diagnosis — TP per TTE at matched FPR (private 677)
+| arm | AP 0.5/1.0/1.5 | TP @FPR10% | TP @FPR36% |
+|---|---|---|---|
+| A1 (8-ep, ep4) | .909/.910/.884 | 117/87/43 | 135/112/72 |
+| A1-compress256 | .928/.923/.902 | 125/91/41 | 139/114/71 |
+| midneg-seed1 | .937/.939/.871 | 116/88/37 | 136/115/72 |
+Median negative score 0.34 (A1) vs 0.07-0.10 → the website chart's TP drop at 0.5 is a score shift.
+
+### Stage 0a — same-source-video test check (local, no GPU)
+- Script `student_training/scripts/tte_same_video_diag.py`: links each 1.5s test clip to the same
+  video's 1.0s and 0.5s clips by frame matching (manifests have no source field); 156/156 positive
+  chains linked confidently. Scores = 5-seed mean, midneg epoch 1; threshold at FPR 10% (0.568).
+- 1.5s MISSED (n=79): same video's 1.0s clip detected 67%, 0.5s clip 92%, either **94%**; mean score
+  1.5/1.0/0.5 = 0.33/0.66/0.87. 1.5s DETECTED (n=77): 96% either. Output `outputs/tte_diag_0a/`.
+
+### Stage 0b — is the +0.5 s pooled vector predictable? (frozen BADAS-Open, no LoRA)
+- Extraction `lookahead_extract_features.py` (pod) → pooled 1024-d `z` + logits; analysis
+  `lookahead_feasibility.py` (local): ridge on the change z_next − z_now, GroupKFold by video,
+  `--balance` weights negatives. Frozen head reproduces stored logits to 2e-6.
+- Negatives needed completing: `build_midpoint_negatives.py --complete-horizons` cut the 787 missing
+  midpoint windows (all 3 horizons for the 564 pool negative videos; same seeded fake event, so the
+  905 existing windows reproduce exactly; manifest `outputs/semantic_captions/LookAhead_NegWindows_564x3.jsonl`).
+- Final run, **1,761-pool videos only**: 543 pos + 564 neg videos x 3 horizons = 3,321 windows,
+  pairs 1.5→1.0 and 1.0→0.5 = 1,086 pos / 1,128 neg. Merged features `outputs/lookahead_0b_merged/`.
+- Error ratio (ours ÷ "copy the current vector"; <1 = beats copy): pos 1.5→1.0 **0.710**, pos
+  1.0→0.5 **0.729**, neg 1.049 / 0.998. Learning curve 25/50/100% of videos: 0.876/0.848/0.828.
+- Frozen head AP on 1.5s windows (pool, not test): z_now 0.769, predicted z_hat **0.794**,
+  true z(+0.5 s) oracle **0.894**; mix z_now + z_hat 0.780.
+- Earlier imbalanced run (full-pool positives, 276 neg pairs) inflated AP (~0.93) and made negatives
+  worse than copy (1.27) — superseded.
+
+### Stage 1 — horizon-weighted crash loss (baseline for Stage 2), 2026-09-29
+- Flags `--horizon-weights 0.5:1.0,1.0:1.5,1.5:2.0` and `--horizon-weights-scope {pos,all}`; midneg
+  recipe, 3 epochs. Driver `outputs/stage1_horizon_weights_2026-09-29/run_stage1{,_sym}.sh`.
+- **Crash-only weights (scope pos), seeds 0-1** (seed 2 stopped by design): epoch 1 1.5s AP
+  −0.0024 vs midneg (0/2); FN 241→150, FP 209→329 (sum 2 seeds) — pure score shift up.
+- **Symmetric weights (scope all), seed 0:** epoch 1 AP 0.9229 / TTE 0.9457/0.9312/0.8918 /
+  Kaggle 0.9229 / FPR@85 0.171 / FN 78 FP 142, vs midneg 0.9237 / 0.9467/0.9323/0.8920 / 0.9237 /
+  0.174 / 100 117. Ties at 1.5s; half the score shift of crash-only. Seeds 1-2: see pod outputs
+  `outputs/stage1_horizon_weights_2026-09-29/sym/` once pulled (pending at handoff).
+- Pre-registered rule (1.5s AP above matched control): fails for both so far.

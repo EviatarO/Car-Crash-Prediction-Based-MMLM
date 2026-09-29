@@ -803,6 +803,42 @@ badas.nn_model.create_or_update_model_card = lambda *a, **k: None
 `peft`'s `save_pretrained()` builds a model card before writing weights and assumes
 `base_model.config` is dict-like; BADAS's `ModelArgs` isn't, so every checkpoint save crashed.
 
+## 1.5s-TTE plan tooling + Stage 2 Look-Ahead head (2026-09-29/30)
+
+**Look-Ahead head (Stage 2, off by default).** `z` = the pooled 1024-d vector the crash classifier
+consumes (probe output). `z_hat = z + MLP(z)` (LayerNorm→1024→256→GELU→1024, last layer zero-init),
+`logits = logits(z) + g * classifier(z_hat)` with `g` a learnable scalar init 0 → at step 0 the
+model equals BADAS-Open exactly. Training-only target: FROZEN BADAS-Open vector of the same video's
+window 0.5 s later (1.5→1.0, 1.0→0.5), loss `MSE/copy_scale` (1.0 = no better than copying), weight
+`--lookahead-weight` set by the pilot's gradient-norm ratio (0.3·|g_crash|/|g_aux|). Frozen (not
+live) targets are a deliberate stable-target choice (no second forward pass).
+
+Constraints: the head is attached to the wrapper, so validation, in-training test scoring and
+`score_checkpoints_on_test.py` all use it; checkpoints carry `epoch_NN/lookahead.pt`, and the scorer
+detaches it for arms without one. Shuffled control keeps class + horizon step.
+
+| path | purpose |
+|---|---|
+| `student_training/models/lookahead.py` | `LookAheadHead`, `partner_name`, `load_features`, `build_pair_targets` |
+| `student_training/scripts/semsup_train.py` | new flags `--lookahead-{features,weight,hidden,shuffle,no-mix}`, `--horizon-weights[-scope]`, `--limit-random`; logs `aux_grad_cos_by_group` |
+| `student_training/scripts/semsup_common.py` | wrapper: `_classifier`, `attach_lookahead()`, logit mixing in `forward_clip`; examples carry `horizon_label` |
+| `student_training/scripts/score_checkpoints_on_test.py` | loads `lookahead.pt` next to an adapter |
+| `student_training/scripts/stage_compare.py` | paired per-seed arm comparison + pre-registered pass rule |
+| `student_training/scripts/tte_same_video_diag.py` | Stage 0a: link test clips of one video by frame matching |
+| `student_training/scripts/lookahead_extract_features.py` | Stage 0b (pod): frozen pooled vectors + head params; `--names-file` |
+| `student_training/scripts/lookahead_feasibility.py` | Stage 0b (local): held-out ridge, copy baseline, oracle head AP; `--balance` |
+| `student_training/scripts/build_midpoint_negatives.py` | `--complete-horizons`: all 3 midpoint windows per negative video, captions untouched |
+| `outputs/stage2_lookahead_2026-09-30/run_stage2.sh` | Stage 2 driver (needs `/root/lookahead_features.npz`) |
+| `outputs/lookahead_0b_merged/features.npz` | frozen vectors for the 1,761-pool videos x 3 horizons (look-ahead targets) |
+
+Signatures: `LookAheadHead(dim=1024, hidden=256, gate_frozen=False).predict(z) -> z_hat`;
+`build_pair_targets(examples, feats, shuffle=False, seed=0) -> (targets: dict[frames_dir, vec],
+copy_scale: float, n_missing)`; `TrainableBadasWrapper.attach_lookahead(head)`.
+
+**Pod constraints (new):** network volume 0hnvco2s4j is at its 56 GB quota — write run outputs to
+the container disk (/root) and pull before stop. Drivers export `RUNPOD_API_KEY`/`RUNPOD_POD_ID`
+from `/proc/1/environ` so `runpodctl stop` works.
+
 ## Stage AA — detection pipeline v2b (2026-09-19; separate from the student model above)
 
 Offline subsystem, no BADAS/LoRA: produces per-object kinematic signals from raw dashcam video for
