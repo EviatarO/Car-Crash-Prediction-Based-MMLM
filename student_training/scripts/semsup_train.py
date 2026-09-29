@@ -677,6 +677,10 @@ def main():
                           "V-JEPA2 processor defaults, center-crop 256x256 keeping only the "
                           "middle ~49%% of a 1280x720 frame. 'compress256' = the full frame "
                           "resized to 256x256, no crop. Recorded in train_metrics.json args.")
+    ap.add_argument("--horizon-weights", default=None,
+                     help="Stage 1 (1.5s plan): per-horizon weight on the crash CE of POSITIVE windows "
+                          "only, e.g. '0.5:1.0,1.0:1.5,1.5:2.0'. Negatives keep weight 1.0. Parsed from "
+                          "each row's horizon_label ('TTE_1.5'). Default: off (every window weight 1).")
     ap.add_argument("--crash-weight", type=float, default=1.0,
                      help="weight on the crash CE term in the optimized loss (default 1.0, "
                           "matching every prior run). 0.0 = Stage A of the P1 two-stage design "
@@ -1281,6 +1285,12 @@ def main():
         print(f"[load] restored optimizer state from {args.optimizer_init}")
 
     examples = load_training_examples(limit=args.limit, captions_path=args.captions_path)
+    horizon_w = None
+    if args.horizon_weights:
+        horizon_w = {float(k): float(v) for k, v in (kv.split(":") for kv in args.horizon_weights.split(","))}
+        missing = {float(str(e["horizon_label"]).split("_")[-1]) for e in examples if e["label"] == 1} - set(horizon_w)
+        assert not missing, f"--horizon-weights lacks horizon(s) {missing}"
+        print(f"  [loss] positive-window horizon weights: {horizon_w}")
     if len(examples) < args.min_examples:
         raise RuntimeError(
             f"Only {len(examples)} training examples loaded (< --min-examples "
@@ -1484,6 +1494,9 @@ def main():
             logits, patches = badas.forward_clip(clip.to(device))
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
+            crash_w = 1.0
+            if horizon_w and ex["label"] == 1:
+                crash_w = horizon_w[float(str(ex["horizon_label"]).split("_")[-1])]
 
             sem_loss = torch.tensor(0.0, device=device)
             sem_loss_pooled = torch.tensor(0.0, device=device)
@@ -1786,7 +1799,7 @@ def main():
             # gradcam under --aux-schedule constant; it is the warm_on_off-scheduled value
             # otherwise (see the Stage AA-H aux block above) - NEVER args.aux_weight
             # directly, or the on/off schedule would be computed but silently unused.
-            loss = (args.crash_weight * crash_loss
+            loss = (args.crash_weight * crash_w * crash_loss
                     + args.semantic_weight * sem_loss_combined
                     + aux_lambda_used * aux_loss) / args.grad_accum
             loss.backward()

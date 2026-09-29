@@ -148,6 +148,7 @@ def load_training_examples(limit: int = 0, require_frames: bool = True,
             "frame_paths": [str(p) for p in paths],
             "caption": r["caption"],
             "label": 1 if gt == "YES" else 0,
+            "horizon_label": r.get("horizon_label"),
         })
     print(f"[data] loaded {len(out)} examples ({skipped} skipped: unresolved/missing frames)")
     if limit:
