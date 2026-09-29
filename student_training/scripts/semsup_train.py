@@ -93,6 +93,12 @@ from aa_head_losses import (  # noqa: E402
 )
 
 
+def _horizon_seconds(horizon_label) -> float:
+    """'TTE_1.5' / 'MIDTEST-1.5' -> 1.5"""
+    import re
+    return float(re.search(r"(\d+\.\d+)$", str(horizon_label)).group(1))
+
+
 def build_caption_bank(examples, siglip_model, siglip_tok, device, batch=64):
     """Precompute the frozen SigLIP embedding for every example's caption, once.
 
@@ -681,6 +687,11 @@ def main():
                      help="Stage 1 (1.5s plan): per-horizon weight on the crash CE of POSITIVE windows "
                           "only, e.g. '0.5:1.0,1.0:1.5,1.5:2.0'. Negatives keep weight 1.0. Parsed from "
                           "each row's horizon_label ('TTE_1.5'). Default: off (every window weight 1).")
+    ap.add_argument("--horizon-weights-scope", choices=("pos", "all"), default="pos",
+                     help="'pos' (default): --horizon-weights applies to positive windows only. 'all': "
+                          "applies to positive AND negative windows by each window's own horizon "
+                          "(negatives carry TTE_/MIDTEST- horizon labels too), so the class balance "
+                          "inside every horizon is unchanged and only the emphasis BETWEEN horizons moves.")
     ap.add_argument("--crash-weight", type=float, default=1.0,
                      help="weight on the crash CE term in the optimized loss (default 1.0, "
                           "matching every prior run). 0.0 = Stage A of the P1 two-stage design "
@@ -1288,9 +1299,10 @@ def main():
     horizon_w = None
     if args.horizon_weights:
         horizon_w = {float(k): float(v) for k, v in (kv.split(":") for kv in args.horizon_weights.split(","))}
-        missing = {float(str(e["horizon_label"]).split("_")[-1]) for e in examples if e["label"] == 1} - set(horizon_w)
+        weighted = [e for e in examples if e["label"] == 1 or args.horizon_weights_scope == "all"]
+        missing = {_horizon_seconds(e["horizon_label"]) for e in weighted} - set(horizon_w)
         assert not missing, f"--horizon-weights lacks horizon(s) {missing}"
-        print(f"  [loss] positive-window horizon weights: {horizon_w}")
+        print(f"  [loss] horizon weights ({args.horizon_weights_scope}): {horizon_w}")
     if len(examples) < args.min_examples:
         raise RuntimeError(
             f"Only {len(examples)} training examples loaded (< --min-examples "
@@ -1495,8 +1507,8 @@ def main():
             label = torch.tensor([ex["label"]], device=device)
             crash_loss = F.cross_entropy(logits, label)
             crash_w = 1.0
-            if horizon_w and ex["label"] == 1:
-                crash_w = horizon_w[float(str(ex["horizon_label"]).split("_")[-1])]
+            if horizon_w and (ex["label"] == 1 or args.horizon_weights_scope == "all"):
+                crash_w = horizon_w[_horizon_seconds(ex["horizon_label"])]
 
             sem_loss = torch.tensor(0.0, device=device)
             sem_loss_pooled = torch.tensor(0.0, device=device)
