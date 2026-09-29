@@ -19,10 +19,13 @@ Numbers for everything below: EXPERIMENTS.md "2026-09-29/30" entries.
   passes.** Predicting the +0.5 s vector beats "copy" for crashes (error ratio 0.71/0.73), equals
   copy for normal driving (1.05/1.00 — no invented danger). Frozen head AP on 1.5s windows: 0.769
   now, 0.794 on the predicted future, 0.894 on the true future (oracle ceiling).
-- **Stage 1 (horizon-weighted crash loss, the cheap baseline Stage 2 must beat): fails.**
+- **Stage 1 (horizon-weighted crash loss, the cheap baseline Stage 2 must beat): weak, not significant.**
   Crash-only weights (seeds 0,1): no 1.5s gain, scores shift up (more FP). Symmetric weights
-  (both classes by horizon, user's design): seed 0 ties plain midneg at 1.5s (0.8918 vs 0.8920).
-  Seeds 1-2 of the symmetric arm were running on pod hvv6hror7kqzwb at handoff time — pull + fold in.
+  (both classes by horizon, user's design), 3 seeds, epoch 1: 1.5s AP +0.0042 (per seed −0.0002 /
+  +0.0093 / +0.0035, sd 0.0048, t≈1.5, n.s.), Kaggle +0.0019 (2/3), FPR@85 −0.003; epoch 2 +0.0043;
+  epoch 3 ≈0. Passes the literal pre-registered rule but is inside seed noise → treat as the
+  baseline bar (Stage 2 should also be compared against it). Results pulled to
+  `outputs/stage1_horizon_weights_2026-09-29/sym/`.
 - **Stage 2 (Look-Ahead head) — code done and committed, NOT run.** See ARCHITECTURE.md. Driver:
   `outputs/stage2_lookahead_2026-09-30/run_stage2.sh` (pilot → la-full + la-shuf per seed 0-2 →
   la-auxonly). **Before launch:** scp `outputs/lookahead_0b_merged/features.npz` to

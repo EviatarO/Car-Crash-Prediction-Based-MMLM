@@ -2060,6 +2060,11 @@ Median negative score 0.34 (A1) vs 0.07-0.10 → the website chart's TP drop at 
   −0.0024 vs midneg (0/2); FN 241→150, FP 209→329 (sum 2 seeds) — pure score shift up.
 - **Symmetric weights (scope all), seed 0:** epoch 1 AP 0.9229 / TTE 0.9457/0.9312/0.8918 /
   Kaggle 0.9229 / FPR@85 0.171 / FN 78 FP 142, vs midneg 0.9237 / 0.9467/0.9323/0.8920 / 0.9237 /
-  0.174 / 100 117. Ties at 1.5s; half the score shift of crash-only. Seeds 1-2: see pod outputs
-  `outputs/stage1_horizon_weights_2026-09-29/sym/` once pulled (pending at handoff).
-- Pre-registered rule (1.5s AP above matched control): fails for both so far.
+  0.174 / 100 117. Ties at 1.5s; half the score shift of crash-only.
+- **Symmetric weights, 3 seeds (pulled 2026-09-29 21:28, `.../sym/`), paired vs midneg, mean±sd:**
+  epoch 1: AP 0.9194±0.005 vs 0.9185; TTE 0.9441/0.9289/0.8818 vs 0.9437/0.9278/0.8776; Kaggle
+  0.9183 vs 0.9164; FPR@85 0.1875 vs 0.1905; FN/FP 424/294 vs 506/242 (sum). Paired 1.5s AP delta
+  +0.0042 (seeds −0.0002/+0.0093/+0.0035, sd 0.0048, n.s.), Kaggle +0.0019 (2/3). Epoch 2: 1.5s
+  +0.0043 (2/3), Kaggle +0.0004; epoch 3: 1.5s −0.0002, Kaggle −0.0012.
+- Pre-registered rule (1.5s AP up, 0.5/1.0s not down >0.005, FPR@85 not worse): crash-only FAILS;
+  symmetric PASSES literally at epoch 1 but the effect is within noise (1 of 3 seeds ≈0).

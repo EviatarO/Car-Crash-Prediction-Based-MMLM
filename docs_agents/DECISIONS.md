@@ -555,8 +555,9 @@
   the same TP per TTE; the drop is a score shift (median negative 0.34 → 0.07-0.10).
 - **Horizon-weighted crash loss on positives only (Chan-style, inverted to favor 1.5s)** → rejected
   (seeds 0,1): no 1.5s AP gain, scores shift up (FP +57%). Changes the operating point, not ranking.
-- **Symmetric horizon weights as the 1.5s fix** → failing so far (seed 0 ties at 1.5s); final
-  verdict after seeds 1-2. Kept as the Stage-1 baseline row.
+- **Symmetric horizon weights as THE 1.5s fix** → not convincing: 3 seeds give +0.0042 1.5s AP
+  (n.s., t≈1.5), Kaggle +0.0019; epoch 3 gives nothing. Kept as the Stage-1 baseline row; Stage 2's
+  result should be reported against it as well as against the shuffled control.
 - **Look-ahead pairs from the full 4,446 pool (option B, 741+741 videos)** → rejected by user:
   adds 375 videos outside the curated pool, breaking "no new videos" and mixing in the pool that
   already lost as training data. Use the 1,761 pool's videos + their missing horizons (option A).
