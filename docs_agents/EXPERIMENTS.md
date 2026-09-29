@@ -1957,3 +1957,48 @@ to date come from preprocessing (full-frame vs crop, +0.013 AP), data curation (
 full 4,446), and negative-sampling protocol (this entry). No BADAS-2.0 architecture element
 (distillation, SSL pretraining) has been adopted — see DECISIONS.md's open items for which of
 BADAS-2.0's §5.3 (two-phase KD) and §6.1 (training-free attention heatmaps) ideas are candidates.
+
+### Overnight 2026-09-27 — per-seed breakdown (added 2026-09-29)
+
+**Per-TTE AP by seed** (pooled 1,344, each cell = mean over that seed's epochs 1-3):
+
+| midneg seed | TTE 0.5s | TTE 1.0s | TTE 1.5s |
+|---|---|---|---|
+| seed0 | 0.9402 | 0.9266 | 0.8782 |
+| seed1 | 0.9361 | 0.9229 | 0.8641 |
+| seed2 | 0.9421 | 0.9300 | 0.8692 |
+| mean ± sd | 0.9395 ± 0.0025 | 0.9265 ± 0.0029 | 0.8705 ± 0.0058 |
+
+The "0.9395 / 0.9265 / 0.8705" row reported elsewhere is this mean — an aggregate of 9
+checkpoints, not any single run (closest single checkpoint: midneg-seed1-ep01, 0.9390/0.9203/0.8700).
+
+**Confusion matrices, seed x epoch x TTE** (pooled 1,344, threshold 0.5; cell = TP/FN/FP/TN;
+bucket sizes 284+/284−, 232+/232−, 156+/156−):
+
+| seed | ep | TTE 0.5s | TTE 1.0s | TTE 1.5s | FN | FP | AP |
+|---|---|---|---|---|---|---|---|
+| 0 | 1 | 262/22/66/218 | 204/28/34/198 | 106/50/17/139 | 100 | 117 | 0.9237 |
+| 0 | 2 | 246/38/46/238 | 190/42/32/200 | 83/73/15/141 | 153 | 93 | 0.9133 |
+| 0 | 3 | 260/24/59/225 | 205/27/46/186 | 106/50/21/135 | 101 | 126 | 0.9152 |
+| 1 | 1 | 253/31/49/235 | 188/44/28/204 | 90/66/15/141 | 141 | 92 | 0.9126 |
+| 1 | 2 | 248/36/53/231 | 196/36/28/204 | 94/62/18/138 | 134 | 99 | 0.9175 |
+| 1 | 3 | 253/31/65/219 | 203/29/50/182 | 111/45/26/130 | 105 | 141 | 0.9056 |
+| 2 | 1 | 227/57/20/264 | 134/98/10/222 | 46/110/3/153 | 265 | 33 | 0.9193 |
+| 2 | 2 | 253/31/40/244 | 188/44/28/204 | 80/76/12/144 | 151 | 80 | 0.9163 |
+| 2 | 3 | 262/22/69/215 | 211/21/55/177 | 120/36/29/127 | 79 | 153 | 0.9191 |
+
+**Seed-2 epoch-1 finding:** same ranking quality (AP 0.9193, 2nd of 9) but a global downward score
+shift — median positive score 0.671 (others 0.86-0.97), median negative 0.032, threshold for 85%
+recall 0.15 (others 0.37-0.62). FN at 0.5 is therefore 265, concentrated at 1.5s (110/156), whose
+positives sit closest to 0.5. Epoch 3 of the same seed flips to FN 79 / FP 153 at equal AP.
+Across checkpoints, 1.5s FN ranges 36-110 while AP moves < 0.02 — most 1.5s FN variation at 0.5 is
+score offset, not detection. Val-score dumps were not enabled for these runs (`--dump-val-scores`
+off), so no val-side calibration check exists.
+
+**Val-selected epochs (train_metrics.json best_epoch)**: midneg seed0/1/2 = 2/2/1; fullpool
+seed0/1/2 = 1/1/3. These are what the website comparison page currently shows (mixed epochs).
+
+**Experiment dates (result-file mtimes, for the website date column):** A0 2026-06-24, A1 08-06,
+B-v1 08-08, B-v2 08-11, B-v3 08-13, P1 08-17, V12 08-29, a1cont/V10/v12shuf 09-05,
+A1-compress256 09-14, AA-rel/AA-occ/AA-rel-L23 09-23, AA-occ-unfrozen/AA-rel-unfrozen/
+AA-ctrl-unfrozen 09-24, AA-ctrl-seed1/2 + all AA-H arms 09-25, midneg/fullpool 09-27.

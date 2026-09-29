@@ -1,6 +1,34 @@
 <!-- handoff-month: 2026-09 -->
 # Project State
 
+## 2026-09-29 addendum — seed consistency understood; website partially updated
+
+- **Midpoint-negatives seed spread is a calibration offset, not a detection difference.**
+  midneg-seed2 epoch 1 (its val-selected checkpoint, the one on the website) misses 265/672
+  crashes at threshold 0.5 vs 100-153 for most other checkpoints, yet has the 2nd-best AP of the
+  9 (0.9193): every score is shifted down (median crash score 0.67 vs 0.86-0.97 elsewhere). Its own
+  epoch 3 has the FEWEST misses of all 9 (79) at the same AP. 1.5s TTE is hit hardest because those
+  positives score closest to 0.5. Full seed x epoch x TTE confusion-matrix table: EXPERIMENTS.md.
+- **Presentation rule (agreed):** report every seed at the SAME epoch, fixed in advance (or by val),
+  as mean ± sd across seeds, plus mean-over-epochs as robustness; never each seed's test-best epoch.
+  Keep threshold 0.5 as the standard for CM/P/R/F1/Acc (always stated); AP/Kaggle mAP are
+  threshold-free and unaffected. No threshold calibration in reported results.
+- **Website state:** Cross-Experiment Comparison page now has midneg-seed{0,1,2} and
+  fullpool-seed{0,1,2} (677-clip private set, each at its own val-selected epoch — mixed epochs,
+  see TODO). Supports the 1.5s-failure review: filter Window=TTE 1.5s, verdict=wrong, play clip.
+  Picker-list contrast bug fixed. **Deferred website TODOs:** (1) detail pages for the 6 overnight
+  arms (EXPECTED_CM / EXPECTED_CM_PUBLIC entries already in build_experiments_data.py, ARMS entries
+  not written); (2) landing "Test-set comparison" table: add experiment-date column + click-to-sort
+  on every column (dates = result-file mtimes, listed in EXPERIMENTS.md); (3) point comparison arms
+  at ONE shared epoch per family instead of per-seed val-selected; (4) optionally show per-TTE AP.
+- **Git:** main clean, in sync with origin (a9da412 pushed).
+- **Pods:** nothing running. Two stopped pods remain on the account (egx54zfwpmpasg
+  "controls-public-score", maeqpipl372s77 "pull-results"); 5ivn7also2b9u9 was deleted. All data is
+  on network volume 0hnvco2s4j (EU-RO-1). Pod resume often fails ("not enough free GPUs on the host")
+  — creating a fresh pod on the volume with a broad `gpuTypeIds` list worked first try.
+- **Next step:** pick the 1.5s-TTE work (DECISIONS.md "Unresolved (new, 2026-09-27)"), starting with
+  the local diagnosis of midneg's 1.5s misses via the comparison page / pointing-game heatmaps.
+
 ## ⚠️ 2026-09-27 — Overnight run DONE: midpoint negatives confirmed a real gain; 1.5s TTE is the new priority
 
 **Read this block first.** Two crash-only variants, 3 seeds x 3 epochs each, evaluated on the

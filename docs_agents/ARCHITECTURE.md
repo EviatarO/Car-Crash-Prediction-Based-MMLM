@@ -554,6 +554,21 @@ aliases added is what actually gets used for training/comparison scripts.
 | `student_training/scripts/merge_semtest200_v2_captions.py` | Joins caption corpora for the merged SemTest-200-v2 pool. |
 | `student_training/scripts/plot_semtest200_cv_curves.py` | Mean±std-band loss curves across SemTest-200-v2 folds; shared y-axis; right axis color-keyed to its own series; `--mark-epoch`/`--init-note` for annotating a selected checkpoint. |
 | `student_training/scripts/siglip_bottleneck_probe.py` | Measures how much crash-relevant signal survives text→SigLIP-embedding vs raw text; ran on V10/V12/V13 — SigLIP retains 86-96% of the text's own crash-AUC, ruling out the encoder as the bottleneck for prior negative results. |
+| `student_training/scripts/build_midpoint_negatives.py` | (2026-09-27) Re-cuts the 1,761 pool's 905 negative windows to the Nexar test protocol: per video one fake event = midpoint + N(0, `--noise-std` 1.0s) (seeded per video_id), windows end 0.5/1.0/1.5s before it; group index preserved (MID-10→0, MID-4→1, MID-8→2); extracts frames from the raw mp4s into `dataset/train/<vid>_hires_midtest{05,10,15}/`; writes `outputs/semantic_captions/Caption_Train4500_MidpointNeg_1761.jsonl`. `--dry-run` plans only. |
+| `student_training/scripts/pooled_eval.py` | (2026-09-27) Pools private 677 + public 667 per-clip scores (asserts counts and no overlap) and compares arms against a `--ref` with a clip-level paired bootstrap; prints AP, AUC, ΔAP + 95% CI, P(better), FPR at matched recall (`--fpr-at-tpr 0.85,0.90`). Usage: `--arm NAME=private.jsonl,public.jsonl` (repeatable). |
+| `outputs/overnight_2026-09-27/{run_overnight.sh,watchdog.sh,score_controls_public.sh}` | Pod driver scripts for the overnight run and the controls' public scoring; end with `runpodctl stop pod <id>` (pod ids hard-coded — edit per pod). Pattern to reuse; per memory rule, future drivers must sync results locally BEFORE the stop call. |
+
+**Seeds in `semsup_train.py`:** `--split-seed` fixes the train/val partition; `--init-seed` (defaults
+to `--seed`) seeds `random` + `torch` + CUDA, which drives LoRA init (lora_A random, lora_B zero, so
+step-0 output equals BADAS-Open for every seed), the per-epoch training-example shuffle, and LoRA
+dropout (p=0.05) — all from ONE RNG, so init vs data-order effects cannot be separated by flags.
+
+**Website builders (additions through 2026-09-29):** `build_experiments_data.py` has `OVN` path,
+`public_block()` + `EXPECTED_CM_PUBLIC` (public 667 panel, pinned to per-clip dumps), mean-over-N
+AP from `by_epoch`, `STAGE1`-style noise floor derived from AA-ctrl-seed1/2; EXPECTED_CM /
+EXPECTED_CM_PUBLIC already contain the 6 overnight arms (midneg/fullpool seed0-2) but no ARMS entries
+reference them yet. `build_compare_data.py` `TEST_SCORES` includes those 6 arms (val-selected epochs).
+`assets/site.css` `.pickrow` now sets `background:transparent` + resets button borders (was UA gray).
 
 ## P1 — two-stage (semantic-pretrain → crash-finetune) training
 

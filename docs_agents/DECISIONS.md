@@ -541,6 +541,27 @@
   sharply, so on the equally-weighted Kaggle mAP the net gain shrinks to +0.001 (vs +0.008 on overall
   AP). See EXPERIMENTS.md's "Overnight run 2026-09-27" entry for full tables.
 
+- **Picking each seed's best epoch by test score (e.g. midneg-seed2 epoch 3 "because it has fewer
+  FN")** → rejected (2026-09-29): selecting on the test set; also not better — ep3 trades FN 265→79
+  for FP 33→153 at identical AP. Use one epoch fixed in advance for all seeds.
+- **Reporting the single best checkpoint (midneg-seed0-ep01, pooled AP 0.9237)** → rejected: 1 of 9
+  draws, within seed noise. Report mean ± sd.
+- **Calibrating the decision threshold for reported confusion matrices** → rejected by user
+  (2026-09-29): 0.5 stays the standard threshold for CM/P/R/F1/Acc; AP/Kaggle mAP are threshold-free.
+  Calibration is a later deployment question only, reported separately if ever done.
+
+## Unresolved (new, 2026-09-29)
+- **Which fixed epoch is the recipe?** Epoch 1 has the best 3-seed mean AP (0.9185 vs 0.9157 ep2,
+  0.9133 ep3) but that ranking comes from the test set. Needs to be fixed from val (requires
+  `--dump-val-scores`) or declared, then confirmed on fresh seeds (3-5) before any headline claim.
+- **Seed-to-seed calibration jitter** (score offsets between checkpoints with equal AP, driven by
+  `--init-seed`: LoRA init + per-epoch shuffle + LoRA dropout; split fixed). Candidate stabilisers, none
+  tried: cosine LR decay or EMA/SWA weight averaging instead of constant LR 2e-4; a trainable logit
+  scale+bias (or unfreeze only the head bias) since the frozen head cannot absorb a global offset;
+  seed ensembling. Attributing the jitter to LoRA init vs data order needs a code change: both are
+  drawn from the same RNG seeded by `--init-seed` (`--seed` only supplies its default), so no
+  existing flag varies one without the other.
+
 ## Unresolved (new, 2026-09-27)
 - **1.5s TTE is now the priority target.** It's the weakest bucket for every arm tried
   (0.87-0.89 AP vs 0.91-0.94 at 0.5s/1.0s), and midpoint negatives made it slightly worse — a method
