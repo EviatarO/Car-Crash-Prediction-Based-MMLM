@@ -942,6 +942,9 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--limit-random", action="store_true",
+                     help="with --limit N: take a seeded random N rows (--seed) instead of the first N - the "
+                          "captions files list all positives first, so the first N can be one class only")
     ap.add_argument("--captions-path", default=None,
                      help="override the caption JSONL (default: Caption_Train_All_Clips.jsonl, "
                           "the 267-row pool). The training pool IS whichever file this points "
@@ -1324,7 +1327,11 @@ def main():
         opt.load_state_dict(torch.load(args.optimizer_init, map_location=device))
         print(f"[load] restored optimizer state from {args.optimizer_init}")
 
-    examples = load_training_examples(limit=args.limit, captions_path=args.captions_path)
+    examples = load_training_examples(limit=0 if args.limit_random else args.limit,
+                                      captions_path=args.captions_path)
+    if args.limit and args.limit_random:
+        examples = random.Random(args.seed).sample(examples, min(args.limit, len(examples)))
+        print(f"[data] --limit-random: {len(examples)} rows ({sum(e['label'] for e in examples)} pos)")
     horizon_w = None
     if args.horizon_weights:
         horizon_w = {float(k): float(v) for k, v in (kv.split(":") for kv in args.horizon_weights.split(","))}
@@ -1508,6 +1515,7 @@ def main():
         # logged so a run with an incomplete aa4_token_labels.py pass is easy to spot).
         total_aux, n_aux_missing = 0.0, 0
         aux_cos_sum, aux_cos_n, aux_cos_neg = 0.0, 0, 0
+        aux_cos_by_group = defaultdict(lambda: [0.0, 0])   # 'pos_1.5' -> [cos_sum, n]
         aux_gnorm_crash, aux_gnorm_aux = 0.0, 0.0
         # Widened alongside the grad-cosine gate above (2026-09-25) - was `if aux_head is not
         # None`, which left this None for attn_rank/attn_mass/gradcam and crashed the first
@@ -1760,6 +1768,10 @@ def main():
                         if c == c:
                             aux_cos_sum += c
                             aux_cos_n += 1
+                            if ex.get("horizon_label"):
+                                gk = f"{'pos' if ex['label'] else 'neg'}_{_horizon_seconds(ex['horizon_label'])}"
+                                aux_cos_by_group[gk][0] += c
+                                aux_cos_by_group[gk][1] += 1
                             aux_cos_neg += int(c < 0)
                             aux_gnorm_crash += fc.norm().item()
                             aux_gnorm_aux += fa.norm().item()
@@ -2079,6 +2091,8 @@ def main():
                 # total_aux/n_aux_missing/aux_cos_n stay 0 by construction).
                 "aux_loss": _j(avg_aux), "n_aux_missing": n_aux_missing,
                 "aux_grad_cos_mean": _j(aux_grad_cos_mean),
+                "aux_grad_cos_by_group": {k: {"cos": round(v[0] / v[1], 5), "n": v[1]}
+                                          for k, v in sorted(aux_cos_by_group.items()) if v[1]},
                 "aux_grad_cos_frac_neg": _j(aux_grad_cos_frac_neg),
                 "aux_grad_norm_crash": _j(aux_grad_norm_crash),
                 "aux_grad_norm_aux": _j(aux_grad_norm_aux),
