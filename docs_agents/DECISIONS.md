@@ -569,6 +569,21 @@
 - **Stage D (re-test attn_rank R_pos on the midneg recipe, 3 seeds)** → deferred, not run.
 - **Pilot with `--limit N`** → bug: captions files list all positives first; use `--limit-random`.
 
+### Loss-based look-ahead CLOSED (2026-09-30) — negative result
+- **lambda=1.0 follow-up, 3 seeds, epoch 1 (pre-registered): FAIL vs both baselines.** vs plain midneg:
+  1.5s AP −0.0032 (2/3), Kaggle −0.0031, FPR@85 −0.011 (better); vs symmetric weights: 1.5s −0.0074
+  (0/3), Kaggle −0.0050. Epoch 2 ≈ tie, epoch 3 worse. Lower weight removed the false-alarm cost of
+  lambda 15.3 but added no 1.5s gain. Outputs `outputs/stage2b_lambda1_2026-09-30/`.
+- **Why Stage 0b over-promised (root cause, checked 2026-09-30):** the predicted future z_hat is a
+  function of z_now only, so it cannot carry new information at inference. On the 1.5s pool windows a
+  plain label-trained linear probe on z_now reaches AP 0.7955 — above the frozen head on the predicted
+  future (0.7782; the 0b report's 0.794 was fit on both pair types). The 0b gate compared against a
+  frozen, untuned readout; the missing control was a trained readout of the present. The oracle
+  (0.894) needs frames that do not exist at test time. **Rule for future gates:** any "feed the head a
+  derived feature" test must include a label-trained readout of the same input as a control.
+- Stage 0a still stands: 94% of missed 1.5s crashes become visible later in the same video → the
+  limit is what the 1.5s window CONTAINS, not how it is read.
+
 ### Stage 2 RESULT (2026-09-30, 3 seeds x 3 epochs, pooled 1,344; lambda=15.3 from the pilot) and follow-up rule
 - la-full − la-shuf (primary), epoch 1: 1.5s AP **+0.0078 (3/3)**, 1.0s +0.0028 (3/3), 0.5s −0.0036 (0/3),
   Kaggle +0.0023 (3/3), FPR@85 **+0.0129 (worse)** → pre-registered rule **FAIL** (FPR clause). Epoch 2:

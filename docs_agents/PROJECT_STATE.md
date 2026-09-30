@@ -26,6 +26,12 @@ Numbers for everything below: EXPERIMENTS.md "2026-09-29/30" entries.
   epoch 3 ≈0. Passes the literal pre-registered rule but is inside seed noise → treat as the
   baseline bar (Stage 2 should also be compared against it). Results pulled to
   `outputs/stage1_horizon_weights_2026-09-29/sym/`.
+- **2026-09-30 06:20 UTC — loss-based look-ahead CLOSED as a negative result** (lambda 1.0 also fails
+  vs both baselines; root cause: z_hat carries no information beyond z_now — see DECISIONS.md
+  "Loss-based look-ahead CLOSED"). Best 1.5s result so far = symmetric horizon weights (+0.004, n.s.).
+  All pods stopped. **Next step needs a user decision:** give the model more of the past (longer input
+  window / temporal stride), a motion/kinematic signal (Stage 4 detection target), or accept the
+  1.5s ceiling and write up. 
 - **Stage 2 RESULT (pulled 2026-09-30 04:10 UTC to `outputs/stage2_lookahead_2026-09-30/`): does NOT
   beat the baselines** — see DECISIONS.md "Stage 2 RESULT". Small real signal (true future beats
   shuffled at 1.5s, 3/3 seeds) but la-full ≈ la-auxonly < plain midneg; harm is from the loss at
