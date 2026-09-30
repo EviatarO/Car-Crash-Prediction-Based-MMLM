@@ -569,6 +569,23 @@
 - **Stage D (re-test attn_rank R_pos on the midneg recipe, 3 seeds)** → deferred, not run.
 - **Pilot with `--limit N`** → bug: captions files list all positives first; use `--limit-random`.
 
+### Stage 2 RESULT (2026-09-30, 3 seeds x 3 epochs, pooled 1,344; lambda=15.3 from the pilot) and follow-up rule
+- la-full − la-shuf (primary), epoch 1: 1.5s AP **+0.0078 (3/3)**, 1.0s +0.0028 (3/3), 0.5s −0.0036 (0/3),
+  Kaggle +0.0023 (3/3), FPR@85 **+0.0129 (worse)** → pre-registered rule **FAIL** (FPR clause). Epoch 2:
+  1.5s +0.0045 (3/3), Kaggle −0.0004; epoch 3: 1.5s +0.0046 (2/3), FPR@85 +0.031.
+- vs the real baselines it does NOT win (epoch 1): la-full 1.5s AP 0.8699 / Kaggle 0.9120 vs plain
+  midneg 0.8776 / 0.9164 vs symmetric weights 0.8818 / 0.9183. The shuffled control is a damaging
+  distractor (1.5s −0.0155 vs midneg), so "full beats shuffled" overstates the gain.
+- **la-auxonly (loss only, gate frozen at 0, no vote) ≈ la-full**, and both are worse than plain midneg
+  (auxonly−midneg epoch 1: AP −0.0037, 1.5s −0.0081, Kaggle −0.0036, FPR@85 +0.0079; epoch 3 worse
+  everywhere). → the harm comes from the look-ahead LOSS reshaping the trunk at weight 15.3, not
+  from the vote (full − auxonly ≈ 0).
+- **Follow-up arm (pre-registered before running): la-full at lambda = 1.0 (15x lower), seeds 0-2,
+  epoch 1, no shuffled control yet.** PASS iff vs BOTH plain midneg and symmetric-weights (same seed):
+  mean paired 1.5s AP > 0 AND 0.5s and 1.0s AP each not lower by more than 0.005 AND FPR@85 not
+  higher by more than 0.005. Only on a PASS add la-shuf at lambda=1 and go to 5 seeds. A FAIL closes
+  the loss-based look-ahead direction (write up as a negative result + the offline 0b evidence).
+
 ### Stage 2 pre-registered pass rule (written 2026-09-30, BEFORE any Stage 2 run)
 - Primary comparison: **la-full vs la-shuf** (shuffled-future control), seeds 0-2, **epoch 1**,
   pooled 1,344 clips. PASS iff mean paired 1.5s AP > 0 AND 0.5 s and 1.0 s AP each not lower by
