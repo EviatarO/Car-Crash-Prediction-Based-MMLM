@@ -1,7 +1,7 @@
 #!/bin/bash
 # Week-1 reasoning-path run on a RunPod pod (plans 2026-10-05_Plan-Week1-GoNoGo-rev3 and 2026-10-05_Plan-HF-Window-Repos-and-Pod).
 # Usage:  bash r1_pod_run.sh <stage> [arg]
-#   setup | tests | build_dada | features_nexar | features_dada | smoke | pull | p1_ab | p1_full <random|qwen> | g1 | p2 | g2 | push_ckpt | bundle
+#   setup | tests | build_dada | features_nexar | features_dada | smoke | pull | p1_ab | p1_full <random|qwen> | g1 | p2 | g2 | push_ckpt | bundle | check_stop | stop <pod_id>
 # Each stage logs to $OUT/logs/<stage>.log and writes $OUT/logs/<stage>.done on success (check $?, no pipes).
 # Data lives on private HF repos (eviatarO-org/nexar-windows, mmau-dada-windows, vjepa2-a1-features, eviatarO-org/checkpoints);
 # the pod holds only working files under /root (container disk). Code is copied to $ROOT (default /root/r1) from the PC.
@@ -88,7 +88,10 @@ p1_full)  # ARG = winning init (random | qwen)
         --epochs 15 --patience 3 --eff-bs 16 --micro-bs 8 --lr-merger 1e-3 --grad-ckpt
   ;;
 g1)       # phase-1 gates: DADA val (valid crash windows only) + zero-shot on Nexar val (V12 description)
-  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_dada
+  # option b (2026-10-06): Phase 1 trains/selects on DADA crash windows with A1 P(collision) >= 0.5 (r1_train --p1-min-p 0.5 default);
+  # the gates run on that group AND, separately, on the windows the encoder did not flag (P < 0.5)
+  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_dada --min-p 0.5
+  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_dada_lowp --max-p 0.5
   run $PY -u r1_eval_gates.py --phase 1 --source nexar --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_nexar_zeroshot
   ;;
 p2)
@@ -117,6 +120,19 @@ bundle)   # results bundle defined upfront: logs, jsons, summaries, generations 
       logs phase1_ab_* phase1 phase2 gates_* smoke_* pod_env.txt 2>/dev/null
   ls -la /root/r1_week1_results.tar.gz | tee -a $LOG
   echo "NEXT: download /root/r1_week1_results.tar.gz to local BEFORE 'runpodctl stop \$RUNPOD_POD_ID'"
+  ;;
+check_stop)   # can this pod stop itself? (RunPod injects RUNPOD_API_KEY into the container's start environment; value never printed)
+  if tr '\0' '\n' < /proc/1/environ | grep -q '^RUNPOD_API_KEY='; then echo "RUNPOD_API_KEY: present"; else echo "RUNPOD_API_KEY: MISSING"; fi
+  command -v runpodctl >/dev/null && echo "runpodctl: $(command -v runpodctl)" || echo "runpodctl: MISSING"
+  tr '\0' '\n' < /proc/1/environ | grep -E '^RUNPOD_POD_ID=' | sed 's/^/pod id env: /' || true
+  ;;
+stop)   # ARG = pod id (from the console, or the prefix of the ssh.runpod.io user name). Only after the bundle was DOWNLOADED.
+  [ -f /root/r1_week1_results.tar.gz ] || { echo "no results bundle: run 'bundle' and download it first"; exit 3; }
+  export $(tr '\0' '\n' < /proc/1/environ | grep -E '^(RUNPOD_API_KEY|RUNPOD_POD_ID)=' | xargs)
+  POD=${ARG:-${RUNPOD_POD_ID:-}}
+  [ -n "$POD" ] || { echo "pod id unknown: pass it as the 2nd argument"; exit 4; }
+  echo "stopping pod $POD at $(date -u)" | tee -a $LOG
+  runpodctl stop pod "$POD" 2>&1 | tee -a $LOG
   ;;
 *) echo "unknown stage $STAGE"; exit 2 ;;
 esac

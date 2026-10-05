@@ -49,12 +49,18 @@ class Cache:
         return self.rows[wid]["p_collision"]
 
 
-def load_items(source, phase, split, cache: Cache):
-    """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2."""
+def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None):
+    """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
+    min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
+    Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set)."""
     out = []
     for l in open(MANIFEST[source], encoding="utf-8"):
         r = json.loads(l)
         if not r["valid"] or r["split"] != split or r["id"] not in cache:
+            continue
+        if min_p is not None and cache.p_collision(r["id"]) < min_p:
+            continue
+        if max_p is not None and cache.p_collision(r["id"]) >= max_p:
             continue
         if phase == 1:
             if source == "nexar":      # zero-shot evaluation only (never trained on in phase 1):

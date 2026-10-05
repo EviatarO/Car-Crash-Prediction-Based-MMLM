@@ -96,7 +96,8 @@ def build_nexar():
         vid = str(e["video_id"]).zfill(5)
         reason = None
         if label == 1 and not nexar_crash_visible(tte, lead[vid]):
-            reason = f"hazard not yet visible (alert {lead[vid]:.2f} s before the event < TTE {tte})"
+            reason = (f"hazard not yet visible (alert {lead[vid]:.2f} s before the event < TTE {tte} + 0.27 s margin)"
+                      if lead[vid] >= tte else f"hazard not yet visible (alert {lead[vid]:.2f} s before the event < TTE {tte})")
         rows.append({"id": f"nexar_{fd}", "source": "nexar", "split": split_of[fd], "video_key": vid,
                      "frames_dir": fd, "label": label, "tte": tte, "valid": reason is None, "drop_reason": reason,
                      "gt": {"v12_caption": r["caption_neutral"], "lead_s": lead.get(vid)},
@@ -132,14 +133,14 @@ def main():
     write(nex, MAN / "r1_nexar_v12_windows.jsonl")
     summarize(dada, f"DADA ({skipped} no-accident videos skipped)")
     summarize(nex, "Nexar V12 pool")
-    # plan assertions (numbers computed on 2026-10-05)
+    # plan assertions (DADA 2026-10-05; Nexar recomputed 2026-10-06 with the 8-frame margin: was 442 / 110)
     vd = [r for r in dada if r["label"] == 1 and r["valid"]]
     assert len(vd) == 3299, len(vd)
     tr = [r for r in nex if r["split"] == "train" and r["label"] == 1 and r["valid"]]
     va = [r for r in nex if r["split"] == "val" and r["label"] == 1 and r["valid"]]
-    assert (len(tr), len(va)) == (442, 110), (len(tr), len(va))
+    assert (len(tr), len(va)) == (353, 88), (len(tr), len(va))
     assert not any(r["valid"] for r in nex + dada if r["drop_reason"])
-    print("\n[ok] counts match the plan: DADA 3,299 valid crash windows; Nexar train 442 / val 110 valid crash")
+    print("\n[ok] counts match the plan: DADA 3,299 valid crash windows; Nexar train 353 / val 88 valid crash")
 
 
 if __name__ == "__main__":

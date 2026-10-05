@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--val-split", default="val", help="smoke tests only: use another split as validation")
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after N optimizer steps")
+    ap.add_argument("--p1-min-p", type=float, default=0.5,
+                    help="phase 1: train/select only on DADA crash windows with A1 P(collision) >= this (0 = all; option b)")
     args = ap.parse_args()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -135,9 +137,12 @@ def main():
 
     caches = {s: Cache(args.cache_dir, s) for s in ("dada", "nexar")}
     if args.phase == 1:
-        train = load_items("dada", 1, "train", caches["dada"])
-        val = {"dada": load_items("dada", 1, args.val_split, caches["dada"]),
+        mp = args.p1_min_p if args.p1_min_p > 0 else None
+        train = load_items("dada", 1, "train", caches["dada"], min_p=mp)
+        val = {"dada": load_items("dada", 1, args.val_split, caches["dada"], min_p=mp),
                "nexar_zeroshot": load_items("nexar", 1, args.val_split, caches["nexar"])}
+        if mp:   # windows the encoder does NOT flag: reported every epoch, never used for selection
+            val["dada_lowp"] = load_items("dada", 1, args.val_split, caches["dada"], max_p=mp)
         monitor = "dada"
     else:
         train = load_items("dada", 2, "train", caches["dada"]) + load_items("nexar", 2, "train", caches["nexar"])

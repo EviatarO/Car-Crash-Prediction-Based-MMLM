@@ -162,6 +162,8 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--n-gen", type=int, default=50, help="windows to generate for diversity / facts")
     ap.add_argument("--max-ret", type=int, default=0, help="limit retrieval windows (0 = all)")
+    ap.add_argument("--min-p", type=float, default=0, help="only windows with A1 P(collision) >= this (0 = off)")
+    ap.add_argument("--max-p", type=float, default=0, help="only windows with A1 P(collision) < this (0 = off)")
     args = ap.parse_args()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -177,7 +179,8 @@ def main():
     bridge.eval()
 
     caches = {s: Cache(args.cache_dir, s) for s in ("dada", "nexar")}
-    items = load_items(args.source, args.phase, args.split, caches[args.source])
+    items = load_items(args.source, args.phase, args.split, caches[args.source],
+                       min_p=args.min_p if args.min_p > 0 else None, max_p=args.max_p if args.max_p > 0 else None)
     print(f"[gates] phase {args.phase} {args.source}/{args.split}: {len(items)} windows "
           f"({'valid crash only' if args.phase == 1 else 'valid crash + no-crash'})")
     assert items, "no windows"
@@ -189,7 +192,13 @@ def main():
     rep["ara_real"] = ara_choice(bridge, items, caches, dev, args.phase, "real")
     rep["ara_blank"] = ara_choice(bridge, items, caches, dev, args.phase, "blank")
 
-    gen_items = random.Random(0).sample(items, min(args.n_gen, len(items)))
+    rg = random.Random(0)                      # generations: half crash / half no-crash when both exist
+    pos, neg = [i for i in items if i["label"] == 1], [i for i in items if i["label"] == 0]
+    if pos and neg:
+        k = min(args.n_gen // 2, len(pos), len(neg))
+        gen_items = rg.sample(pos, k) + rg.sample(neg, k)
+    else:
+        gen_items = rg.sample(items, min(args.n_gen, len(items)))
     gens = {m: generate_all(bridge, gen_items, caches, dev, m) for m in ("real", "blank")}
     rep["diversity"] = {m: {"distinct_of_n": len(set(g)), "n": len(g), "distinct_1": distinct_n(g, 1),
                             "distinct_2": distinct_n(g, 2)} for m, g in gens.items()}

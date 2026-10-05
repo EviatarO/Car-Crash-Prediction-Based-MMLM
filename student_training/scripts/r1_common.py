@@ -3,7 +3,8 @@ r1_common.py - shared definitions for the week-1 reasoning-path experiment (plan
 
 * the 2 s / 16-frame window rule (30 fps source, stride 4)
 * the WINDOW VISIBILITY RULE (memory: window-visibility-rule): a crash window is valid only if the hazard
-  has already started inside it  (DADA: end >= t_ai + 8 frames; Nexar: end >= time_of_alert)
+  has already started inside it, with the same margin for every source: end >= hazard start + 8 frames (0.27 s)
+  (DADA: hazard start = t_ai; Nexar: time_of_alert; margin added for Nexar 2026-10-06)
 * r1 target texts (ground-truth fields only) and the two instruction questions
 """
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import re
 
 STRIDE, N_FR, FPS_SRC = 4, 16, 30
-VIS_MARGIN_FRAMES = 8                  # DADA: hazard must be >= 8 frames (0.27 s) into the window
+VIS_MARGIN_FRAMES = 8                  # hazard must be >= 8 source frames (0.27 s) into the window (all sources)
 TTES = (0.5, 1.0, 1.5)
 
 Q_PHASE1 = "Describe the motion and objects in this clip."
@@ -34,8 +35,8 @@ def dada_crash_visible(end: int, t_ai: int) -> bool:
 
 def nexar_crash_visible(tte: float, lead_s: float) -> bool:
     """lead_s = time_of_event - time_of_alert. The window ends `tte` s before the event; the hazard is
-    flagged `lead_s` s before the event; so it has started inside the window iff lead_s >= tte."""
-    return lead_s >= tte
+    flagged `lead_s` s before the event; it is visible for at least the margin iff lead_s >= tte + 8/30 s."""
+    return lead_s + 1e-9 >= tte + VIS_MARGIN_FRAMES / FPS_SRC
 
 
 def dada_targets(label: int, tte, event: str, cause: str) -> dict:
