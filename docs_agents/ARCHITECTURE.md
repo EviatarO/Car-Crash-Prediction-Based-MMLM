@@ -45,8 +45,8 @@ LN(1024) → concat 4096 → Linear 4096→4096 → GELU → Linear →2560, ~27
   `README.md` (dataset card), `windows.jsonl` + `windows.csv` (window_id, video_id, time to alert/abnormal start, time to event/collision,
   TTE group, label, split, window_end_s, 16 source frame indices + fps, valid + drop_reason, reasoning text, r1 targets, ArA (DADA),
   A1 P(collision), preprocess string, shard), `shards/{split}-NNNN.tar` WebDataset with `<window_id>.npz` uint8 (16,256,256,3) lossless,
-  frames produced by the V-JEPA2 processor's own resize. Repos: `EviatarO/r1-nexar-windows`, `EviatarO/r1-mmau-dada-windows`,
-  `EviatarO/r1-vjepa-a1-features`, later `r1-checkpoints`. Training pulls features only.
+  frames produced by the V-JEPA2 processor's own resize. Repos: `eviatarO-org/nexar-windows`, `eviatarO-org/mmau-dada-windows`,
+  `eviatarO-org/vjepa2-a1-features`, later `eviatarO-org/checkpoints`. Training pulls features only.
 
 ## 3. Constraints / invariants
 - Splits by video, never by row. Nexar test sets (677/667) and DADA test split are untouched until evaluation; no training source may share

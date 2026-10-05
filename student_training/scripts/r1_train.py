@@ -185,7 +185,8 @@ def main():
             step += 1
             if step % 25 == 0 or step == 1:
                 print(f"  ep{ep} step {step}/{total} loss {run / max(1, n_run):.4f} grad-norm {float(gn):.2f} "
-                      f"lr {opt.param_groups[0]['lr']:.2e} {(time.time() - t0) / 60:.1f}min", flush=True)
+                      f"lr {opt.param_groups[0]['lr']:.2e} {(time.time() - t0) / 60:.1f}min "
+                      f"peak {torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0:.1f}GB", flush=True)
             if args.max_steps and step >= args.max_steps:
                 break
         rec = {"epoch": ep, "step": step, "train_loss": run / max(1, n_run)}

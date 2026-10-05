@@ -50,12 +50,12 @@ account is not authorised (full clips unavailable; 16-frame windows exist locall
 3. Check HF write scope (local token is fine-grained; known only on first `create_repo`).
 4. **Write `student_training/scripts/r1_build_window_repo.py`** (not written yet): manifest → 16 frames at 256×256 via the processor's own
    resize → WebDataset shards `<window_id>.npz` uint8 (16,256,256,3) + `windows.jsonl`/`.csv` + dataset card → `HfApi.upload_large_folder`.
-   Private repos: `EviatarO/r1-nexar-windows` (1,457 windows, built on the PC), `EviatarO/r1-mmau-dada-windows` (4,582 windows, built on the pod),
-   `EviatarO/r1-vjepa-a1-features` (derived tokens). Exactness check: P(collision) from stored frames vs originals within 0.004 on 20 windows.
+   Private repos: `eviatarO-org/nexar-windows` (1,457 windows, built on the PC), `eviatarO-org/mmau-dada-windows` (4,582 windows, built on the pod),
+   `eviatarO-org/vjepa2-a1-features` (derived tokens). Exactness check: P(collision) from stored frames vs originals within 0.004 on 20 windows.
 5. Change `r1_cache_features.py` to read the HF window repos (`--from-hf`); add `scan/build_dada/features/push/pull` stages to `r1_pod_run.sh`.
 6. Pod `smoke` stage (real LM, 50 steps) → stop and report memory / s/step / loss.
 7. Training session (L40S, or A100 SXM if unavailable): `p1_ab → p1_full → g1 → p2 → g2 → bundle`; push `best.pt` to a private
-   `r1-checkpoints` repo; download the bundle **before** stopping the pod.
+   `eviatarO-org/checkpoints` repo; download the bundle **before** stopping the pod.
 8. **Next session, once Phase-1 results exist:** measure the hazard hallucination rate on no-crash validation windows (DADA val + 178 Nexar val
    no-crash); if high → re-weight Phase 2 toward no-crash or add no-crash windows to Phase 1 at ~20%.
 9. User pushes branch `reasoning-path-vjepa2-llm`; Claude never pushes.

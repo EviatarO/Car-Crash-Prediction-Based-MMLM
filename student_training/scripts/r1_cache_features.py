@@ -242,9 +242,112 @@ def run_dada(args, badas):
     print(f"[dada] encoded {n_enc} windows -> {sink.fx}")
 
 
+# ----------------------------------------------------------------------------- HF window repos (chunked, no big local file)
+def run_from_hf(args, badas):
+    """Encode the windows of a private HF window repo (made by r1_build_window_repo.py) shard by shard.
+    Per shard: download -> encode -> chunks/<source>/<shard>.npy (+ .jsonl written LAST = done marker) -> optional push to
+    --push-repo under <source>/ -> delete the shard and the chunk .npy. Resumable: finished shards are skipped."""
+    import collections
+    from huggingface_hub import HfApi, hf_hub_download
+    api, work = HfApi(), Path(args.out_dir)
+    local_repo = Path(args.from_hf) if Path(args.from_hf).is_dir() else None     # a folder = dry run on a local build
+
+    def fetch(f):
+        return str(local_repo / f) if local_repo else hf_hub_download(args.from_hf, f, repo_type="dataset", local_dir=str(work / "_hf"))
+
+    wp = fetch("windows.jsonl")
+    rows = [json.loads(l) for l in open(wp, encoding="utf-8")]
+    rows = [r for r in rows if r["split"] in args.splits]
+    by_shard = collections.OrderedDict()
+    for r in sorted(rows, key=lambda r: (r["shard"], r["window_id"])):
+        by_shard.setdefault(r["shard"], {})[r["window_id"]] = r
+    cdir = work / "chunks" / args.source
+    cdir.mkdir(parents=True, exist_ok=True)
+    remote = set()
+    if args.push_repo:
+        api.create_repo(args.push_repo, repo_type="dataset", private=True, exist_ok=True)
+        remote = set(api.list_repo_files(args.push_repo, repo_type="dataset"))
+    print(f"[hf] {len(rows)} windows in {len(by_shard)} shards from {args.from_hf}", flush=True)
+    t0, n_done, worst = time.time(), 0, 0.0
+    for si, (shard, meta) in enumerate(by_shard.items()):
+        if args.max_shards and si >= args.max_shards:
+            break
+        name = Path(shard).stem
+        if (cdir / f"{name}.jsonl").exists() or f"{args.source}/{name}.jsonl" in remote:
+            print(f"  [skip] {name} already encoded", flush=True)
+            continue
+        sp = fetch(shard)
+        npy = cdir / f"{name}.npy"
+        arr = np.lib.format.open_memmap(npy, mode="w+", dtype=np.float16, shape=(len(meta), N_TOK, DIM))
+        recs = []
+        with tarfile.open(sp) as tf:
+            for m in tf:
+                wid = m.name[:-4]
+                if wid not in meta:
+                    continue
+                frames = np.load(io.BytesIO(tf.extractfile(m).read()))["frames"]
+                tokens, p = encode(badas, preprocess_frames(badas.vjepa, list(frames)))
+                arr[len(recs)] = tokens
+                ref = meta[wid].get("a1_p_collision")
+                if ref is not None:
+                    worst = max(worst, abs(p - ref))
+                recs.append({"id": wid, "row": len(recs), "p_collision": round(p, 5), "split": meta[wid]["split"],
+                             "label": meta[wid]["label"], "a1_ref": ref})
+        assert len(recs) == len(meta), (name, len(recs), len(meta))
+        arr.flush()
+        del arr
+        ix = cdir / f"{name}.jsonl"
+        ix.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+        n_done += len(recs)
+        if args.push_repo:
+            api.upload_file(path_or_fileobj=str(npy), path_in_repo=f"{args.source}/{name}.npy", repo_id=args.push_repo, repo_type="dataset")
+            api.upload_file(path_or_fileobj=str(ix), path_in_repo=f"{args.source}/{name}.jsonl", repo_id=args.push_repo, repo_type="dataset")
+            npy.unlink()
+        if not local_repo:
+            Path(sp).unlink(missing_ok=True)
+        el = time.time() - t0
+        print(f"  [{si + 1}/{len(by_shard)}] {name}: {len(recs)} windows, {el / n_done:.2f}s/window, "
+              f"max|p - recorded A1 p| so far = {worst:.4f}", flush=True)
+    print(f"[hf] done; max|p - recorded A1 p| = {worst:.4f} (tolerance 0.004)", flush=True)
+
+
+def consolidate(args):
+    """Training pod: merge the <source>/*.npy|jsonl chunks of the features repo into the features_<source>.npy
+    memmap + index_<source>.jsonl that r1_data.Cache reads. Chunks are fetched one at a time and deleted after
+    merging, so peak disk = final cache + one chunk (not 2x the cache)."""
+    out = Path(args.out_dir)
+    local = Path(args.consolidate_from).is_dir()                     # a local chunks folder (smoke runs)
+    if local:
+        names = sorted(p.stem for p in (Path(args.consolidate_from) / args.source).glob("*.jsonl"))
+        get = lambda f: str(Path(args.consolidate_from) / f)          # noqa: E731
+    else:
+        from huggingface_hub import HfApi, hf_hub_download
+        names = sorted(Path(f).stem for f in HfApi().list_repo_files(args.consolidate_from, repo_type="dataset")
+                       if f.startswith(f"{args.source}/") and f.endswith(".jsonl"))
+        get = lambda f: hf_hub_download(args.consolidate_from, f, repo_type="dataset", local_dir=str(out / "_features_repo"))  # noqa: E731
+    recs = {n: [json.loads(l) for l in open(get(f"{args.source}/{n}.jsonl"), encoding="utf-8")] for n in names}
+    sink = Sink(out, args.source, capacity=sum(len(r) for r in recs.values()))
+    for n in names:
+        if all(r["id"] in sink.done for r in recs[n]):
+            continue
+        npy = get(f"{args.source}/{n}.npy")
+        mm = np.load(npy, mmap_mode="r")
+        for r in recs[n]:
+            if r["id"] not in sink.done:
+                sink.add(r["id"], np.asarray(mm[r["row"]]), r["p_collision"], {"split": r["split"], "label": r["label"]})
+        del mm
+        if not local:
+            Path(npy).unlink(missing_ok=True)
+    sink.close()
+    print(f"[consolidate] {args.source}: {sink.n} windows -> {sink.fx}", flush=True)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True, choices=["nexar", "dada"])
+    ap.add_argument("--from-hf", default=None, help="encode the shards of this private HF window repo (chunked, resumable)")
+    ap.add_argument("--max-shards", type=int, default=0, help="with --from-hf: encode only the first N shards (smoke runs)")
+    ap.add_argument("--push-repo", default=None, help="with --from-hf: upload each encoded chunk here, then delete it locally")
+    ap.add_argument("--consolidate-from", default=None, help="merge the chunks of this HF features repo into features_<source>.npy")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--splits", default="train,val")
     ap.add_argument("--limit", type=int, default=0, help="encode at most N windows (dry runs)")
@@ -255,9 +358,13 @@ def main():
     ap.add_argument("--allow-truncated", action="store_true", help="dry runs on the first parts only: tolerate the cut at the part boundary")
     args = ap.parse_args()
     args.splits = set(args.splits.split(","))
-    if args.source == "dada" and not (args.parts_dir or args.url_parts):
-        ap.error("dada needs --parts-dir or --url-parts")
+    if args.consolidate_from:
+        return consolidate(args)
+    if args.source == "dada" and not (args.parts_dir or args.url_parts or args.from_hf):
+        ap.error("dada needs --from-hf, --parts-dir or --url-parts")
     badas = load_model()
+    if args.from_hf:
+        return run_from_hf(args, badas)
     (run_nexar if args.source == "nexar" else run_dada)(args, badas)
 
 
