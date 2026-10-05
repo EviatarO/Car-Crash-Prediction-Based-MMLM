@@ -1,83 +1,91 @@
 <!-- handoff-month: 2026-10 -->
 # Architecture
 
-Current-state map only. September detail (AA pipeline internals, AA/AA-H/look-ahead loss designs, semantic-supervision wiring, A1-failure
-recovery, captioning pipelines, per-script API listings): `history/2026-09_ARCHITECTURE.md`. Block-by-block shapes: `ARCHITECTURE_BLOCKS.md`.
+Current-state map only. September detail (AA pipeline internals, loss designs, semantic-supervision wiring, captioning pipelines):
+`history/2026-09_ARCHITECTURE.md`. Block-by-block crash-path shapes: `ARCHITECTURE_BLOCKS.md`.
 
-## 1. Crash-score path (frozen, the "fast path")
-`16 JPEG frames (1280×720, stride-4 over ~60 source frames ≈ 2 s, ~7.5 fps)` → `preprocess_clip` → V-JEPA2 ViT-L encoder
-(24 layers, LoRA on `query,key,value`) → **2048 real tokens** (8 tubelets × 16×16 patches × 1024) → BADAS `backbone.predictor` is fed those 2048
-+ 512 mask tokens and returns 512 "future" tokens → `[2048 real, 512 predicted] = 2560 × 1024` into the crash head
-(`temporal_processor` attentive probe, 12 learned queries → `pooled (1024)` → `classifier` → 2 logits) → `softmax(logits/T)[1]`.
-- Crash head frozen in every shipped arm. Test-time temperature: A0's published scorer uses T=2; every trained arm's scorers use T=1
-  (monotone: AP/AUC/CM@0.5 unaffected, Brier/ECE are — never compare calibration across the two).
-- **Preprocessing:** `preprocess_clip(vjepa, paths, mode)` / `--preprocess {crop, compress256}`. `crop` (code default, historical) = shortest edge 292 then
-  centre-crop 256×256 (keeps ~49 % of width). **`compress256` = full frame resized to 256×256 — use for everything new.** `img_size`/`norm_*` keys in
-  `e4_stageA.yaml` are dead config. Token ↔ pixel (compress256): x·256/1280, y·256/720, then /16.
-- **Open:** the concat order of the 2560 tokens (real-then-predicted) is assumed, not proven.
-- Recipes: champion = A1-compress256; best-by-mean = same recipe with `Caption_Train4500_MidpointNeg_1761.jsonl` negatives. Commands in PROJECT_STATE.md.
-  Pass `--lora-target-modules query,key,value` explicitly to reproduce them (108 adapters incl. 36 on the SSL predictor stack, 15.8 % of LoRA params,
-  common-mode); the argparse default is now the encoder-only regex (72 adapters).
+## 1. Crash-score path (frozen)
+`16 JPEG frames (1280×720, every 4th of 30 fps = 7.5 fps over 2.0 s)` → `preprocess_clip(mode="compress256")` (full frame squashed to 256×256)
+→ V-JEPA2 ViT-L (24 layers, A1 LoRA on `query,key,value`) → **2,048 real tokens** (8 tubelets × 16×16, index = t·256 + h·16 + w, 1024-d)
+→ BADAS predictor adds 512 "future" tokens → `[2048 real, 512 predicted] = 2560×1024` → crash head (`temporal_processor` attentive probe →
+`pooled` 1024 → `classifier` → 2 logits) → `softmax(logits/T)[1]` (T=1 for trained arms, T=2 for published A0).
+- `crop` mode (code default) keeps only the centre ~49 % of width — never use for new work.
 
-## 2. Reasoning path (the active direction; code exists from e4, plan is a draft)
-**Existing code (e4 Stages B/C, June 2026 — runs on a pod, never locally):**
-| file | role |
-|---|---|
-| `student_training/models/vjepa_reason.py` | `VJEPA2FeatureExtractor` (frozen BADAS; forward-pre-hook on `temporal_processor` → caches the 2560×1024 grid as fp16 + frozen score); `ResamplerProjector` (Perceiver-style: in_proj 1024→512, 64 learned queries cross-attend, optional self-attn when Q>1, FFN, Linear→`out_dim` 2560; ~6 M params; **batch-safe**); `PoolMLPProjector` (avg-pool + 2-layer MLP, weaker fallback); `StageBBridge` (LLM + projector; modes `none/zero/shuffle/mask`; visual tokens scattered via `embeds[vis_mask] = vis_tok.reshape(-1,H)` into `inputs_embeds`; optional `match_embed_norm`; greedy `generate`) |
-| `student_training/scripts/e4_stageB_cache_features.py` | caches per-window `(P,1024)` fp16 grid + `cache_manifest_<split>.jsonl` (`assistant_target` copied from the teacher file). ~5.2 MB/window — 60 k windows ≈ 300 GB, beyond the pod volume; cache not kept locally |
-| `e4_stageB_train_bridge.py`, `e4_stageB_eval_gate.py` | projector-only training (CE on the reason span; lr 1e-3, 40 ep, early stop) and the gate: Δ-PPL vs random projector and vs text-only, ΔCE with zeroed/shuffled tokens, hazard-lexicon gap |
-| `e4_stageC_train_sft.py`, `e4_stageC_eval.py`, `e4_stageC_diagnose.py` | LoRA SFT on the LLM with frozen projector; full-JSON CE + optional **score-consistency anchor** `BCE(p_yes@verdict, BADAS score)`; per-clip generation eval; embedding-scale/chat-template/PPL diagnostics |
-| `student_training/data/stageb_bridge_dataset.py` | example = hard-coded Qwen chat template + **64 `pad_token_id` placeholders** after the user header; target = `assistant_target` JSON `{verdict, reason}` (Stage B masks the verdict, Stage C supervises it) |
-| `configs/e4_stageB.yaml`, `e4_stageC{,_v2,_v2_qwen3}.yaml` | Qwen3-4B-Instruct-2507 (strong gate) vs Qwen3.5-4B (weak gate); gate thresholds Δ-PPL ≥20 %, ΔCE-zero/shuffle ≥0.05 |
-- **Caveat:** every e4 cache/projector was built under `crop` preprocessing and on the 2560-token grid (real+predicted). Reuse requires re-caching under
-  `compress256` with the A1-compress256 trunk; a projector trained on cropped features is a distribution shift.
-- Teacher text that exists: `dataset/teacher_labels/teacher_dataset_e3b.jsonl` (267 windows / 89 clips, causal hazard reasoning),
-  `teacher_dataset_v11.jsonl` (100), V10 (leaky) / V12 (neutral, outcome words banned) / V13 (neutral, 96.9 % shared openers — **rejected by user**).
-  Neutral corpora are the wrong target for explanations.
+## 2. Reasoning path (week 1; code on branch `reasoning-path-vjepa2-llm`)
+```
+frozen encoder tokens (8×16×16×1024, cached once, fp16)  ──►  2×2 regroup (8,8,8, 4·1024)  ──►  Merger (Qwen3-VL merger STRUCTURE,
+LN(1024) → concat 4096 → Linear 4096→4096 → GELU → Linear →2560, ~27 M, TRAINED from scratch or Qwen-init A/B)  ──►  512 visual tokens
+──►  Qwen3-VL native video prompt: 8 × "<t seconds><|vision_start|>[64 × <|video_pad|>]<|vision_end|>" + question,
+      3D M-RoPE ids from the model's own get_rope_index(video_grid_thw=(8,16,16)), DeepStack inputs = none
+──►  Qwen3-VL-4B **language model only** (its ViT and merger weights are deleted) — frozen in Phase 1, LoRA in Phase 2  ──►  text
+```
+- **Why this shape:** Qwen3-VL-4B's own ViT has the same token geometry as V-JEPA2 ViT-L (1024-d, patch 16, temporal patch 2, depth 24),
+  so its merger structure and native video-token interface (incl. 3D positions) apply 1:1; only the merger weights are new.
+  The text-only LM + 64-query position-less resampler of June (e4) is superseded.
+- **Phases:** Phase 1 = alignment (merger only, LM frozen) on DADA valid crash windows, target `"<event>; <cause>"`, question
+  "Describe the motion and objects in this clip."; Phase 2 = SFT (merger + LoRA r16/α32 on q,k,v,o,gate,up,down) on DADA + Nexar,
+  50/50 crash/no-crash sampler, question "Is a collision coming? Give: collision yes/no, time to impact, event, cause.", one schema for
+  both classes: `Collision: yes|no. Time to impact: about X s | none in view. Event: … . Cause: … .` (Nexar uses V12 caption as Event and
+  `Cause: not annotated` for both classes). Source tag `[MM-AU]` / `[Nexar]` prefixes every question.
+- **Loss:** next-token CE on answer tokens only, mean per sample then per batch; vocab projection computed only at answer positions.
+- **Selection / early stop:** validation **wrong-video gap** (loss with another clip's tokens − own), not val loss. Blank control = zero
+  V-JEPA features into the merger.
+- **Gates (`r1_eval_gates.py`):** wrong-video gap CI > 0, blank gap CI > 0, retrieval@1 of 10 ≥ 2.5× chance (candidates: different video
+  and different answer text), distinct ≥ 90 % of generations, facts vs blank run (verdict, time-to-impact bucket, DADA event/cause exact,
+  ArA 5-option cause choice by likelihood), plus agreement of the text verdict with the cached A1 P(collision) and caption-overlap metrics.
+- **Precision:** encoder forward fp32 at caching, stored fp16 (asserted |x| < 1e4); merger fp32 master weights; LoRA fp32; LM bf16; grad-clip 1.0.
 
-**Planned design (draft plan, not approved — see DECISIONS.md "Unresolved — reasoning path"):**
-- Encoder = frozen **A1-compress256 trunk** with its exact preprocessing (faithfulness claim requires the same features that drive the score); stock BADAS-Open only as an ablation.
-- `ResamplerProjector` (64 queries) kept; Stage 1 trains the projector only (LLM frozen); Stage 2 = LoRA on the LLM + score-consistency anchor + ~20 % Stage-1 replay.
-- **New wrapper (not built):** encode K consecutive 2 s windows (K ≤ 10), resample each to N≈32 tokens with the shared projector, concatenate with a
-  learned window-index embedding. Needed because many public captions describe 10–30 s clips while the encoder is trained on 2 s windows.
-- **Source tag in the instruction** per training pair (e.g. "[MM-AU]") so style is conditioned on the prompt, not inferred from pixels; Nexar tag at SFT.
-- LLM injection must be **native** for the chosen model (its own vision-token slots/position ids); e4 used generic `pad_token` placeholders (hypothesis, unverified, for the weak Qwen3.5 result).
-- No detector boxes in the inference prompt; boxes only for training targets, grounding evaluation and one ablation arm.
-- Output schema: CAViAR's question set (description → primary reason → at-fault → violated rule); BADAS-Reason's `{reasoning, action}` as the comparison format.
-- **Reference baseline to beat (BADAS-Reason, arXiv 2604.05767 §6.2):** Qwen3-VL-4B-Instruct, QLoRA r16 (11.8 M/4.4 B trainable), peak-risk frame with attention bbox crop 256×256,
-  6,862 samples, lr 1e-4, batch 16, 3 epochs. Qwen3-VL-4B = SigLIP2-Large + 2-layer MLP merger + Qwen3-4B LM (+ DeepStack injection into the first 3 LM layers).
+### Data layer
+- **Windows:** 16 frames, stride 4 at 30 fps, ending at `collision − TTE` (TTE 0.5/1.0/1.5 s) for crash windows; DADA no-crash window ends
+  0.5 s before the abnormal start `t_ai`. **Window visibility rule:** a crash window is valid only if its end ≥ `t_ai` + 8 frames (DADA) /
+  ≥ `time_of_alert` (Nexar); invalid windows are kept in manifests with `drop_reason` but never used.
+- **Manifests:** `dataset/manifests/r1_mmau_dada_windows.jsonl` (official ArA split; 17 no-accident videos skipped) and
+  `r1_nexar_v12_windows.jsonl` (1,761-window V12 pool; A1's `clip_level_split(val_frac=0.2, seed=0)`).
+- **Planned HF repos (approved 2026-10-05, not created):** one private repo per dataset holding only encoder-ready frames:
+  `README.md` (dataset card), `windows.jsonl` + `windows.csv` (window_id, video_id, time to alert/abnormal start, time to event/collision,
+  TTE group, label, split, window_end_s, 16 source frame indices + fps, valid + drop_reason, reasoning text, r1 targets, ArA (DADA),
+  A1 P(collision), preprocess string, shard), `shards/{split}-NNNN.tar` WebDataset with `<window_id>.npz` uint8 (16,256,256,3) lossless,
+  frames produced by the V-JEPA2 processor's own resize. Repos: `EviatarO/r1-nexar-windows`, `EviatarO/r1-mmau-dada-windows`,
+  `EviatarO/r1-vjepa-a1-features`, later `r1-checkpoints`. Training pulls features only.
 
-## 3. Constraints / invariants (must stay true)
-- **Splits by `video_id`, never by row**; a clip contributes up to 3 windows (1,761 windows = 1,107 clips). `clip_level_split(seed)`; `--split-seed` and `--init-seed` are separate (default `--seed`).
-- Test sets: private `dataset/manifests/test_manifest_hires.jsonl` (677: 338 pos / 339 neg, group 0/1/2 = TTE 0.5/1.0/1.5 s, n=284/233/160) and public (667). **No training source may share a `video_id` with either** — assert in any new dataset class.
-- Join caption/label files on `frames_dir` only. Windows: positives at TTE 0.5/1.0/1.5 s before `time_of_event`; negatives at midpoint-based offsets (`MID-10/-4/-8` historic; the midpoint-negatives recipe re-cuts them at the Nexar protocol).
-- AP/AUC are threshold-free; CM/P/R/F1/Acc are reported at **threshold 0.5** and the threshold is always stated; no threshold calibration in reported results.
-- Reporting rules: ≥3 seeds per arm, same fixed epoch for all seeds, mean ± sd, paired bootstrap against the same-seed twin (`paired_bootstrap_ab.py`), FPR at matched recall instead of FP at 0.5 across seeds, pool private+public (1,344). Seed variance (~0.014 AP) ≫ paired test noise (~0.003).
-- Scoring determinism: `--deterministic` (default on) in `semsup_train.py` and `score_checkpoints_on_test.py`; the noise floor of the pre-2026-09-08 scorers was ΔAP 0.0009 (677/677 clips differ).
-- I/O must use the concurrent `prefetch_clips` pipeline (the trunk is I/O-bound); captioning uses concurrent `_fetch_one` with `--concurrency` and writes `<out>.usage.jsonl` (real cost).
-- Teacher text for **explanation** targets may know the outcome (unlike the retired semantic-supervision captions, which had to pass the leakage gate AUC < 0.75); use blind mode on negatives (V11 lesson: a GT block makes the teacher fabricate hazards on no-crash clips).
-- Pods: results synced to local before `runpodctl stop`; outputs go to the container disk; checkpoints persist on volume `0hnvco2s4j` only if written there (it is at quota).
+## 3. Constraints / invariants
+- Splits by video, never by row. Nexar test sets (677/667) and DADA test split are untouched until evaluation; no training source may share
+  a video with either Nexar test set.
+- The encoder for the reasoning path is the frozen **A1-compress256** trunk with `compress256` (faithfulness: same tokens as the crash score).
+- Crash and no-crash targets share one schema (style must not reveal the label). Targets contain ground-truth fields only (no invented
+  chain-of-thought steps; MM-AU weather/light/scene/road codes are not used).
+- Phase-1 training and its validation use valid crash windows only.
+- AP/AUC threshold-free; any CM/P/R/F1/Acc reported at threshold 0.5 with the threshold stated.
+- Pods: outputs to `/root`, results downloaded before `runpodctl stop`; durable data goes to HF private repos.
 
 ## 4. Files that matter
 | path | purpose |
 |---|---|
-| `student_training/scripts/semsup_train.py` | trainer for every arm (crash-only is `--semantic-weight 0`); concurrent prefetch, `--preprocess`, `--split-seed/--init-seed`, `--deterministic`, prevalence-floor warning |
-| `student_training/scripts/semsup_common.py` | `TrainableBadasWrapper` (LoRA wiring, hooks `_captured["patches"/"pooled"]`, `forward_clip`, `prefetch_clips`, `head_state_dict/load_head_state`), `load_training_examples`, `clip_level_split`, SigLIP helpers |
-| `student_training/scripts/score_checkpoints_on_test.py` | loads BADAS once, swaps adapters; `--head-states`, `--temperature`, `--preprocess`, metrics via `metrics_core`; `NAME=NONE` = frozen baseline |
-| `student_training/scripts/metrics_core.py` | `metrics_from_arrays` — the single metric function (also used by the website builders) |
-| `student_training/scripts/paired_bootstrap_ab.py`, `stage_compare.py` | paired bootstrap (reads `ground_truth` or `gt_verdict` rows) and the pre-registered per-seed pass-rule comparison |
-| `student_training/scripts/build_midpoint_negatives.py` | builds the midpoint-negatives caption/manifest file from raw mp4s (`--complete-horizons`) |
-| `student_training/scripts/e4_stageA_badas_open_eval.py` | A0 scorer + `preprocess_clip`, `load_manifest`, `frame_paths_for` |
-| `student_training/scripts/semsup_caption_promptbakeoff.py` | OpenRouter teacher captioning (all prompt versions v2–v13, `--provider-order`, `--token-cap`, concurrency, usage log) |
-| `student_training/scripts/aa1_*.py`, `aa4_token_labels.py` | detection/tracking/ego-path/selection pipeline (YOLOPv2 → BoT-SORT → lane path → top-K threat); **reusable as grounding ground truth** for explanation evaluation. v1 (`aa1_detect_track_rank.py`, G-DINO) is superseded — do not extend |
-| `outputs/aa1_pool1761/` | `_tracks_v2.json` + `_yolop.json` for all 1,107 pool videos (no threat files); `dataset/aa_token_labels/*.npz` per-window token labels; `outputs/aa1_v2_18clips/` full v2 pipeline on 36 clips |
-| `student_training/models/lookahead.py` + `semsup_train.py --lookahead-*`, `--aux-mode/--aux-layer`, `aa_head_losses.py`, `--sem-pooled-weight`, `--per-layer-grads` | **closed/off-by-default research code** (look-ahead head, token-relevance aux, head-attention aux, pooled-tap semantic term, per-layer gradient probe). Do not enable without a new hypothesis; designs in `history/2026-09_ARCHITECTURE.md` |
-| `outputs/a1_compress256/`, `outputs/overnight_2026-09-27/`, `outputs/confirm_seeds_2026-09-29/` | champion and midneg/fullpool runs (scores, bootstraps, summaries; adapters pod-only) |
-| `website/` (`build_*_data.py`, `serve.py`, `index/dataset/experiments.html`) | local results site; builders pin EXPECTED confusion matrices and read metrics from `metrics_core`; see `WEBSITE.md`; `start_website_background.bat` to serve |
-| `docs_agents/ARCHITECTURE_BLOCKS.md`, `CODE_GUIDE.md`, `NEXT_LORA_PLACEMENT.md`, `WEBSITE.md`, `DETECTION_GUIDED_SUMMARY_2026-09-13.md` | supporting docs outside the four handoff files |
-| `dataset/BDD-X-Dataset/`, `dataset/Q&A_labels/data/{dada,cap}/*.xls` | local copies of BDD-X annotations and MM-AU accident-reason MCQ labels (short text; useful as anchor facts + timestamps, not as reasoning targets) |
+| `README.md` (branch root) | thesis goal (changed), architecture sketch, folder map in reading order |
+| `student_training/models/r1_bridge.py` | `regroup_2x2`, `Merger`, `PromptBuilder`, `R1Bridge` (loss, generate, LoRA, save/load) |
+| `student_training/scripts/r1_bridge_test.py` | 6 CPU unit tests incl. prompt-id equality with `Qwen3VLProcessor` and logit equality with the official forward; `tiny_qwen()` |
+| `student_training/scripts/r1_common.py` | window/visibility rules, questions, `dada_targets`, `nexar_targets`, `parse_phase2`, `TAG` |
+| `student_training/scripts/r1_build_manifests.py` | builds both manifests and asserts plan counts |
+| `student_training/scripts/r1_download_dada_parts.py` | resumable ordered download of the 58 DADA parts with back-pressure (`--max-ahead`) |
+| `student_training/scripts/r1_cache_features.py` | caches 2,048×1024 fp16 tokens + P(collision) per valid window; Nexar from `dataset/train`, DADA from tar parts (`ChainedStream`, waits for parts); resumable sink |
+| `student_training/scripts/r1_data.py` | `Cache`, `load_items(source, phase, split)` (phase-1 Nexar items = V12 caption, eval only), `epoch_items` (50/50), `other_index` (wrong-video partner from another video) |
+| `student_training/scripts/r1_train.py` | Phase 1/2 trainer, cosine LR with warmup, per-epoch `evaluate` (real/blank/wrong + bootstrap CI), early stop on wrong-video gap, `best.pt` |
+| `student_training/scripts/r1_eval_gates.py` | gates → `gates.json`, `summary.md`, `generations.jsonl` |
+| `student_training/scripts/r1_pod_run.sh`, `r1_pod_scan.sh` | pod driver (stages; outputs to `/root/r1_week1`) and read-only disk scan |
+| `outputs/r1_week1/RUNBOOK_pod.md`, `summary.md` | pod runbook (git-ignored folder) and implementation status |
+| `student_training/scripts/r0_feature_probe.py` | linear probes on frozen tokens (token position; V12-derived side / type / colour / gap trend) |
+| `student_training/scripts/dataset_sample_review.py` | 3 seeded (clip, text) samples per dataset → `outputs/dataset_review_2026-10/<dataset>/` (sources: dada, tau, caviar, mmau, vru, llava, bddx) |
+| `student_training/scripts/build_reasoning_path_deck_2026-10.py` | October plan deck; asserts AP and per-TTE counts from `outputs/a1_compress256/scores/*` |
+| `dataset/public_samples/` | downloaded public data: `mmau/` (annotation xls/xlsx), `mmau_ara/` (ArA CSVs), `qwen3vl_cfg/`, `tau/`, `caviar/`, `vru/`, `llava_video/` |
+| `student_training/models/vjepa_reason.py`, `e4_stage*.py` | June e4 bridge (crop features, 64-query resampler, text-only Qwen3) — superseded prior art |
+| `student_training/scripts/semsup_common.py` | `TrainableBadasWrapper` (`forward_clip` → (logits, 2560×1024 patches)), `load_training_examples`, `clip_level_split` |
+| `student_training/scripts/aa1_token_probe.py` | `load_probe_model(cfg, "compress256", layers, adapter, "query,key,value")` — reused to load the frozen A1 encoder |
+| `student_training/scripts/e4_stageA_badas_open_eval.py` | `preprocess_clip`, `load_badas` |
 
-## 5. Modified/added APIs worth knowing (signatures only)
-- `preprocess_clip(vjepa, paths, mode="crop"|"compress256")`; `TrainableBadasWrapper(..., preprocess=...)`; `forward_clip(clip) -> (logits (1,2), patches (P,D))` (pooled via `badas._captured["pooled"]`).
-- `paired_bootstrap_ab.load_scores(path) -> {video_id: (score, label01)}` (accepts both label conventions).
-- `semsup_train.py` flags: `--preprocess`, `--split-seed`, `--init-seed`, `--deterministic/--no-deterministic`, `--head-init`, `--limit-random`, `--horizon-weights[-scope]`, `--lookahead-*`, `--aux-*`, `--sem-pooled-weight`, `--per-layer-grads`.
+## 5. APIs added this month (signatures)
+- `regroup_2x2(x: (B,2048,C)) -> (B,512,4C)`; `Merger(in_dim=1024, out_dim=2560).load_from_qwen(qwen.model.visual.merger)`.
+- `PromptBuilder(tokenizer).encode(tag, question, answer=None) -> (ids, labels, mm_token_type_ids)`; `.collate(items) -> (ids, labels, mm, attention)`.
+- `R1Bridge(qwen, tokenizer, init="random"|"qwen")`: `.enable_lora(r, alpha, dropout, targets)`, `.loss_per_sample(feats, batch, mode="real"|"blank"|"wrong", other)`,
+  `.generate(feats(1,2048,1024), tag, question, max_new_tokens, mode)`, `.save(path)` / `.load(path)` (merger + LoRA).
+- `r1_cache_features.preprocess_frames(vjepa, frames_rgb)` (in-memory twin of `preprocess_clip(compress256)`), `encode(badas, clip) -> (tokens fp16, p)`.
+- `r1_train.evaluate(bridge, items, caches, device) -> {loss_real/blank/wrong, gap_blank/wrong (+_ci, _frac_pos), n}`.

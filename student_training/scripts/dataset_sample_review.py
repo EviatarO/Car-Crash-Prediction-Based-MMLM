@@ -489,7 +489,105 @@ def src_dada():
         write_txt(out / f"{name}.txt", header, clips, gt + blocks)
 
 
-SOURCES = {"dada": src_dada, "caviar": src_caviar, "mmau": src_mmau, "vru": src_vru, "llava": src_llava, "bddx": src_bddx}
+
+# ---------- 7. TAU-106K (released val/test accident clips, YouTube part): download source, cut clip, windows ----------
+TAU_RAW = "https://raw.githubusercontent.com/cool-xuan/TABot/main/TAU-106K_Data_Release/"
+
+
+def _tau_json(rel, dst):
+    return json.load(open(get(TAU_RAW + rel, RAW / "tau" / dst), encoding="utf-8"))
+
+
+def src_tau():
+    import re
+    import subprocess
+    import sys
+    ann = (_tau_json("Data_Annotation/video_annotations/video_annotations_all_val.json", "val.json")
+           + _tau_json("Data_Annotation/video_annotations/video_annotations_all_test.json", "test.json"))
+    yt = _tau_json("Internet_Data_Download/YouTube/video_youtube.json", "video_youtube.json")
+    cands = []
+    for a in ann:
+        m = re.match(r"videos/youtube_(.+)_scene-(\d+)\.mp4$", a["videoPath"])
+        if m and a["accident_type"] != "normal" and a["data_source"].startswith("dashcam") and a["accident_segments"]:
+            cands.append((m.group(1), int(m.group(2)), a))
+    rnd = random.Random(SEED)
+    rnd.shuffle(cands)
+    out = OUT / "tau106k"
+    done = 0
+    for yid, scene, a in cands:
+        if done >= K:
+            break
+        info = yt.get(f"{yid}.mp4")
+        seg = None
+        if info:
+            for v in info["videos"]:
+                if v["short_video"] == f"youtube_{yid}_scene-{scene}.mp4":
+                    seg = v["video_segment"]
+        if not seg:
+            continue
+        src = RAW / "tau" / "src" / f"{yid}.mp4"
+        if not src.exists():
+            src.parent.mkdir(parents=True, exist_ok=True)
+            r = subprocess.run([sys.executable, "-m", "yt_dlp", "-f", "bestvideo[height<=720]/best[height<=720]",
+                                "--no-warnings", "-o", str(src), f"https://www.youtube.com/watch?v={yid}"],
+                               capture_output=True, text=True, timeout=600)
+            if r.returncode != 0 or not src.exists():
+                print(f"[tau] {yid} unavailable ({(r.stderr.strip().splitlines() or ['?'])[-1][:90]})")
+                continue
+        cap = cv2.VideoCapture(str(src))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        t0, t1 = seg
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t0 - 3.0) * 1000)           # keep 3 s of context before the clip
+        frames, times = [], []
+        pos0 = max(0.0, t0 - 3.0)
+        n = int(round((t1 - pos0) * fps))
+        for i in range(n):
+            ok, fr = cap.read()
+            if not ok:
+                break
+            frames.append(fr)
+            times.append(pos0 + i / fps)
+        cap.release()
+        if len(frames) < 10:
+            continue
+        name = f"tau_{yid}_scene{scene}"
+        clip_frames = [f for f, t in zip(frames, times) if t >= t0]
+        full = out / f"{name}_clip.mp4"
+        write_video([cv2.resize(f, (f.shape[1] // 2 * 2 // 2, f.shape[0] // 2 * 2 // 2)) for f in clip_frames], full, fps)
+        dur = len(clip_frames) / fps
+        s_norm = [float(x) for x in a["accident_segments"][0]]   # stored as strings
+        t_start_clip = s_norm[0] * dur                                       # accident start inside the clip (s)
+        clips = [(f"clip cut by the repo's segment [{t0:.2f}, {t1:.2f}] s of YouTube {yid} (<=720p)", full)]
+        blocks = []
+        step = max(1, round(fps / 7.5))
+        for tte in (0.5, 1.0, 1.5):
+            t_end = t_start_clip - tte + (t0 - pos0)                          # in `frames` time base
+            k_end = int(round(t_end * fps))
+            idx = [k_end - (15 - i) * step for i in range(16)]
+            if min(idx) < 0 or max(idx) >= len(frames):
+                blocks.append((f"window TTE {tte} s", None, "not available: the accident starts too early in the clip"))
+                continue
+            w = out / f"{name}_window_tte{int(tte * 10):02d}.mp4"
+            write_video([cv2.resize(frames[i], (frames[i].shape[1] // 2, frames[i].shape[0] // 2)) for i in idx], w, fps / step)
+            clips.append((f"2 s window ending {tte} s before the annotated accident start [{fps / step:.1f} fps]", w))
+        header = {
+            "dataset": "TAU-106K (released val/test split, YouTube part): human-written structured accident description",
+            "clip_id": f"YouTube {yid}, scene {scene}",
+            "source": "https://github.com/cool-xuan/TABot (annotations + download scripts; video from YouTube)",
+            "data_source / accident_type": f"{a['data_source']} / {a['accident_type']}",
+            "annotated accident segment (normalized 0-1 of the clip)": f"{s_norm}  ->  {s_norm[0] * dur:.1f}-{s_norm[1] * dur:.1f} s of a {dur:.1f} s clip",
+            "note": "no 'hazard start' field exists; only accident start/end -> the visibility rule cannot be applied directly",
+        }
+        objs = a.get("accident_objects") or []
+        obj_txt = "\n".join(f"  t={o['timestamp']}: " + "; ".join(x["label"] for x in o["objects"]) for o in objs[:4]) or "  none"
+        gt = [("accident_caption (human, whole clip, normalized timestamps inside the text)", a["accident_caption"], ""),
+              ("annotated objects at timestamps (boxes omitted)", None, "\n" + obj_txt)]
+        write_txt(out / f"{name}.txt", header, clips, gt + blocks)
+        done += 1
+    print(f"[tau] wrote {done} samples")
+
+
+SOURCES = {"tau": src_tau, "dada": src_dada, "caviar": src_caviar, "mmau": src_mmau, "vru": src_vru, "llava": src_llava, "bddx": src_bddx}
 
 
 def build_readme():

@@ -7,10 +7,12 @@
 set -u
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1 HF_HOME=/root/.cache/huggingface
 ROOT=/workspace/MMLM_AI
-OUT=$ROOT/outputs/r1_week1
+# The network volume is at its quota: caches, parts and outputs go to the CONTAINER disk (/root).
+# Create the pod with a >= 100 GB container disk (Nexar cache 6 GB + DADA cache 14 GB + 6 parts 13 GB + models 11 GB + ckpts).
+OUT=${OUT:-/root/r1_week1}
 SC=$ROOT/student_training/scripts
 CACHE=$OUT/cache
-DADA_PARTS=/workspace/dada_parts
+DADA_PARTS=${DADA_PARTS:-/root/dada_parts}
 mkdir -p $OUT/logs $CACHE
 cd $SC
 STAGE=${1:?stage}; ARG=${2:-}
@@ -37,6 +39,7 @@ setup)
   ls $ROOT/dataset/train | wc -l | tee -a $LOG        # expect >= 4446 window folders
   wc -l $ROOT/dataset/manifests/r1_*_windows.jsonl | tee -a $LOG
   ls $ROOT/outputs/a1_compress256/train/epoch_02/lora_adapter | tee -a $LOG
+  df -h /root | tee -a $LOG                            # container disk: need >= 60 GB free
   ;;
 tests)
   run python3 -u r1_bridge_test.py
@@ -65,7 +68,7 @@ p1_ab)    # init A/B: 2 epochs each, random vs Qwen's merger weights; compare th
   python3 - <<'PY' | tee -a $LOG
 import json
 for i in ("random","qwen"):
-    rows=[json.loads(l) for l in open(f"/workspace/MMLM_AI/outputs/r1_week1/phase1_ab_{i}/train_log.jsonl")]
+    rows=[json.loads(l) for l in open(f"{__import__('os').environ.get('OUT','/root/r1_week1')}/phase1_ab_{i}/train_log.jsonl")]
     r=rows[-1]["val_dada"]; print(i, "val real loss %.3f  wrong-video gap %+.3f %s"%(r["loss_real"],r["gap_wrong"],r["gap_wrong_ci"]))
 PY
   ;;
@@ -87,10 +90,10 @@ g2)
   ;;
 bundle)   # results bundle defined upfront: logs, jsons, summaries, generations + best.pt of each phase (no caches)
   cd $OUT
-  tar czf /workspace/r1_week1_results.tar.gz --exclude='cache*' --exclude='epoch_*.pt' --exclude='*.npy' \
+  tar czf /root/r1_week1_results.tar.gz --exclude='cache*' --exclude='epoch_*.pt' --exclude='*.npy' \
       logs phase1_ab_* phase1 phase2 gates_* smoke_* pod_env.txt 2>/dev/null
-  ls -la /workspace/r1_week1_results.tar.gz | tee -a $LOG
-  echo "NEXT: download /workspace/r1_week1_results.tar.gz to local BEFORE 'runpodctl stop \$RUNPOD_POD_ID'"
+  ls -la /root/r1_week1_results.tar.gz | tee -a $LOG
+  echo "NEXT: download /root/r1_week1_results.tar.gz to local BEFORE 'runpodctl stop \$RUNPOD_POD_ID'"
   ;;
 *) echo "unknown stage $STAGE"; exit 2 ;;
 esac
