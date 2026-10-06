@@ -11,7 +11,7 @@ alert from the frozen V-JEPA2 encoder's own features** (frozen encoder → train
 so explanation and score share one vision pass. BADAS-2.0 (p.8) names this latent-based reasoning as future work.
 New work lives on git branch `reasoning-path-vjepa2-llm` (root `README.md` = goal + folder map).
 
-## Status as of 2026-10-05
+## Status as of 2026-10-06
 
 ### Crash-score path (frozen — do not reopen without the user)
 - Champion **A1-compress256**: test AP **0.9128** (private 677) / **0.9096** (public 667). Recipe: LoRA r16/α32/dropout 0.05 on
@@ -21,19 +21,20 @@ New work lives on git branch `reasoning-path-vjepa2-llm` (root `README.md` = goa
 - Versus published BADAS-Open (crop) 0.853 / 0.871: correct-at-0.5 private TTE0.5/1.0/1.5/neg = 135/104/69/209 → 129/101/56/284;
   most of the AP gain comes from preprocessing (A0-compress256, untrained, 0.907 / 0.904).
 
-### Reasoning path — week 1 (plan approved, code done, nothing run on a pod)
-- **Approved plans (topic folder `~/.claude/plans/CCP based BADAS/`):** `2026-10-05_Plan-Week1-GoNoGo-rev3.md` (training design,
-  gates, schedule) and `2026-10-05_Plan-HF-Window-Repos-and-Pod.md` (HF data repos + pod sessions; latest). Earlier context:
-  `2026-10-03_Plan-Reasoning-Path-rev3.md`, `2026-10-04_Plan-Reasoning-Path-Deck.md`, `2026-10-04_Plan-Dataset-Status-rev4-TAU-VRU.md`.
-- **Built and tested locally** (see ARCHITECTURE.md §2): `models/r1_bridge.py` (6 unit tests incl. logit-equivalence with the official
-  Qwen3-VL forward), manifests (`dataset/manifests/r1_*_windows.jsonl`, counts asserted), feature cache (Nexar verified against
-  recorded A1 scores; DADA from a local part), Phase 1/2 trainer and gates (smoke runs on a tiny random LM, CPU),
-  pod driver `r1_pod_run.sh` + read-only `r1_pod_scan.sh`, runbook `outputs/r1_week1/RUNBOOK_pod.md`, status `outputs/r1_week1/summary.md`.
-- **Not yet verified:** real Qwen3-VL-4B load/memory/speed, gradient checkpointing with LoRA, full DADA download + encode, any training number.
-- **Data decisions:** coarse alignment (Phase 1) on MM-AU **DADA** part only (30 fps known); Phase 2 SFT on DADA + Nexar V12 pool;
-  CAViAR dropped; window visibility rule applies everywhere (DECISIONS.md).
-- **Supporting results:** feature probe (`outputs/r0_feature_probe/n600/`), dataset sample review (`outputs/dataset_review_2026-10/`),
-  plan deck `reports/presentations/2026-10_reasoning-path-plan.pptx` (title + 5 slides; built by `build_reasoning_path_deck_2026-10.py`).
+### Reasoning path — week 1 (run on a pod 2026-10-06: Phase 1 and Phase 2 done; gate 1 met, reasoning quality NOT yet)
+- **Plans (`~/.claude/plans/CCP based BADAS/`):** `2026-10-05_Plan-Week1-GoNoGo-rev3.md` (design, gates), `2026-10-05_Plan-HF-Window-Repos-and-Pod.md` (HF data).
+- **Data on HF, org `eviatarO-org` (private, READMEs at every level; rule in memory `hf-project-grouping`):** `nexar-windows` (1,346 valid windows after the
+  8-frame margin; the 111 removed are in `windows_excluded.jsonl`), `mmau-dada-windows` (4,582), `vjepa2-a1-features` (encoder tokens + A1 score, Nexar 1,457
+  incl. the 111, DADA train/val 3,453; DADA test not encoded), `checkpoints` (model repo: `phase1/`, `phase2/` with `best.pt`, `train_log.jsonl`, `epochs/`, `results/`).
+- **Visibility rule is now identical for every source:** crash window kept only if time-to-alert ≥ TTE + 8 frames (0.27 s). Nexar valid crash 353 train / 88 val; DADA 1,870 / 629 / 800.
+- **Phase 1 (option b):** merger only, 1,049 DADA crash windows with A1 P ≥ 0.5, random init, 15 epochs; checkpoint = epoch 15 (val loss was best at epoch 5 → over-fit;
+  per-epoch checkpoints were not kept). Code tag `phase1-2026-10-06` (= ac40861).
+- **Phase 2:** from Phase-1 best, merger + LoRA r16, 3,667 windows/epoch (50/50), stopped after epoch 4 by `--stop-on-val-rise 2`; kept epoch 3.
+- **Results and numbers:** EXPERIMENTS.md §2f–2g; files `outputs/r1_week1/{summary.md, pod_phase1_2026-10-06/, pod_phase2_2026-10-06/}` (git-ignored; copy on HF `checkpoints/phase*/results/`).
+- **Honest status:** the LM uses the V-JEPA2 tokens (wrong-/blank-video gaps > 0, cause choice 53 % vs blank 22 %), but written reasoning is weak: DADA exact event 24 %,
+  Nexar event text ≈ floor, time-to-impact not learned, DADA no-crash false alarms 83 %. Decision on the next step is the user's (DECISIONS.md, open question 1).
+- **Supporting results:** feature probe (`outputs/r0_feature_probe/n600/`), dataset reviews (`outputs/dataset_review_2026-10/`, incl. `training_windows_hf/`),
+  data review (`outputs/r1_week1/data_review_2026-10-05/`), plan deck `reports/presentations/2026-10_reasoning-path-plan.pptx`.
 
 ### Access requests
 Sent by the user 2026-10-04: TAU-106K (train split), VRU-Accident (source-id mapping + collision times).
@@ -43,22 +44,12 @@ Not sent: DRAMA form, WTS form, RoadSafe365 email, MM-AU authors email (lotvsmma
 account is not authorised (full clips unavailable; 16-frame windows exist locally).
 
 ## Open TODOs (in order)
-1. **User opens the data-prep pod** (recommended A40 48 GB, $0.49/h, container disk ≥ 150 GB, volume `0hnvco2s4j` attached) and sends
-   `ssh root@<host> -p <port>`. Claude cannot start pods (no RunPod API key locally).
-2. On the pod: `bash r1_pod_scan.sh` (read-only) → show the clean-up candidate list → delete **only user-approved items**; back up
-   volume-only artifacts (old e2/e3a/e3b adapters) first.
-3. Check HF write scope (local token is fine-grained; known only on first `create_repo`).
-4. **Write `student_training/scripts/r1_build_window_repo.py`** (not written yet): manifest → 16 frames at 256×256 via the processor's own
-   resize → WebDataset shards `<window_id>.npz` uint8 (16,256,256,3) + `windows.jsonl`/`.csv` + dataset card → `HfApi.upload_large_folder`.
-   Private repos: `eviatarO-org/nexar-windows` (1,457 windows, built on the PC), `eviatarO-org/mmau-dada-windows` (4,582 windows, built on the pod),
-   `eviatarO-org/vjepa2-a1-features` (derived tokens). Exactness check: P(collision) from stored frames vs originals within 0.004 on 20 windows.
-5. Change `r1_cache_features.py` to read the HF window repos (`--from-hf`); add `scan/build_dada/features/push/pull` stages to `r1_pod_run.sh`.
-6. Pod `smoke` stage (real LM, 50 steps) → stop and report memory / s/step / loss.
-7. Training session (L40S, or A100 SXM if unavailable): `p1_ab → p1_full → g1 → p2 → g2 → bundle`; push `best.pt` to a private
-   `eviatarO-org/checkpoints` repo; download the bundle **before** stopping the pod.
-8. **Next session, once Phase-1 results exist:** measure the hazard hallucination rate on no-crash validation windows (DADA val + 178 Nexar val
-   no-crash); if high → re-weight Phase 2 toward no-crash or add no-crash windows to Phase 1 at ~20%.
-9. User pushes branch `reasoning-path-vjepa2-llm`; Claude never pushes.
+1. **User decides the next step** after reading `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` (options in DECISIONS.md, open question 1).
+2. Not done yet: encode the DADA **test** split features (≈4 min on a GPU pod) before any final evaluation; DADA test is untouched.
+3. Not yet verified: whether A1's AUC on the Nexar val windows is in-sample (A1 was trained on the 1,761-window pool); matters for the "LLM ≈ A1" comparison.
+4. Optional evaluation additions the user postponed: per-word-piece probabilities (actor / action words), LLM judge on inference outputs only.
+5. Unsent access requests (DRAMA form, WTS form, RoadSafe365 email, MM-AU authors email) and TAU / VRU replies pending.
+6. User pushes branch `reasoning-path-vjepa2-llm` and the tag: `git push origin reasoning-path-vjepa2-llm --tags`; Claude never pushes.
 
 ## Known bugs / gotchas
 - **Windows console:** always `PYTHONIOENCODING=utf-8 PYTHONUTF8=1`. Bash heredocs with nested quotes fail in this tool — write a scratch .py and run it.
@@ -77,7 +68,10 @@ account is not authorised (full clips unavailable; 16-frame windows exist locall
 - Local GPU is a 6 GB laptop card: BADAS encode ~15 s/window; cannot hold Qwen3-VL-4B.
 
 ## Pod state
-Nothing running (both saved hosts refused connections 2026-10-05). Stopped pods on record: `egx54zfwpmpasg`, `maeqpipl372s77`.
+Nothing running. Last pod `8tnse35hx8rnqe` (RTX PRO 4500, 60 GB container disk, no volume needed) was stopped by Claude 2026-10-06 13:26 UTC after the bundle was
+downloaded. Claude can stop pods itself: key from the pod's `/proc/1/environ` (`bash r1_pod_run.sh check_stop` first, `stop <pod_id>` after the bundle is local;
+memory `pod-self-stop`). The user's RunPod account has the PC's public key saved (new pods accept it). HF token for pods: `/workspace/.cache/huggingface/token`
+if the old volume is attached, else the user pastes it in the pod's web terminal. Container disk must be ≥ 60 GB.
 
 ## Important commands (from `MMLM_AI/` unless noted)
 ```bash
@@ -91,7 +85,9 @@ python r1_train.py --phase 1 --cache-dir <c> --out-dir <o> --init random --epoch
 python r1_train.py --phase 2 --cache-dir <c> --out-dir <o> --init-from <phase1>/best.pt --epochs 8 --lr-merger 2e-5 --lr-lora 2e-4 --grad-ckpt
 python r1_eval_gates.py --phase 2 --source nexar --ckpt <o>/best.pt --cache-dir <c> --out-dir <g>
 #   smoke tests locally: add --lm tiny --device cpu --val-split train
-bash r1_pod_run.sh <setup|tests|smoke|cache_nexar|cache_dada|p1_ab|p1_full random|g1|p2|g2|bundle>   # on the pod
+bash r1_pod_run.sh <setup|tests|pull|get_p1|p1_ab|p1_full random|g1|p1_complete|p2|g2|push_ckpt|bundle|check_stop|stop POD_ID>   # on the pod (code in /root/r1)
+python r1_review_phase2.py --run-dir <bundle dir>     # review file + curves + yes/no by group + text metrics (local, no GPU)
+python r1_phase_report.py --run-dir <bundle dir> --phase 1 [--full]   # Phase-1 curves + text metrics
 python dataset_sample_review.py --only <dada|tau|caviar|mmau|vru|llava|bddx>   # 3 seeded review samples per dataset
 python r0_feature_probe.py --config ../configs/e4_stageA.yaml --lora-adapter ../../outputs/a1_compress256/train/epoch_02/lora_adapter --n-windows 600 --out-dir <dir>
 python build_reasoning_path_deck_2026-10.py                # rebuilds the October deck (asserts numbers from score files)
@@ -99,10 +95,8 @@ python build_reasoning_path_deck_2026-10.py                # rebuilds the Octobe
 Crash-path commands (champion recipe, public scoring, paired bootstrap) are unchanged: see `history/2026-09_PROJECT_STATE.md`.
 
 ## Git state
-Branch **`reasoning-path-vjepa2-llm`** (created from `main` 2026-10-05), HEAD `6583923` = README + r1 pipeline; `origin/main` is at
-`3463da6`, so the branch is 1 commit ahead and **not pushed** (user pushes). Uncommitted: `r1_pod_run.sh` (storage moved to `/root`),
-`dataset_sample_review.py` (TAU source), new `r1_pod_scan.sh`, and this handoff's docs. `dataset/`, `outputs/`, `reports/` are git-ignored.
+Branch **`reasoning-path-vjepa2-llm`**, HEAD `994897d` (+ this handoff commit); `origin/main` at `3463da6`; **not pushed** (user pushes, with `--tags`).
+Tag `phase1-2026-10-06` = `ac40861` (code of the Phase-1 run). `dataset/`, `outputs/`, `reports/` are git-ignored.
 
 ## Next step
-Wait for the user to open the A40 pod and send the SSH command; then follow `2026-10-05_Plan-HF-Window-Repos-and-Pod.md` §3
-(scan → user-approved clean-up → HF write check → write/run `r1_build_window_repo.py` → features → smoke) and stop for review after the smoke stage.
+Wait for the user's decision on the next experiment after they have reviewed the Phase-2 review file. Nothing is running or scheduled.

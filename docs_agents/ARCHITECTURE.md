@@ -37,8 +37,11 @@ LN(1024) → concat 4096 → Linear 4096→4096 → GELU → Linear →2560, ~27
 
 ### Data layer
 - **Windows:** 16 frames, stride 4 at 30 fps, ending at `collision − TTE` (TTE 0.5/1.0/1.5 s) for crash windows; DADA no-crash window ends
-  0.5 s before the abnormal start `t_ai`. **Window visibility rule:** a crash window is valid only if its end ≥ `t_ai` + 8 frames (DADA) /
-  ≥ `time_of_alert` (Nexar); invalid windows are kept in manifests with `drop_reason` but never used.
+  0.5 s before the abnormal start `t_ai`. **Window visibility rule (same margin for every source since 2026-10-06):** a crash window is valid only if
+  its end ≥ hazard start + 8 frames (0.27 s) (DADA `t_ai`; Nexar `time_of_alert`), i.e. time-to-alert ≥ TTE + 0.27 s; invalid windows are kept in
+  manifests / `windows_excluded.jsonl` with `drop_reason` but never used. Verified on all crash windows of both HF repos.
+- **Phase-1 subset (option b):** DADA crash windows with cached A1 P(collision) ≥ 0.5 train and select; the P < 0.5 windows are evaluated separately
+  (`val_dada_lowp`, `g1 --max-p 0.5`).
 - **Manifests:** `dataset/manifests/r1_mmau_dada_windows.jsonl` (official ArA split; 17 no-accident videos skipped) and
   `r1_nexar_v12_windows.jsonl` (1,761-window V12 pool; A1's `clip_level_split(val_frac=0.2, seed=0)`).
 - **Planned HF repos (approved 2026-10-05, not created):** one private repo per dataset holding only encoder-ready frames:
@@ -71,7 +74,9 @@ LN(1024) → concat 4096 → Linear 4096→4096 → GELU → Linear →2560, ~27
 | `student_training/scripts/r1_data.py` | `Cache`, `load_items(source, phase, split)` (phase-1 Nexar items = V12 caption, eval only), `epoch_items` (50/50), `other_index` (wrong-video partner from another video) |
 | `student_training/scripts/r1_train.py` | Phase 1/2 trainer, cosine LR with warmup, per-epoch `evaluate` (real/blank/wrong + bootstrap CI), early stop on wrong-video gap, `best.pt` |
 | `student_training/scripts/r1_eval_gates.py` | gates → `gates.json`, `summary.md`, `generations.jsonl` |
-| `student_training/scripts/r1_pod_run.sh`, `r1_pod_scan.sh` | pod driver (stages; outputs to `/root/r1_week1`) and read-only disk scan |
+| `student_training/scripts/r1_pod_run.sh`, `r1_pod_scan.sh` | pod driver (stages setup/tests/pull/get_p1/p1_ab/p1_full/g1/p1_complete/p2/g2/push_ckpt/bundle/check_stop/stop; code in `/root/r1`, outputs in `/root/r1_week1`) and read-only disk scan |
+| `student_training/scripts/r1_build_window_repo.py` | manifest → 16×256×256 uint8 windows via the processor's own resize → WebDataset shards + `windows.jsonl/.csv` + card → private HF repo (resumable; DADA streamed from the tar parts) |
+| `student_training/scripts/r1_data_review.py`, `r1_review_generations.py`, `r1_phase_report.py`, `r1_review_phase2.py` | local (no GPU) review: HF repo stats + contact sheets / sample export; Phase-1 review file; per-epoch curves + text metrics (token F1, ROUGE-L, BERTScore, embedding cosine / retrieval, list-class accuracy, floor + baseline); Phase-2 review of all validation outputs, yes/no by group |
 | `outputs/r1_week1/RUNBOOK_pod.md`, `summary.md` | pod runbook (git-ignored folder) and implementation status |
 | `student_training/scripts/r0_feature_probe.py` | linear probes on frozen tokens (token position; V12-derived side / type / colour / gap trend) |
 | `student_training/scripts/dataset_sample_review.py` | 3 seeded (clip, text) samples per dataset → `outputs/dataset_review_2026-10/<dataset>/` (sources: dada, tau, caviar, mmau, vru, llava, bddx) |
@@ -88,4 +93,9 @@ LN(1024) → concat 4096 → Linear 4096→4096 → GELU → Linear →2560, ~27
 - `R1Bridge(qwen, tokenizer, init="random"|"qwen")`: `.enable_lora(r, alpha, dropout, targets)`, `.loss_per_sample(feats, batch, mode="real"|"blank"|"wrong", other)`,
   `.generate(feats(1,2048,1024), tag, question, max_new_tokens, mode)`, `.save(path)` / `.load(path)` (merger + LoRA).
 - `r1_cache_features.preprocess_frames(vjepa, frames_rgb)` (in-memory twin of `preprocess_clip(compress256)`), `encode(badas, clip) -> (tokens fp16, p)`.
+- `PromptBuilder.encode(..., end=True)`: `end=False` scores an answer prefix without `<|im_end|>` (verdict probability).
+- `r1_data.load_items(source, phase, split, cache, min_p=None, max_p=None, nocrash_only=False)`: A1-score subset filters; `r1_train --p1-min-p 0.5`, `--stop-on-val-rise N`.
+- `r1_eval_gates`: `verdict_probs(bridge, items, caches, dev)` → P(yes) per window = P(" yes")/(P(" yes")+P(" no")); `verdict_report(...)` (AUC/AP vs labels, confusion at 0.5,
+  agreement / correlation with A1); `--n-gen 0` = write an answer for every window (`--n-gen-blank` blank-video controls); `--nocrash-only` hallucination check.
+- `r1_cache_features.py --from-hf <repo> [--push-repo R] [--max-shards N]` (encode a window repo shard by shard), `--consolidate-from <repo|dir>` (merge feature chunks into the training cache).
 - `r1_train.evaluate(bridge, items, caches, device) -> {loss_real/blank/wrong, gap_blank/wrong (+_ci, _frac_pos), n}`.

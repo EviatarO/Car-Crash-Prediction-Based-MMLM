@@ -54,13 +54,21 @@ One line per rejected option so it is not re-proposed. Full reasoning for June�
   always pass `--model` explicitly.
 - Generic VLM as the crash predictor; VL-JEPA predict-and-decode route; off-the-shelf CLIP/SigLIP projectors on V-JEPA2 features → rejected (Jun–Jul).
 
+### Evaluation (user decisions 2026-10-06)
+- **Word-for-word match as the only text metric** → misses paraphrases and the DADA text is one coarse phrase per video; use BERTScore / embedding retrieval / list-class accuracy
+  (with floor and always-most-common baselines) and the user's reading of the review files. LLM judge only for inference-time evaluation, never in training.
+- **BERTScore (or any sentence metric) as a training loss** → needs sampling + RL; unstable; not now. Training loss stays masked cross-entropy (answer pieces only).
+- **Choosing a checkpoint by the wrong-video gap alone** → rewards over-confidence (Phase 1 picked the most over-fitted epoch). Phase 2 keeps every epoch and stops when validation loss rises 2 epochs in a row.
+- **Per-word-piece probability breakdown (actor/action words)** → postponed by the user.
+- **Wrong-video partner chosen at random** is a weak test (a similar scene can match the text); only proves "uses the video", not detail accuracy. Better design (same-category partners for detail) not built.
+- **Phase-1 diversity gate "≥ 90 % distinct of N"** → invalid for DADA's closed phrase list; compared with the targets' own diversity instead.
+
 ## Unresolved (need the user)
-1. **Open the data-prep pod** (recommended A40 48 GB, ≥ 150 GB container disk, volume attached) and send the SSH command; later training pod
-   L40S (or A100 SXM). Claude cannot start pods.
-2. **Volume clean-up list:** what may be deleted after the read-only scan (nothing without explicit approval).
-3. **HF token scope:** can the fine-grained token create private repos? If not, the user adds the scope.
-4. **Phase-1 no-crash hallucination:** if the rate is high after Phase 1 → re-weight Phase 2 or add no-crash windows to Phase 1 at ~20 %?
-5. **Merger init:** random vs Qwen weights (A/B result decides).
+0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the
+   Phase-1 checkpoint with explicit verdict / time-to-impact fields (≈1 h), (b) re-weight DADA no-crash to cut the 83 % false-alarm rate, (c) more / richer Nexar text (BADAS-2.0 recipe with
+   detection boxes; teacher spend), (d) calibrate the DADA threshold (AUC 0.735 is fine, 0.5 is not).
+1. **Volume clean-up:** the old volume `0hnvco2s4j` (64 GB, old runs, 41 GB of Nexar frames) was scanned read-only 2026-10-05; nothing deleted, user said keep for now.
+2. (resolved) HF write scope, merger init (random), pod type (RTX PRO 4500, 60 GB disk), Phase-1 no-crash hallucination measured (97 % / 91 % crash phrases).
 6. **Enlarge decision after week 1:** MM-AU CAP (needs fps from the authors or estimation), BDD-X (needs BDD100K access), TAU-106K
   (~106 GB YouTube + Bilibili; 12 % unavailable; no hazard-start field; windows must stay inside the scene clip), VRU (needs the
   authors' source mapping).
