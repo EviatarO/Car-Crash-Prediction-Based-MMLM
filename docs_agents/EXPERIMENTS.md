@@ -85,7 +85,7 @@ Yes/no = P(" yes") / (P(" yes") + P(" no")) at the verdict word, all validation 
 | DADA val | 866 (629 / 237) | 0.735 | 0.692 | 73.1 % | 592/37/196/41 | 54.3 % | 0.90 |
 LLM "yes" on DADA no-crash windows 83 % (A1: 24 %). Written answers: Nexar crash event BERTScore 0.387 (floor 0.359), time-to-impact bucket 26 % (always 0.5 s: 49 %), 97 distinct answers in 266;
 DADA crash exact event / cause / both 23.7 % / 14.8 % / 6.0 % (most-common baseline 10.3 % / 11.9 %), BERTScore 0.500 (floor 0.312), cause choice 53.3 % vs blank 22.1 %, time-to-impact bucket 38.8 %.
-Caveats: LLM reads the same tokens as A1's head (agreement is not independent evidence); A1 may have trained on the Nexar val windows (unverified); DADA ground truth is one coarse list phrase
+Caveats: LLM reads the same tokens as A1's head (agreement is not independent evidence); A1 did NOT train on the Nexar val windows (they are A1's own 348-window val split of the 1,761 pool; verified 2026-10-06), but that split was used for A1's checkpoint choice and is enriched with mined A1 failures, so it is not representative of the Nexar test sets; DADA ground truth is one coarse list phrase
 per video, so word-for-word match understates reasonable answers (user review, 2026-10-06).
 
 ### 2h. Data checks (2026-10-05/06)

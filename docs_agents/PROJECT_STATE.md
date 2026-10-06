@@ -46,7 +46,7 @@ account is not authorised (full clips unavailable; 16-frame windows exist locall
 ## Open TODOs (in order)
 1. **User decides the next step** after reading `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` (options in DECISIONS.md, open question 1).
 2. Not done yet: encode the DADA **test** split features (≈4 min on a GPU pod) before any final evaluation; DADA test is untouched.
-3. Not yet verified: whether A1's AUC on the Nexar val windows is in-sample (A1 was trained on the 1,761-window pool); matters for the "LLM ≈ A1" comparison.
+3. The reasoning path was evaluated only on the 1,761-pool val split (266 valid windows; enriched with mined A1 failures; A1 did not train on it). Not yet evaluated on the representative Nexar test sets (677 private / 667 public): needs their encoder features (GPU).
 4. Optional evaluation additions the user postponed: per-word-piece probabilities (actor / action words), LLM judge on inference outputs only.
 5. Unsent access requests (DRAMA form, WTS form, RoadSafe365 email, MM-AU authors email) and TAU / VRU replies pending.
 6. User pushes branch `reasoning-path-vjepa2-llm` and the tag: `git push origin reasoning-path-vjepa2-llm --tags`; Claude never pushes.
