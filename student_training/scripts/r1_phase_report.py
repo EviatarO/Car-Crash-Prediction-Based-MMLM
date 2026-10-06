@@ -122,7 +122,7 @@ def curves(run, phase, out):
 
 
 # ----------------------------------------------------------------------------- 2. text metrics
-def text_metrics(run, phase, out, seed=0):
+def text_metrics(run, phase, out, seed=0, full=False):
     from bert_score import BERTScorer
     from sentence_transformers import SentenceTransformer
     bs = BERTScorer(model_type="roberta-large", lang="en", rescale_with_baseline=True)
@@ -138,12 +138,14 @@ def text_metrics(run, phase, out, seed=0):
     rng = random.Random(seed)
     report, per_rows = {}, []
     for g, src, title in GROUPS[phase]:
+        if full:
+            g = g.replace("gates_phase1_", "gates_phase1_full_")
         G = [json.loads(l) for l in open(run / g / "generations.jsonl", encoding="utf-8")]
         gen = [x["real"] for x in G]
         tgt = [x["target"] for x in G]
-        perm = list(range(len(G)))
-        while any(i == j or tgt[i] == tgt[j] for i, j in enumerate(perm)):   # floor: a DIFFERENT window's text
-            rng.shuffle(perm)
+        perm = []                                                            # floor: a random window with DIFFERENT text
+        for i in range(len(G)):
+            perm.append(rng.choice([j for j in range(len(G)) if tgt[j] != tgt[i]]))
         shuf = [tgt[j] for j in perm]
         variants = {"model": (gen, tgt), "floor (random other window's text)": (gen, shuf)}
         if src == "dada":
@@ -189,18 +191,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--phase", type=int, default=1)
+    ap.add_argument("--full", action="store_true", help="use the full-validation-set generations (gates_phase1_full_*)")
     args = ap.parse_args()
     run = Path(args.run_dir)
-    out = run / "report"
+    out = run / ("report_full" if args.full else "report")
     out.mkdir(parents=True, exist_ok=True)
     rows, best = curves(run, args.phase, out)
-    rep = text_metrics(run, args.phase, out)
+    rep = text_metrics(run, args.phase, out, full=args.full)
     L = [f"# Phase {args.phase} performance record", "",
          "Files: `curves.png` (loss and wrong-video gap per epoch), `epoch_metrics.csv` (all per-epoch numbers), "
          "`text_metrics.json`, `per_window_text_metrics.csv` (every generated answer with its scores).", "",
          f"Lowest group-A validation loss: epoch {best['epoch']} ({best['val_dada_loss_real']:.3f}); "
          f"last epoch {rows[-1]['epoch']}: {rows[-1]['val_dada_loss_real']:.3f}; training loss last epoch {rows[-1]['train_loss']:.4f}.", "",
-         "## Text metrics on the generated answers (50 random windows per group)", "",
+         ("## Text metrics on the generated answers (EVERY validation window of each group)" if args.full else "## Text metrics on the generated answers (50 random windows per group)"), "",
          "Each cell = average over the 50 windows. *floor* = the same answers scored against another window's correct text "
          "(what an answer unrelated to the clip gets). *baseline* = writing the most common training text for every window.", ""]
     for title, r in rep.items():
