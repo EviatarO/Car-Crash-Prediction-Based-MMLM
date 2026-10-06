@@ -1,7 +1,7 @@
 #!/bin/bash
 # Week-1 reasoning-path run on a RunPod pod (plans 2026-10-05_Plan-Week1-GoNoGo-rev3 and 2026-10-05_Plan-HF-Window-Repos-and-Pod).
 # Usage:  bash r1_pod_run.sh <stage> [arg]
-#   setup | tests | build_dada | features_nexar | features_dada | smoke | pull | p1_ab | p1_full <random|qwen> | g1 | p2 | g2 | push_ckpt | bundle | check_stop | stop <pod_id>
+#   setup | tests | build_dada | features_nexar | features_dada | smoke | pull | p1_ab | p1_full <random|qwen> | g1 | get_p1 | p1_complete | p2 | g2 | push_ckpt | bundle | check_stop | stop <pod_id>
 # Each stage logs to $OUT/logs/<stage>.log and writes $OUT/logs/<stage>.done on success (check $?, no pipes).
 # Data lives on private HF repos (eviatarO-org/nexar-windows, mmau-dada-windows, vjepa2-a1-features, eviatarO-org/checkpoints);
 # the pod holds only working files under /root (container disk). Code is copied to $ROOT (default /root/r1) from the PC.
@@ -94,13 +94,26 @@ g1)       # phase-1 gates: DADA val (valid crash windows only) + zero-shot on Ne
   run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_dada_lowp --max-p 0.5
   run $PY -u r1_eval_gates.py --phase 1 --source nexar --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_nexar_zeroshot
   ;;
-p2)
-  run $PY -u r1_train.py --phase 2 --cache-dir $CACHE --out-dir $OUT/phase2 --init-from $OUT/phase1/best.pt \
-        --epochs 8 --patience 2 --eff-bs 16 --micro-bs 4 --lr-merger 2e-5 --lr-lora 2e-4 --grad-ckpt
+get_p1)   # Phase-1 checkpoint from HF (a new pod does not have it)
+  mkdir -p $OUT/phase1
+  run $PY -c "from huggingface_hub import hf_hub_download as d; print(d('$R_CKPT', 'phase1/best.pt', local_dir='$OUT'))"
   ;;
-g2)
-  run $PY -u r1_eval_gates.py --phase 2 --source nexar --ckpt $OUT/phase2/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase2_nexar
-  run $PY -u r1_eval_gates.py --phase 2 --source dada  --ckpt $OUT/phase2/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase2_dada
+p1_complete)   # finish the Phase-1 evaluation (2026-10-06): written answers for EVERY validation window of groups A/B/C
+               # + what the Phase-1 model writes for no-crash windows (hallucination check). Same checkpoint, no training.
+  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_full_dada --min-p 0.5 --n-gen 0 --n-gen-blank 20
+  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_full_dada_lowp --max-p 0.5 --n-gen 0 --n-gen-blank 20
+  run $PY -u r1_eval_gates.py --phase 1 --source nexar --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_full_nexar_zeroshot --n-gen 0 --n-gen-blank 20
+  run $PY -u r1_eval_gates.py --phase 1 --source dada  --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_nocrash_dada --nocrash-only
+  run $PY -u r1_eval_gates.py --phase 1 --source nexar --ckpt $OUT/phase1/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase1_nocrash_nexar --nocrash-only
+  ;;
+p2)   # selection = Nexar-val wrong-video gap (pre-registered); also stop when the Nexar-val loss rises 2 epochs in a row
+      # (Phase-1 lesson: the gap kept rising while the model over-fitted). Every epoch_XX.pt is kept and pushed to HF.
+  run $PY -u r1_train.py --phase 2 --cache-dir $CACHE --out-dir $OUT/phase2 --init-from $OUT/phase1/best.pt \
+        --epochs 8 --patience 2 --stop-on-val-rise 2 --eff-bs 16 --micro-bs 4 --lr-merger 2e-5 --lr-lora 2e-4 --grad-ckpt
+  ;;
+g2)   # all validation windows: verdict probability P(yes) for every window + a written answer for every window
+  run $PY -u r1_eval_gates.py --phase 2 --source nexar --ckpt $OUT/phase2/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase2_nexar --n-gen 0 --n-gen-blank 20
+  run $PY -u r1_eval_gates.py --phase 2 --source dada  --ckpt $OUT/phase2/best.pt --cache-dir $CACHE --out-dir $OUT/gates_phase2_dada --n-gen 0 --n-gen-blank 20
   ;;
 push_ckpt)   # best.pt of both phases -> private HF repo (so nothing durable is only on the pod)
   $PY - <<'PY' | tee -a $LOG
@@ -108,11 +121,38 @@ import os
 from huggingface_hub import HfApi
 a = HfApi(); repo = "eviatarO-org/checkpoints"; out = os.environ.get('OUT', '/root/r1_week1')
 a.create_repo(repo, repo_type="model", private=True, exist_ok=True)
+if "README.md" not in a.list_repo_files(repo, repo_type="model"):
+    card = """---
+license: other
+---
+# checkpoints — reasoning-path training checkpoints (CCP V-JEPA2 Reasoning)
+
+Private. Trained weights of the bridge between the frozen V-JEPA2 encoder (A1-compress256) and the frozen Qwen3-VL-4B language model.
+Each `<phase>/best.pt` is a torch dict {"merger": projector state_dict (Qwen3-VL merger shape: LN 1024 -> 2x2 merge 4096 -> 4096 -> GELU -> 2560),
+"lora": LoRA weights on the language model (Phase 2 only)}. Load with `R1Bridge.load(path)` (`student_training/models/r1_bridge.py`).
+Selection: validation wrong-video gap (not validation loss).
+
+* `phase1/` alignment, merger only, on DADA crash windows the encoder flags (A1 P >= 0.5), target "event; cause".
+* `phase2/` SFT, merger + LoRA r16, DADA + Nexar, target "Collision / Time to impact / Event / Cause".
+
+Inputs: [eviatarO-org/vjepa2-a1-features](https://huggingface.co/datasets/eviatarO-org/vjepa2-a1-features).
+Code: GitHub EviatarO/Car-Crash-Prediction-Based-MMLM, branch reasoning-path-vjepa2-llm (`r1_train.py`, `r1_eval_gates.py`).
+"""
+    a.upload_file(path_or_fileobj=card.encode(), path_in_repo="README.md", repo_id=repo, repo_type="model")
+import glob
+have = set(a.list_repo_files(repo, repo_type="model"))
 for ph in ("phase1", "phase2"):
-    f = f"{out}/{ph}/best.pt"
-    if os.path.exists(f):
-        a.upload_file(path_or_fileobj=f, path_in_repo=f"{ph}/best.pt", repo_id=repo, repo_type="model"); print("pushed", f)
+    for f in [f"{out}/{ph}/best.pt", f"{out}/{ph}/train_log.jsonl"] + sorted(glob.glob(f"{out}/{ph}/epoch_*.pt")):
+        name = os.path.basename(f)
+        dst = f"{ph}/epochs/{name}" if name.startswith("epoch_") else f"{ph}/{name}"
+        if os.path.exists(f) and not (ph == "phase1" and dst in have):
+            a.upload_file(path_or_fileobj=f, path_in_repo=dst, repo_id=repo, repo_type="model"); print("pushed", dst)
+    if os.path.exists(f"{out}/{ph}/best.pt") and f"{ph}/epochs/README.md" not in have and glob.glob(f"{out}/{ph}/epoch_*.pt"):
+        a.upload_file(path_or_fileobj=(f"# {ph}/epochs/\n\nThe checkpoint saved after every epoch (`epoch_XX.pt`, same format as "
+                                       f"`../best.pt`), kept so any epoch can be re-evaluated. `../train_log.jsonl` has the per-epoch "
+                                       f"validation numbers.\n").encode(), path_in_repo=f"{ph}/epochs/README.md", repo_id=repo, repo_type="model")
 PY
+  [ ${PIPESTATUS[0]} -eq 0 ] && touch ${LOG%.log}.done
   ;;
 bundle)   # results bundle defined upfront: logs, jsons, summaries, generations + best.pt of each phase (no caches)
   cd $OUT

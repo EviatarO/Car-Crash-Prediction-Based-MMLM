@@ -85,10 +85,11 @@ class PromptBuilder:
         q = f"{tag} {question}" if tag else question
         return f"<|im_start|>user\n{self.video_block()}{q}<|im_end|>\n<|im_start|>assistant\n"
 
-    def encode(self, tag: str, question: str, answer: str | None = None):
-        """-> input_ids, labels (answer tokens + <|im_end|> only), mm_token_type_ids (2 = video)."""
+    def encode(self, tag: str, question: str, answer: str | None = None, end: bool = True):
+        """-> input_ids, labels (answer tokens + <|im_end|> only), mm_token_type_ids (2 = video).
+        end=False scores an answer PREFIX (no <|im_end|>), e.g. 'Collision: yes' for the verdict probability."""
         p = self.tok(self.prompt_text(tag, question), add_special_tokens=False)["input_ids"]
-        a = (self.tok(answer + "<|im_end|>", add_special_tokens=False)["input_ids"] if answer is not None else [])
+        a = (self.tok(answer + ("<|im_end|>" if end else ""), add_special_tokens=False)["input_ids"] if answer is not None else [])
         ids = p + a
         labels = [IGNORE] * len(p) + a
         mm = [2 if i == self.video_id else 0 for i in ids]

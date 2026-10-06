@@ -49,7 +49,7 @@ class Cache:
         return self.rows[wid]["p_collision"]
 
 
-def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None):
+def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False):
     """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
     min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
     Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set)."""
@@ -57,6 +57,12 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None):
     for l in open(MANIFEST[source], encoding="utf-8"):
         r = json.loads(l)
         if not r["valid"] or r["split"] != split or r["id"] not in cache:
+            continue
+        if nocrash_only:              # phase-1 hallucination check: no-crash windows, no target text (generation only)
+            if r["label"] != 0:
+                continue
+            out.append({"id": r["id"], "source": source, "video_key": r["video_key"], "label": 0, "tte": None,
+                        "question": Q_PHASE1, "answer": "", "tag": TAG[source], "gt": r["gt"]})
             continue
         if min_p is not None and cache.p_collision(r["id"]) < min_p:
             continue
@@ -106,8 +112,8 @@ def other_index(items, seed=0):
     return out
 
 
-def make_batch(prompts, items, with_answer=True):
-    enc = [prompts.encode(it["tag"], it["question"], it["answer"] if with_answer else None) for it in items]
+def make_batch(prompts, items, with_answer=True, end=True):
+    enc = [prompts.encode(it["tag"], it["question"], it["answer"] if with_answer else None, end=end) for it in items]
     return prompts.collate(enc)
 
 

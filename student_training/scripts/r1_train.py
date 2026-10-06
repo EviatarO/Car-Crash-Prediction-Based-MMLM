@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--val-split", default="val", help="smoke tests only: use another split as validation")
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after N optimizer steps")
+    ap.add_argument("--stop-on-val-rise", type=int, default=0,
+                    help="also stop when the monitored validation loss (own video) rose this many epochs in a row (0 = off)")
     ap.add_argument("--p1-min-p", type=float, default=0.5,
                     help="phase 1: train/select only on DADA crash windows with A1 P(collision) >= this (0 = all; option b)")
     args = ap.parse_args()
@@ -168,6 +170,7 @@ def main():
 
     log = open(out / "train_log.jsonl", "a", encoding="utf-8")
     best, bad, step, t0 = -1e9, 0, 0, time.time()
+    prev_vl, rises = None, 0
     for ep in range(1, args.epochs + 1):
         items = epoch_items(train, rng, balance=args.phase == 2)
         bridge.train()
@@ -206,6 +209,10 @@ def main():
             f"{k}: real {r.get('loss_real', float('nan')):.3f} blank-gap {r.get('gap_blank', float('nan')):+.3f} "
             f"wrong-gap {r.get('gap_wrong', float('nan')):+.3f} {r.get('gap_wrong_ci', '')}" for k, r in
             ((k, rec[f'val_{k}']) for k in val)), flush=True)
+        vl = mon.get("loss_real")
+        if vl is not None and prev_vl is not None:
+            rises = rises + 1 if vl > prev_vl else 0
+        prev_vl = vl
         if score > best + 1e-6 or (ep == 1 and best == -1e9):
             best, bad = score, 0
             bridge.save(out / "best.pt")
@@ -215,6 +222,9 @@ def main():
             if bad >= args.patience:
                 print(f"[early stop] no improvement of the {monitor} wrong-video gap for {args.patience} epochs")
                 break
+        if args.stop_on_val_rise and rises >= args.stop_on_val_rise:
+            print(f"[early stop] {monitor} validation loss rose {rises} epochs in a row (best.pt = best wrong-video gap so far)")
+            break
         if args.max_steps and step >= args.max_steps:
             break
     log.close()
