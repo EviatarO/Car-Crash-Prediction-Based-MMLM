@@ -5,7 +5,7 @@ Local, offline site to review the dataset and present results — first step of 
 multi-stage plan; more stages (full Experiments page) are expected later.
 
 ## Structure
-3 pages, shared nav/palette/plexus animation in `website/assets/`:
+3 pages (experiments.html has 3 views), shared nav/palette/plexus animation in `website/assets/`:
 - `index.html` — landing page: random clip showcase w/ V12 caption, project-goal cards,
   hand-drawn architecture SVG, a 10-arm test-set results table (updated 2026-09-09 — was
   A0/A1/v12 only; now A0, A1, B-v1/v2/v3, P1, and the four a1fail321 recovery arms
@@ -51,6 +51,18 @@ multi-stage plan; more stages (full Experiments page) are expected later.
     notes sort last, so sorting the column surfaces everything reviewed so far.
     Export/Import buttons write and merge a JSON file — localStorage is per-browser and
     a "clear site data" would otherwise wipe a review session with no way back.
+
+  - `#pilot` — **Boxed-teacher pilot** (added 2026-10-08, third tab next to Cross-Experiment
+    Comparison): one row per pilot window of set A (51 = 9 crash videos × 3 TTE + 8 normal videos × 3),
+    columns Frames 4×4 (red box; click or ＋ opens a 1920 px grid in an overlay, Esc closes), Video ID,
+    TTE, GT label, R1/R2/R3 verdict (green = equals GT), R1/R2/R3 reasoning (+ class/position/motion/gap
+    tags, ⚠ = soft-validation problems), Comments. Same sort (asc → desc → off, empty last) and filter row
+    as the comparison table, plus a **Runs disagree** pill. A run-summary table on top has cost, time,
+    latency and verdict accuracy per run. Comments share the localStorage store `ccp:review-notes:v1`
+    under dataset key `pilot_boxed_2026-10`, so Export/Import notes cover both views. Code:
+    `assets/pilot.js` (`createPilotView`), data: `pilot_data.js` from `build_pilot_data.py` (reads
+    `outputs/teacher_pilot_2026-10/{windows,boxes}.jsonl` + `runs/R*.jsonl`; also writes the large grids to
+    `outputs/teacher_pilot_2026-10/grid_large/`). Re-run the builder after any run changes.
 
 Shared modules in `website/assets/`, so no page carries a second copy:
 `site.css` (all shared styles; font-sizes were scaled +10% via a one-off script, not

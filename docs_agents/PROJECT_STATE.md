@@ -99,4 +99,7 @@ Branch **`reasoning-path-vjepa2-llm`**, HEAD `994897d` (+ this handoff commit); 
 Tag `phase1-2026-10-06` = `ac40861` (code of the Phase-1 run). `dataset/`, `outputs/`, `reports/` are git-ignored.
 
 ## Next step
-Wait for the user's decision on the next experiment after they have reviewed the Phase-2 review file. Nothing is running or scheduled.
+Boxed-teacher pilot done (EXPERIMENTS §2i). Next: revise `PROMPT_SEMSUP_V12BOX.py` (no yes/no; outcome given; visible-cues-only + "not visible"; natural
+sentences), then on Flex run the same 51 set-A windows WITH and WITHOUT the box (~$1.2), check the chosen object against the 14 hand-labelled clips, rebuild
+the website tab (`website/build_pilot_data.py`), and let the user review before the full 4,446-window run (≈ $52 on Flex).
+

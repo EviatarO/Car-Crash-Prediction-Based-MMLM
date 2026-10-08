@@ -35,6 +35,7 @@
   <div class="tabs">
     <button class="tab active" data-view="detail">Experiment detail</button>
     <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
+    <button class="tab" data-view="pilot">Boxed-teacher pilot</button>
   </div>
   <span class="rowcount" id="viewHint"></span>
 </div>
@@ -136,7 +137,48 @@
   </section>
 </div>
 
+<!-- ================= BOXED-TEACHER PILOT VIEW ================= -->
+<div id="viewPilot" hidden>
+  <section class="block">
+    <div class="kicker">Teacher pilot · 2026-10</div>
+    <h2>Boxed-object teacher — R1 · R2 · R3 on the same windows</h2>
+    <p class="lede">The teacher (Gemini 3.8 Flash) sees the 16 frames with ONE road user boxed in red — the object the frozen
+       crash model attends to — and returns a fixed-list description, a 25–40-word explanation and a collision yes/no.
+       <b>R1</b> Standard tier, explanation then verdict · <b>R2</b> Flex tier, same prompt · <b>R3</b> Standard tier,
+       verdict then explanation. Verdict cells are green when they equal the GT label (1 = crash, 0 = normal).
+       Click a frame grid or its ＋ to enlarge.</p>
+    <div class="table-wrap pilot-runs"><table class="mini" id="pilotRuns"></table></div>
+    <p class="note" id="pilotNote"></p>
+    <div class="cmp-toolbar">
+      <button class="pill clearbtn" id="pilotClear">Clear filters</button>
+      <button class="pill" id="pilotDisagree" title="show only windows where the three runs do not give the same verdict">Runs disagree</button>
+      <span class="rowcount" id="pilotCount"></span>
+      <span class="rowcount notecount" id="pilotNoteCount"></span>
+      <button class="pill pushright" id="pilotExport">Export notes</button>
+      <button class="pill" id="pilotImport">Import notes</button>
+      <input type="file" id="pilotFile" accept="application/json" hidden>
+    </div>
+    <div class="table-wrap cmp-scroll pilot-scroll">
+      <table class="cmp-table pilot-table">
+        <thead id="pilotHead"></thead>
+        <tbody id="pilotBody"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
 <footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL EXPERIMENT BROWSER</footer>
+
+<div class="overlay" id="gridOverlay">
+  <div class="gridbox">
+    <div class="player-head">
+      <span class="pid" id="gTitle"></span>
+      <span class="meta" id="gMeta"></span>
+      <button class="close" id="gClose" title="close (Esc)">×</button>
+    </div>
+    <img id="gImg" alt="">
+  </div>
+</div>
 
 <!-- ================= ARM PICKER ================= -->
 <div class="overlay" id="pickOverlay">
@@ -190,16 +232,23 @@
 <script src="site_data.js"></script>
 <script src="experiments_data.js"></script>
 <script src="compare_data.js"></script>
+<script src="pilot_data.js"></script>
 <script src="assets/plexus.js"></script>
 <script src="assets/arch.js"></script>
 <script src="assets/charts.js"></script>
 <script src="assets/player.js"></script>
+<script src="assets/pilot.js"></script>
 <script>
 "use strict";
 const EX   = window.EXPERIMENTS_DATA;
 const CMP  = window.COMPARE_DATA;
 const SITE = window.SITE_DATA.splits;
 const player = createPlayer();
+const pilotView = createPilotView({
+  data: window.PILOT_DATA, esc: s => String(s === null || s === undefined ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+  notes: () => NOTES, saveNotes: () => saveNotes(), exportNotes: () => exportNotes(), importNotes: f => importNotes(f),
+});
 initPlexus(document.getElementById("plexus"));
 
 /* Clips are looked up by video_id against the dataset page's already-resolved
@@ -237,16 +286,18 @@ const f4 = v => (v === null || v === undefined) ? "–" : Number(v).toFixed(4);
 function currentRoute(){
   const h = (location.hash || "").replace(/^#/, "");
   const [view, arg] = h.split("/");
-  return {view: view === "compare" ? "compare" : "detail", arg: arg || null};
+  return {view: view === "compare" ? "compare" : view === "pilot" ? "pilot" : "detail", arg: arg || null};
 }
 function applyRoute(){
   const {view, arg} = currentRoute();
   document.getElementById("viewDetail").hidden = view !== "detail";
   document.getElementById("viewCompare").hidden = view !== "compare";
+  document.getElementById("viewPilot").hidden = view !== "pilot";
   document.querySelectorAll(".tab[data-view]").forEach(t =>
     t.classList.toggle("active", t.dataset.view === view));
   document.getElementById("viewHint").textContent = view === "detail"
-    ? "one arm, in full" : "up to 3 arms, side by side";
+    ? "one arm, in full" : view === "pilot" ? "teacher runs R1 · R2 · R3, side by side" : "up to 3 arms, side by side";
+  if (view === "pilot") pilotView.show();
   if (view === "detail"){
     if (arg && ARM_BY_KEY[arg]) lastArm = arg;
     renderDetail(arg && ARM_BY_KEY[arg] ? arg : null);
@@ -780,6 +831,7 @@ function importNotes(file){
     saveNotes();
     updateNoteCount();
     cmpRenderBody();
+    if (typeof pilotView !== "undefined") pilotView.renderBody();
     alert(`Imported ${added} new note${added === 1 ? "" : "s"} (existing notes kept).`);
   };
   fr.readAsText(file);

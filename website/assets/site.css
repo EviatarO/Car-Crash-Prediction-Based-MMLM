@@ -436,3 +436,28 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
        border-bottom:1px solid #2a3560}
 .delta{font-family:var(--mono);color:var(--muted)}
 .delta.big{color:var(--amber);font-weight:700}
+
+
+/* ---- Boxed-teacher pilot view (experiments.html #pilot) ---- */
+.pilot-runs{padding:6px 0 4px}
+.pilot-runs table.mini{min-width:0}
+.pilot-table td,.pilot-table th{white-space:nowrap}
+.pilot-table td.reason{white-space:normal;min-width:260px;max-width:320px;vertical-align:top}
+.pilot-table td{vertical-align:top}
+.pilot-table td:last-child{min-width:230px}
+.pilot-table .noteinput{width:220px;min-height:84px}
+.pgrid{position:relative;width:300px;cursor:zoom-in;border:1px solid #2a3560;border-radius:6px;overflow:hidden;background:var(--panel-dk)}
+.pgrid img{display:block;width:100%;height:auto}
+.pgrid:hover{border-color:var(--cyan)}
+.pplus{position:absolute;top:5px;right:5px;width:26px;height:26px;border-radius:7px;border:1px solid rgba(255,255,255,.35);
+       background:rgba(10,14,30,.75);color:#fff;font-size:17px;line-height:1;cursor:pointer;padding:0}
+.pplus:hover{background:var(--cyan-dk);border-color:var(--cyan)}
+.pv{display:inline-block;font-family:var(--mono);font-weight:700;padding:4px 10px;border-radius:99px;font-size:13.2px}
+.pv.ok{color:var(--soft-green);background:rgba(0,230,118,.14)}
+.pv.no{color:var(--red);background:rgba(255,107,107,.14)}
+.ptext{font-size:14.3px;line-height:1.5;color:var(--white)}
+.ptags{margin-top:6px;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.pwarn{color:var(--amber);cursor:help}
+.gridbox{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;width:min(1920px,96vw);max-height:94vh;
+         overflow:auto;box-shadow:0 30px 90px rgba(0,0,0,.6)}
+.gridbox img{display:block;width:100%;height:auto}

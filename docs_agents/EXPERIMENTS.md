@@ -93,6 +93,27 @@ HF repos verified: window counts equal the manifests; stored 256×256 frames rep
 Crash-score AUC (A1, crash vs no-crash windows) is 0.975 on the Nexar windows but 0.698 on DADA (3,453 windows): the frozen crash head transfers poorly to DADA (different domain; annotation "abnormal start" often earlier than visible).
 Visibility rule verified on all crash windows of both repos: 0 windows with time-to-alert < TTE (+ 0.27 s margin after 2026-10-06).
 
+### 2i. Boxed-object teacher pilot (2026-10-08; `outputs/teacher_pilot_2026-10/`, website tab "Boxed-teacher pilot", plan `2026-10-08_Plan-BoxedTeacher-Pilot-rev3.md`)
+Windows: Nexar train videos OUTSIDE the 1,761 pool. Set A = 9 crash videos × TTE 1.5/1.0/0.5 (time-to-alert ≥ 1.77 s, so all three valid) + 8 normal
+videos × 3 windows cut with the test-set midpoint protocol (new folders `dataset/train/<vid>_hires_midtest*`) = 51 windows (set B = 51 more, cut and tracked,
+attention only partly done, unused). Box: YOLOPv2 + Grounding-DINO (person/bicycle/motorcycle) + BoT-SORT tracks; target = track with the most crash-head
+attention (A1-compress256 `temporal_processor.attention`, tubelets weighted to the end) in the last window, propagated by track ID to the earlier windows
+(13 attention-top, 26 propagated, 12 own-top fallbacks). Median fraction of the head's real-token attention inside ANY tracked box: 0.14; the chosen track
+gets a median 0.43 of the attention that falls on tracks. Teacher: Gemini 3.8 Flash via OpenRouter, 16 native-resolution boxed frames, prompt
+`prompts/PROMPT_SEMSUP_V12BOX.py` (blind, fixed lists + 25–40-word explanation + collision yes/no), 16 calls in parallel.
+
+| run | tier · order | total time | latency median / p95 | cost / window | note |
+|---|---|---|---|---|---|
+| R1 | Standard · explanation → verdict | 122 s | 23 / 51 s | $0.0155 | 33/51 calls had prompt-cache hits (identical requests to R2) |
+| R2 | Flex · explanation → verdict | 148 s | 26 / 56 s | $0.0117 | served tier confirmed `flex` |
+| R3 | Standard · verdict → explanation | 176 s | 26 / 67 s | $0.0241 | no cache hits = fair Standard price |
+Full 4,446 windows extrapolated: Flex ≈ $52, Standard ≈ $107. Pilot total $2.6.
+Blind teacher yes/no vs label: crash TTE 1.5 / 1.0 / 0.5 = 1–2 / 3–4 / 4–5 of 9 per run; normal 22–24 of 24 → strong NO bias (same as the August
+blind-verdict teachers: recall 0.22 on val18). R1 vs R3 (order): same verdict 45/51, same class 50/51, explanation token-F1 0.63 → teacher order barely
+matters. Across the 3 TTE of a crash video: same class 8/9, same position 6–7/9; "gap closing" on 71–79% of NORMAL windows (not discriminative);
+box_ok 94–96%. Known text problem: explanations copy the list words ("A truck/bus travels beside right, moving same direction…").
+User check of 00013 TTE 0.5: the car is pulling out of a parking spot without noticing ego (collision follows); all three runs said "stopped car".
+
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.
 - VL-JEPA: frozen V-JEPA2 ViT-L + Llama-3.2-1B layers predicting text embeddings; separate decoder.

@@ -63,6 +63,15 @@ One line per rejected option so it is not re-proposed. Full reasoning for June�
 - **Wrong-video partner chosen at random** is a weak test (a similar scene can match the text); only proves "uses the video", not detail accuracy. Better design (same-category partners for detail) not built.
 - **Phase-1 diversity gate "≥ 90 % distinct of N"** → invalid for DADA's closed phrase list; compared with the targets' own diversity instead.
 
+### Teacher (user decisions 2026-10-08, after the boxed-teacher pilot)
+- **Teacher yes/no verdict field** → removed: blind teachers under-call crashes (pilot 8–10/27; August 0.22 recall); the student's verdict comes from the label.
+- **Blind explanation for crash windows** → rejected: a harmless explanation paired with the label "yes" contradicts itself. Next prompt TELLS the teacher the
+  outcome and asks for the visible cues only, with "not visible" when it cannot see them (fabrication guard; such windows are dropped or marked).
+- **Standard tier** → Flex chosen: half the uncached price ($0.0117 vs $0.024 per window), same latency with 16 parallel calls.
+- **Removing the attention box** → kept, but first a paired no-box A/B on the same 51 windows (Flex) and a check of the chosen object against the 14 hand-labelled clips.
+- **Explanation text that copies the closed-list words** → rejected; next prompt requires natural sentences.
+- **Window selection from the 1,761 pool** → rejected for teacher pilots (failure-enriched); use videos outside it.
+
 ## Unresolved (need the user)
 0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the
    Phase-1 checkpoint with explicit verdict / time-to-impact fields (≈1 h), (b) re-weight DADA no-crash to cut the 83 % false-alarm rate, (c) more / richer Nexar text (BADAS-2.0 recipe with
