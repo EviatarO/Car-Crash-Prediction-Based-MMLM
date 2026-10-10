@@ -2,9 +2,11 @@
 # Step B of the full teacher run (plan 2026-10-10_Plan-Teacher-Full-Run.md): tracks + A1 attention for 4,203 windows on a RunPod pod.
 # The pod does the GPU work only: it writes tracks/<vid>.json and attn/<frames_dir>.json (small). The PC draws the boxes and runs the teacher.
 # Usage:  bash r1_teacher_pod.sh <stage> [arg]
-#   setup | kaggle_check | videos | cut | smoke | tracks_attn [n_procs] | push | check_stop | stop <pod_id>
+#   setup | hf_check | videos | cut | smoke | tracks_attn [n_procs] | push | verify | check_stop | stop <pod_id> | auto
 # Layout on the pod: code /root/r1, work dir /root/teacher_dataset (windows.jsonl in, tracks/ attn/ out), videos /root/nexar/train, frames /root/frames.
-# Credentials (never printed): Kaggle -> KAGGLE_USERNAME + KAGGLE_KEY (pod env) or ~/.kaggle/kaggle.json; HF -> /root/.cache/huggingface/token.
+# Videos: Hugging Face dataset nexar-ai/nexar_collision_prediction (gated 'auto'; the HF account of the token must have accepted the terms).
+# Credentials (never printed): HF -> /root/.cache/huggingface/token.
+# `auto` runs videos -> cut -> tracks_attn -> push -> verify and stops the pod ONLY if the results are verified on HF.
 set -u
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1 PYTHONUNBUFFERED=1
 ROOT=${ROOT:-/root/r1}
@@ -13,8 +15,6 @@ VIDEOS=${NEXAR_VIDEOS:-/root/nexar/train}
 FRAMES=${R1_TRAIN_DIR:-/root/frames}
 PY=${PY:-/root/venv/bin/python}
 SC=$ROOT/student_training/scripts
-COMP=${NEXAR_COMP:-nexar-collision-prediction}
-PREFIX=${NEXAR_PREFIX:-train/}
 REPO=eviatarO-org/teacher-dataset-2026-10
 export NEXAR_VIDEOS=$VIDEOS R1_TRAIN_DIR=$FRAMES R1_PILOT_OUT=$WORK
 for TOKEN_FILE in ${TOKEN_FILE:-} /root/.cache/huggingface/token /workspace/.cache/huggingface/token; do
@@ -32,7 +32,7 @@ case $STAGE in
 setup)   # same pins as the week-1 pods and the local environment (transformers 5.8.0, peft 0.19.1); torch comes from the image
   python3 -m venv --system-site-packages /root/venv
   /root/venv/bin/pip install -q "transformers==5.8.0" "peft==0.19.1" "huggingface_hub>=1.0,<2" opencv-python-headless pyyaml pandas accelerate \
-      safetensors einops timm scikit-learn scipy supervision trackers kaggle >> $LOG 2>&1
+      safetensors einops timm scikit-learn scipy supervision trackers >> $LOG 2>&1
   $PY -c "import torch,transformers,cv2,trackers;print(torch.__version__,transformers.__version__,cv2.__version__,torch.cuda.get_device_name(0))" | tee -a $LOG
   $PY -m pip freeze > $WORK/pod_env.txt
   df -h /root | tee -a $LOG
@@ -40,25 +40,12 @@ setup)   # same pins as the week-1 pods and the local environment (transformers 
   ls $ROOT/outputs/a1_compress256/train/epoch_02/lora_adapter | tee -a $LOG
   wc -l $WORK/windows.jsonl | tee -a $LOG
   ;;
-kaggle_check)   # read-only: is the token accepted, what is the competition's file layout?
-  /root/venv/bin/kaggle competitions list -s nexar 2>&1 | head -8 | tee -a $LOG
-  /root/venv/bin/kaggle competitions files -c $COMP 2>&1 | head -12 | tee -a $LOG
+hf_check)   # read-only: HF token accepted by the gated Nexar dataset? all needed videos listed?
+  run $PY -u r1_pod_get_videos.py --windows $WORK/windows.jsonl --out $VIDEOS --check
   ;;
-videos)   # the 1,401 needed train videos, one file per call, 8 in parallel; resumable (existing non-empty files are skipped)
-  $PY - <<'PY' > $WORK/need_videos.txt
-import json, os
-w = os.environ.get("WORK", "/root/teacher_dataset")
-print("\n".join(sorted({json.loads(l)["video_id"] for l in open(f"{w}/windows.jsonl")})))
-PY
-  wc -l $WORK/need_videos.txt | tee -a $LOG
-  export COMP PREFIX VIDEOS
-  cat $WORK/need_videos.txt | xargs -P 8 -I{} bash -c '
-    f=$VIDEOS/{}.mp4
-    [ -s "$f" ] && exit 0
-    /root/venv/bin/kaggle competitions download -c $COMP -f ${PREFIX}{}.mp4 -p $VIDEOS --quiet >/dev/null 2>&1
-    [ -s "$VIDEOS/{}.mp4.zip" ] && (cd $VIDEOS && unzip -qo {}.mp4.zip && rm -f {}.mp4.zip)
-    [ -s "$f" ] || echo "MISSING {}" ' >> $LOG 2>&1
-  echo "videos present: $(ls $VIDEOS/*.mp4 2>/dev/null | wc -l) of $(wc -l < $WORK/need_videos.txt); missing: $(grep -c MISSING $LOG)" | tee -a $LOG
+videos)   # the 1,401 needed train videos from the HF dataset, 16 threads; resumable, sizes verified
+  run $PY -u r1_pod_get_videos.py --windows $WORK/windows.jsonl --out $VIDEOS --threads 16 || exit 1
+  echo "videos present: $(ls $VIDEOS/*.mp4 2>/dev/null | wc -l)" | tee -a $LOG
   du -sh $VIDEOS | tee -a $LOG
   ;;
 cut)      # the 4,203 windows at native resolution (JPEG q95), 4 processes
@@ -86,7 +73,7 @@ tracks_attn)   # ARG = number of parallel processes (default 3). Each process: t
       $PY -u r1_attention_boxes.py --stage attn --shard $K/$N > $WORK/logs/attn_$K.log 2>&1; echo "exit=$?" >> $WORK/logs/attn_$K.log ) &
   done
   wait
-  echo "tracks: $(ls $WORK/tracks | wc -l) of $(wc -l < $WORK/need_videos.txt) | attn: $(ls $WORK/attn | wc -l) of 4203" | tee -a $LOG
+  echo "tracks: $(ls $WORK/tracks | wc -l) of 1401 | attn: $(ls $WORK/attn | wc -l) of 4203" | tee -a $LOG
   ;;
 push)     # small results (tracks, attn, windows, logs) -> private HF dataset repo; nothing durable stays only on the pod
   cd $WORK && tar czf /root/tracks.tar.gz tracks && tar czf /root/attn.tar.gz attn
@@ -120,13 +107,37 @@ print(len(a.list_repo_files(repo, repo_type="dataset")), "files on HF; private:"
 PY
   [ ${PIPESTATUS[0]} -eq 0 ] && touch ${LOG%.log}.done
   ;;
+verify)   # archives complete (1401 tracks, 4203 attention files) AND the same bytes are on HF
+  $PY - <<'PY' | tee -a $LOG
+import os, sys, tarfile
+from huggingface_hub import HfApi
+w = os.environ.get("WORK", "/root/teacher_dataset"); repo = "eviatarO-org/teacher-dataset-2026-10"
+ok = True
+for f, n in (("/root/tracks.tar.gz", 1401), ("/root/attn.tar.gz", 4203)):
+    with tarfile.open(f) as t:
+        cnt = sum(1 for m in t.getmembers() if m.isfile() and m.name.endswith(".json"))
+    print(f, "json files:", cnt, "expected", n); ok &= cnt == n
+remote = {x.path: x.size for x in HfApi().get_paths_info(repo, ["tracks.tar.gz", "attn.tar.gz", "windows.jsonl"], repo_type="dataset")}
+for f, dst in (("/root/tracks.tar.gz", "tracks.tar.gz"), ("/root/attn.tar.gz", "attn.tar.gz"), (f"{w}/windows.jsonl", "windows.jsonl")):
+    print(dst, "local", os.path.getsize(f), "HF", remote.get(dst)); ok &= remote.get(dst) == os.path.getsize(f)
+print("VERIFIED" if ok else "NOT VERIFIED"); sys.exit(0 if ok else 1)
+PY
+  [ ${PIPESTATUS[0]} -eq 0 ] && touch ${LOG%.log}.done
+  ;;
+auto)     # the whole run, unattended. Stops the pod only when `verify` passed. On any failure the pod stays up (nothing is lost, resumable).
+  AUTO=$WORK/logs/auto.status; echo "start $(date -u)" > $AUTO
+  step() { echo "[auto] $1 $(date -u)" | tee -a $AUTO; bash $0 $1 $2 >> $WORK/logs/auto.out 2>&1 || { echo "[auto] FAILED at $1: pod left running" | tee -a $AUTO; exit 1; }; }
+  step videos; step cut; step tracks_attn 3; step push; step verify
+  echo "[auto] verified on HF; stopping the pod $(date -u)" | tee -a $AUTO
+  bash $0 stop >> $WORK/logs/auto.out 2>&1; echo "[auto] stop command returned $? $(date -u)" | tee -a $AUTO
+  ;;
 check_stop)
   if tr '\0' '\n' < /proc/1/environ | grep -q '^RUNPOD_API_KEY='; then echo "RUNPOD_API_KEY: present"; else echo "RUNPOD_API_KEY: MISSING"; fi
   command -v runpodctl >/dev/null && echo "runpodctl: $(command -v runpodctl)" || echo "runpodctl: MISSING"
   tr '\0' '\n' < /proc/1/environ | grep -E '^RUNPOD_POD_ID=' | sed 's/^/pod id env: /' || true
   ;;
-stop)   # only after the push finished AND the PC downloaded tracks/attn from HF
-  [ -f $WORK/logs/push.done ] || { echo "push has not finished: run 'push' first"; exit 3; }
+stop)   # only after push AND verify (results are byte-identical on HF; the PC pulls them from there)
+  [ -f $WORK/logs/verify.done ] || { echo "results not verified on HF: run 'push' then 'verify' first"; exit 3; }
   export $(tr '\0' '\n' < /proc/1/environ | grep -E '^(RUNPOD_API_KEY|RUNPOD_POD_ID)=' | xargs)
   POD=${ARG:-${RUNPOD_POD_ID:-}}
   [ -n "$POD" ] || { echo "pod id unknown: pass it as the 2nd argument"; exit 4; }
