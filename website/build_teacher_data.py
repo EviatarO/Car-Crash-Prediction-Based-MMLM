@@ -53,10 +53,13 @@ def main():
         with ThreadPoolExecutor(8) as ex:
             ok = list(ex.map(mk, wins))
         print(f"[grids] large grids: {sum(ok)} of {len(wins)}")
-    rows, paths = [], collections.Counter()
+    rows, paths, removed = [], collections.Counter(), []
     for w in sorted(wins, key=lambda w: (w["video_id"], -w["horizon"])):
         fd = w["frames_dir"]
         f = flow.get(fd) or {}
+        if str(f.get("status", "ok")).startswith("flagged"):           # outlier windows: the hazard is not visible even with hindsight (user decision 2026-10-11)
+            removed.append({"frames_dir": fd, "label": w["label"], "status": f["status"]})
+            continue
         fr = f.get("final_from", "E3")
         path = "flagged" if str(f.get("status", "ok")).startswith("flagged") else fr
         paths[path] += 1
@@ -91,13 +94,21 @@ def main():
         summary[n] = {"setting": RUNS[n], "n": len(got), "parsed": len(got), "acc_all": [tp + tn, len(got)], "acc_crash": [tp, len(pos)], "acc_normal": [tn, len(neg)],
                       "tp_ci": study.wilson(tp, len(pos)), "tn_ci": study.wilson(tn, len(neg)), "risk_auc": round(auc, 3) if auc is not None else None, "run": s}
     n_all = len(rows)
+    (FULL / "removed_windows.json").write_text(json.dumps({"reason": "outliers: crash windows whose hazard is not visible even with hindsight; removed from the dataset", "windows": removed}, indent=1), encoding="utf-8")
+    with open(FULL / "dataset_final.jsonl", "w", encoding="utf-8") as fo:      # the dataset: window, labels, final explanation + prediction
+        for r in rows:
+            x = r["runs"]["FINAL"]
+            x = r["runs"]["E3"] if x and x.get("ref") else x
+            fo.write(json.dumps({"frames_dir": r["key"], "video_id": r["video_id"], "tte": r["tte"], "label": r["label"], "pre_alert": r["pre_alert"],
+                                 "label_vis": r["label_vis"], "path": r["path"], "status": r["status"], "explanation": x["explanation"],
+                                 "prediction": x["prediction"], "risk": x["risk"]}, ensure_ascii=False) + chr(10))
     cnt = lambda k: paths.get(k, 0)  # noqa: E731
     pre = sum(r["pre_alert"] for r in rows)
     flagged_soft = sum(bool((r["runs"]["E3"] or {}).get("problems")) for r in rows)
     note = (f"<b>{n_all:,} windows</b> from {len({r['video_id'] for r in rows}):,} Nexar training videos (3 windows each; TTE 1.5 / 1.0 / 0.5 s before the collision, "
             f"normal videos before a fake event at the midpoint). Crash windows kept by the visibility rule: {sum(1 for r in rows if r['label'] == 1 and not r['pre_alert']):,} · "
             f"pre-alert crash windows (label 1 → 0): {pre} · normal windows: {sum(1 for r in rows if r['label'] == 0):,}. "
-            f"Final answers by path: E3 kept {cnt('E3'):,} · E6 anchored {cnt('E6'):,} · E6 chain {cnt('E6C')} · E7 {cnt('E7')} · E7-pre {cnt('E7pre')} · flagged {cnt('flagged')}. "
+            f"Final answers by path: E3 kept {cnt('E3'):,} · E6 anchored {cnt('E6'):,} · E6 chain {cnt('E6C')} · E7 {cnt('E7')} · E7-pre {cnt('E7pre')}; {len(removed)} outlier crash windows were removed. "
             f"E3 answers with a soft flag (colour / time / length word): {flagged_soft}. The routing is the flowchart of the Experiments page → Teacher prompt study. "
             f"The GT column shows the Nexar label and the visible-hazard label the student is trained on (pre-alert windows read 1 → 0). "
             f"FINAL answers on windows E3 got wrong are label-informed by design: read them for whether the text matches the frames, not as accuracy.")

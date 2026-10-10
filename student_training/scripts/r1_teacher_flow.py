@@ -162,7 +162,7 @@ def main():
             reason = None
             if not prev or not prev.get("parsed"):
                 reason = "no parsed answer at the previous step"
-            elif prev["parsed"].get("hazard_visible") == "no":
+            elif prev["parsed"].get("hazard_visible") == "no" and tgt[pw["frames_dir"]] == 1:      # "no hazard visible" is the right state of a normal window
                 reason = "hazard not visible at the previous step: chain stops"
             elif not right(prev, tgt[pw["frames_dir"]]):
                 reason = "previous answer does not match the label: not a verified anchor"
@@ -174,7 +174,7 @@ def main():
             chain[w["frames_dir"]] = prev
         if not (e7.get(s["frames_dir"]) or {}).get("parsed"):
             flagged.setdefault(s["frames_dir"], "no parsed E7 answer")
-        elif e7[s["frames_dir"]]["parsed"].get("hazard_visible") == "no":
+        elif e7[s["frames_dir"]]["parsed"].get("hazard_visible") == "no" and tgt[s["frames_dir"]] == 1:
             flagged.setdefault(s["frames_dir"], "E7 says the hazard is not visible at TTE 0.5")
 
     from concurrent.futures import ThreadPoolExecutor
