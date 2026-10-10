@@ -139,7 +139,7 @@ def set_runs(base):
     (runs/<name>P2.jsonl) overlaid. E6 includes the chain (tag E6C); E7 includes E7-pre (tag E7pre); ROUTED = the final answer."""
     names = {"E3": "E3", "E6": "E6", "E6C": "E6C", "E7": "E7", "E7pre": "E7PRE"}
     src = {k: by_fd(base / "runs" / f"{f}.jsonl") for k, f in names.items()}
-    for k, f in (("E3", "E3"), ("E6", "E6"), ("E6C", "E6C"), ("E7", "E7")):   # E5 is overlaid in main()
+    for k, f in (("E3", "E3"), ("E6", "E6"), ("E6C", "E6C"), ("E7", "E7"), ("E7pre", "E7PRE")):   # E5 is overlaid in main()
         p2 = {r["frames_dir"]: r["prediction"] for r in jl(base / "runs" / f"{f}P2.jsonl") if r.get("prediction")}
         for fd, r in src[k].items():
             if r.get("parsed") and fd in p2:

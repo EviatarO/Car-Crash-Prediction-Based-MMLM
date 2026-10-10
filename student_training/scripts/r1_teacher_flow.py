@@ -151,12 +151,14 @@ def main():
     # ---- E7 start of the chain and the chain
     e7 = reuse_or_run([e7_job(start[v], None, False) for v in chain_videos], "E7", args, client, boxes) if chain_videos else {}
     chain, flagged = {}, {}
-    for v in chain_videos:
+
+    def chain_video(v):
+        """E6 chain of one video: its windows run one after the other (each anchors on the previous answer); videos run in parallel."""
         s = start[v]
         prev, pw = e7.get(s["frames_dir"]), s
-        for w in sorted([x for x in byv[v] if x["frames_dir"] != s["frames_dir"] and x["frames_dir"] in {y["frames_dir"] for y in e7_start} | {z["frames_dir"] for z in []}
-                         or (x["frames_dir"] != s["frames_dir"] and not pre_alert(x) and not right(e3[x["frames_dir"]], tgt[x["frames_dir"]]))],
-                        key=lambda x: x["horizon"]):
+        todo_w = sorted([x for x in byv[v] if x["frames_dir"] != s["frames_dir"] and not pre_alert(x)
+                         and not right(e3[x["frames_dir"]], tgt[x["frames_dir"]])], key=lambda x: x["horizon"])
+        for w in todo_w:
             reason = None
             if not prev or not prev.get("parsed"):
                 reason = "no parsed answer at the previous step"
@@ -170,10 +172,14 @@ def main():
             res = reuse_or_run([e6_job(w, pw, prev, extra={"anchor_from": "E7" if pw is s else "E6C"})], "E6C", args, client, boxes)
             prev, pw = res[w["frames_dir"]], w
             chain[w["frames_dir"]] = prev
-        if not prev or not (e7.get(s["frames_dir"]) or {}).get("parsed"):
+        if not (e7.get(s["frames_dir"]) or {}).get("parsed"):
             flagged.setdefault(s["frames_dir"], "no parsed E7 answer")
         elif e7[s["frames_dir"]]["parsed"].get("hazard_visible") == "no":
             flagged.setdefault(s["frames_dir"], "E7 says the hazard is not visible at TTE 0.5")
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(args.concurrency) as ex:
+        list(ex.map(chain_video, chain_videos))
 
     # ---- final answer per window
     rows = []

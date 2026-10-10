@@ -37,6 +37,7 @@
   <div class="tabs">
     <button class="tab active" data-split="train">Train</button>
     <button class="tab" data-split="test">Test</button>
+    <button class="tab" data-split="teacher" title="the 4,203-window teacher reasoning dataset: frames with the red box, E3 / E6 / E7 answers, final target">Teacher reasoning</button>
   </div>
   <div class="searchwrap">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -52,6 +53,40 @@
     <thead id="thead"></thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+
+<!-- ================= TEACHER REASONING DATASET VIEW (4,203 windows; same view code as the pilot table of experiments.html) ================= -->
+<div id="viewTeacher" hidden>
+  <section class="block">
+    <div class="kicker">Teacher reasoning dataset · 2026-10</div>
+    <h2>4,203 windows with the teacher's reasoning</h2>
+    <p class="lede">Each row is one 16-frame window (about 2 s) with the road user the frozen crash model attends to boxed in red. <b>E3</b> is the
+       blind first answer of the teacher (Gemini 3.8 Flash); <b>E6 / E7</b> are the second-stage answers on the windows where E3 did not match
+       the visible-hazard label (tags ↻ E6C chain, ↻ E7pre for pre-alert windows); <b>FINAL</b> is the answer kept in the dataset. Every answer ends with a
+       one-sentence outcome (→). Click a frame sheet or ＋ to enlarge. Sort and filter like on the other tables; comments and the
+       “Hitter visible?” field are saved in this browser (Export notes). Wait a few seconds the first time: the page loads about 9 MB of answers.</p>
+    <div class="table-wrap pilot-runs"><table class="mini" id="tchRuns"></table></div>
+    <p class="note" id="tchPaired"></p>
+    <p class="note" id="tchNote"></p>
+    <p class="note"><a id="tchRouteLink" href="#" target="_blank" rel="noopener"><img id="tchRoute" alt="routing of the teacher prompts" style="max-width:100%;height:auto;border:1px solid #2a3560;border-radius:8px;background:#fff"></a></p>
+    <div class="cmp-toolbar" id="tchChips"></div>
+    <div class="cmp-toolbar">
+      <button class="pill clearbtn" id="tchClear">Clear filters</button>
+      <span class="rowcount" id="tchCount"></span>
+      <span class="rowcount notecount" id="tchNoteCount"></span>
+      <button class="pill pushright" id="tchExport">Export notes</button>
+      <button class="pill" id="tchImport">Import notes</button>
+      <input type="file" id="tchFile" accept="application/json" hidden>
+    </div>
+    <div class="cmp-toolbar" id="tchPager"></div>
+    <div class="table-wrap cmp-scroll pilot-scroll">
+      <table class="cmp-table pilot-table">
+        <thead id="tchHead"></thead>
+        <tbody id="tchBody"></tbody>
+      </table>
+    </div>
+    <div class="cmp-toolbar" id="tchPager2"></div>
+  </section>
 </div>
 
 <footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL DATASET EXPLORER</footer>
@@ -93,9 +128,21 @@
   </div>
 </div>
 
+<div class="overlay" id="gridOverlay">
+  <div class="gridbox">
+    <div class="player-head">
+      <span class="pid" id="gTitle"></span>
+      <span class="meta" id="gMeta"></span>
+      <button class="close" id="gClose" title="close (Esc)">×</button>
+    </div>
+    <img id="gImg" alt="">
+  </div>
+</div>
+
 <script src="site_data.js"></script>
 <script src="assets/plexus.js"></script>
 <script src="assets/player.js"></script>
+<script src="assets/pilot.js"></script>
 <script>
 "use strict";
 /* ============================================================= state */
@@ -309,7 +356,10 @@ renderHead(); renderBody();
 /* tabs / search / clear */
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-  t.classList.add("active"); split = t.dataset.split;
+  t.classList.add("active");
+  if (t.dataset.split === "teacher"){ showTeacher(true); return; }
+  showTeacher(false);
+  split = t.dataset.split;
   searchTerm = ""; document.getElementById("search").value = "";
   renderHead(); renderBody();
 }));
@@ -347,6 +397,68 @@ document.getElementById("tbody").addEventListener("click", e => {
   player.open(clip, {title: `#${clip.id}`, meta: bits.join("  ·  "),
                      mode: split === "test" ? "test" : "train"});
 });
+
+/* ============================================================= teacher reasoning tab
+   The 4,203-window table reuses assets/pilot.js (createPilotView) with the id prefix "tch" and 50 rows per page. Its data file
+   (teacher_data.js, ~9 MB) is loaded the first time the tab is opened. Notes share the localStorage store of experiments.html. */
+const NOTES_LS = "ccp:review-notes:v1";
+let NOTES = (function () {
+  try { return JSON.parse(localStorage.getItem(NOTES_LS)) || {}; }
+  catch (e) { return {}; }
+})();
+let notesTimer = null;
+function saveNotes(){
+  clearTimeout(notesTimer);
+  notesTimer = setTimeout(() => { try { localStorage.setItem(NOTES_LS, JSON.stringify(NOTES)); } catch (e) {} }, 300);
+}
+function exportNotes(){
+  const blob = new Blob([JSON.stringify(NOTES, null, 2)], {type: "application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `ccp-review-notes-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function importNotes(file){
+  const fr = new FileReader();
+  fr.onload = () => {
+    let incoming;
+    try { incoming = JSON.parse(fr.result); } catch (e) { alert("That file is not valid JSON."); return; }
+    if (!incoming || typeof incoming !== "object"){ alert("Unexpected notes format."); return; }
+    let added = 0;
+    for (const ds in incoming){
+      if (!NOTES[ds]) NOTES[ds] = {};
+      for (const k in incoming[ds]) if (!NOTES[ds][k]){ NOTES[ds][k] = incoming[ds][k]; added++; }
+    }
+    saveNotes();
+    if (teacherView) teacherView.renderBody(true);
+    alert(`Imported ${added} new note${added === 1 ? "" : "s"} (existing notes kept).`);
+  };
+  fr.readAsText(file);
+}
+let teacherView = null, teacherLoading = false;
+function showTeacher(on){
+  document.querySelector(".table-wrap").hidden = on;
+  document.getElementById("viewTeacher").hidden = !on;
+  document.querySelector(".searchwrap").style.display = on ? "none" : "";
+  document.getElementById("clearFilters").style.display = on ? "none" : "";
+  document.getElementById("rowcount").style.display = on ? "none" : "";
+  if (!on || teacherView || teacherLoading) { if (on && teacherView) teacherView.show(); return; }
+  teacherLoading = true;
+  document.getElementById("tchCount").textContent = "loading the answers…";
+  const sc = document.createElement("script");
+  sc.src = "teacher_data.js";
+  sc.onload = () => {
+    teacherView = createPilotView({
+      prefix: "tch", pageSize: 50, data: window.TEACHER_DATA,
+      esc: s => String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+      notes: () => NOTES, saveNotes: () => saveNotes(), exportNotes: () => exportNotes(), importNotes: f => importNotes(f),
+    });
+    teacherView.show();
+  };
+  sc.onerror = () => { teacherLoading = false; document.getElementById("tchCount").textContent = "teacher_data.js not found: run website/build_teacher_data.py"; };
+  document.head.appendChild(sc);
+}
 </script>
 </body>
 </html>

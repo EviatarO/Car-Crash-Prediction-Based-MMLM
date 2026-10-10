@@ -88,7 +88,7 @@ def validate(p, order):
         hit = [w for w in words if re.search(r"(?<![a-z])" + re.escape(w.strip()) + r"(?![a-z])", low)]
         if hit:
             pr.append(f"banned {kind}: {hit[:3]}")
-    if "box" in low.split():
+    if re.search(r"box(?!\s+(truck|trucks|van|vans))", low):          # "box truck" is a vehicle type, not the red box
         pr.append("mentions the box")
     return pr
 
@@ -117,7 +117,7 @@ def validate_study(p, variant):
         hit = [w for w in BANNED[kind] if re.search(r"(?<![a-z])" + re.escape(w.strip()) + r"(?![a-z])", low)]
         if hit:
             pr.append(f"banned {kind}: {hit[:3]}")
-    if "box" in low.split():
+    if re.search(r"box(?!\s+(truck|trucks|van|vans))", low):          # "box truck" is a vehicle type, not the red box
         pr.append("mentions the box")
     return pr
 

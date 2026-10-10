@@ -1,6 +1,6 @@
 # Teacher reasoning dataset: the chosen flow
 
-*CCP V-JEPA2 Reasoning · updated 2026-10-10 · status: tested on a 51-window pilot and a 30-window rescue test; the full run has not started.*
+*CCP V-JEPA2 Reasoning · updated 2026-10-10 · status: full run finished on all 4,203 windows (results in section 6); review pending.*
 
 **Goal:** one natural-language explanation per training window, used as the target text for the student (V-JEPA2 → projector → Qwen3-VL-4B). Each window also gets a target verdict, `label_vis` (section 2).
 
@@ -116,9 +116,22 @@ On the website a pre-alert window reads **1 → 0 · pre-alert**, or **1 → 1 �
 
 ---
 
-## 6. Full run: plan and cost
+## 6. Full run (2026-10-10): results
 
-- **Windows:** `r1_teacher_windows.py` writes the 4,203 windows; the normal windows are re-cut with the midpoint rule.
-- **Boxes:** detection, tracking and A1 attention are GPU work; the plan is a RunPod pod (about 4–5 h, $3–5) that pushes the boxed frames to a private HF repo. The teacher calls then run from the PC (OpenRouter Flex), not from the pod.
-- **Teacher cost (Flex):** E3 $48, E6 about $14, E7 and the chain about $4, E7-pre about $3, the E3 prediction pass about $5: **≈ $74**, 2–3 h of calls. The E3 failure rate (29 %) comes from 51 windows, so the stage-2 cost is ±30 %.
-- **Review output:** a report plus a website view of every stage-2 window and 200 random E3-kept windows.
+- **Windows:** 4,203 (1,401 videos). Boxes: 1,304 attention-top, 2,486 propagated by track ID, 325 own-top, 88 windows (2.1 %) without any tracked object (no box).
+  GPU step on a RunPod RTX PRO 4500 in batches of 150 videos (about 3.5 h with one lost hour), results pulled from the private HF repo `eviatarO-org/teacher-dataset-2026-10`.
+- **Stage 1 (E3, Flex):** 4,203 answers, about $44. Against the visible-hazard label: crash windows kept by the rule yes 724 / 1,361 (recall 0.53),
+  normal windows no 2,320 / 2,842 (0.82); of the 610 pre-alert windows E3 said "no" on 404 (correct) and "yes" on 206.
+- **Stage 2:** E7-pre 206 · E6 anchored 412 · E7 on TTE 0.5 of videos with no valid anchor 280 · E6 chain 233. About $13, plus $6.4 for the short prediction sentences.
+- **`label_vis`:** 18 of the 610 pre-alert windows became 1 (E7-pre found the hazard already visible); final counts 1,361 positive / 2,842 negative.
+- **Final answers:** E3 kept 3,026 · E6 412 · E6 chain 233 · E7 260 · E7-pre 206 · **flagged 66** (the hazard is not visible at the chain start, or the chain
+  stopped: drop or review) · 19 windows whose stage-2 verdict differs from `label_vis` ("check").
+- **Text:** every window has a prediction (mean 7.7 words, max 12). Soft flags that remain are cosmetic (colour words 497, a few time / outcome words);
+  "box truck" is a vehicle type and no longer flagged. Total teacher spend about $63.
+- **Where:** `outputs/teacher_dataset_2026-10/` (`windows.jsonl`, `boxes.jsonl`, `boxed/`, `review/`, `runs/E3.jsonl`, `flow_final.jsonl`);
+  website: Dataset page, tab "Teacher reasoning" (`website/build_teacher_data.py` → `teacher_data.js`).
+
+## 7. Open before the student training
+1. **The 66 flagged windows:** keep with `label_vis` 0 and the honest E7 / E3 text, or drop.
+2. **The 19 "check" windows** (stage-2 verdict differs from `label_vis`): review on the website.
+3. **Hand review** of a sample of the E3-kept windows (the 497 colour flags are cosmetic) and of the E6 / E7 explanations (E6 can follow its anchor too closely).

@@ -12,8 +12,13 @@ function createPilotView(deps){
   const D = deps.data, esc = deps.esc, KEY = D.dataset_key;
   const ALL_RUNS = Object.keys(D.runs);
   let RUNS = (D.default_on || ALL_RUNS).filter(r => ALL_RUNS.includes(r));       // runs shown as columns (chip row)
-  const $ = id => document.getElementById(id);
-  const state = {sort: null, dir: 1, filters: {}, disagree: false, failsOnly: true};
+  // element ids: "pilot*" ids are looked up with the view's own prefix (default "pilot"; the dataset page uses "tch"); other ids are shared
+  const P = deps.prefix || "pilot";
+  const $ = id => document.getElementById(id.startsWith("pilot") ? P + id.slice(5) : id);
+  // rows may point to another run's entry ({ref: "E3"}) to avoid storing the same answer twice
+  D.rows.forEach(r => Object.keys(r.runs).forEach(k => { const x = r.runs[k]; if (x && x.ref) r.runs[k] = Object.assign({}, r.runs[x.ref], {from_e4: null}); }));
+  const PAGE = deps.pageSize || 0;
+  const state = {sort: null, dir: 1, filters: {}, disagree: false, failsOnly: D.fails_default !== false, page: 0};
   const e3Wrong = r => { const x = r.runs.E3; return !!(x && x.verdict && ((x.verdict === "yes") !== ((r.label_vis !== undefined ? r.label_vis : r.label) === 1))); };
   let built = false;
 
@@ -65,6 +70,12 @@ function createPilotView(deps){
          ? `<span class="chip pos" title="Nexar label 1, visible-hazard label ${r.label_vis}">1 → ${r.label_vis}</span><div class="dim hvhint">pre-alert${r.label_vis === 1 ? " · seen early" : ""}${r.status && r.status !== "ok" ? " · " + esc(r.status) : ""}</div>`
          : `<span class="chip ${r.label === 1 ? "pos" : "neg"}">${r.label}</span>${r.status && r.status !== "ok" ? `<div class="dim hvhint">${esc(r.status)}</div>` : ""}`},
     ];
+    if (D.path_opts){
+      cols.splice(cols.findIndex(c => c.key === "label") + 1, 0, {key: "path", label: "Routing", type: "select",
+        title: "which prompt produced the final answer of this window",
+        get: r => r.path, opts: [["", "All"], ...D.path_opts.map(o => [o[0], o[1]])],
+        cell: r => `<span class="chip ${r.path === "E3" ? "neg" : "pos"}">${esc((D.path_opts.find(o => o[0] === r.path) || [0, r.path])[1])}</span>`});
+    }
     RUNS.forEach(run => cols.push({
       key: run + "_v", label: run + "_verdict", type: "verdict", run,
       title: D.runs[run], get: verdictGet(run),
@@ -99,7 +110,7 @@ function createPilotView(deps){
         const v = noteOf(r);
         return `<textarea class="noteinput${v ? " has-note" : ""}" data-key="${esc(r.key)}" rows="3" placeholder="add a note…">${esc(v)}</textarea>`;
       }});
-    return cols;
+    return cols.filter(c => !(D.hide_cols || []).includes(c.key));
   }
   let COLS = columns();
 
@@ -195,10 +206,28 @@ function createPilotView(deps){
       renderBody();
     }));
   }
-  function renderBody(){
+  function renderBody(keepPage){
     const rows = visible();
-    $("pilotBody").innerHTML = rows.map(rowHTML).join("");
-    $("pilotCount").textContent = `${rows.length} of ${D.rows.length} windows`;
+    if (!keepPage) state.page = 0;                       // a new filter / sort starts on page 1; the pager buttons keep their page
+    const pages = PAGE ? Math.max(1, Math.ceil(rows.length / PAGE)) : 1;
+    state.page = Math.min(state.page, pages - 1);
+    const shown = PAGE ? rows.slice(state.page * PAGE, (state.page + 1) * PAGE) : rows;
+    $("pilotBody").innerHTML = shown.map(rowHTML).join("");
+    $("pilotCount").textContent = `${rows.length} of ${D.rows.length} windows` + (PAGE ? ` · showing ${state.page * PAGE + 1}–${state.page * PAGE + shown.length}` : "");
+    ["pilotPager", "pilotPager2"].forEach((pid, idx) => {                 // a pager above and one below the table
+      const pg = $(pid);
+      if (!pg) return;
+      pg.innerHTML = PAGE && pages > 1
+        ? `<button class="pill" data-pg="first" ${state.page === 0 ? "disabled" : ""}>« first</button> <button class="pill" data-pg="prev" ${state.page === 0 ? "disabled" : ""}>‹ prev</button>
+           <span class="rowcount">page ${state.page + 1} / ${pages}</span>
+           <button class="pill" data-pg="next" ${state.page >= pages - 1 ? "disabled" : ""}>next ›</button> <button class="pill" data-pg="last" ${state.page >= pages - 1 ? "disabled" : ""}>last »</button>` : "";
+      pg.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+        const k = b.dataset.pg;
+        state.page = k === "first" ? 0 : k === "last" ? pages - 1 : state.page + (k === "next" ? 1 : -1);
+        renderBody(true);
+        const top = $("pilotHead").closest("table"); if (top) top.scrollIntoView({block: "start"});
+      }));
+    });
     updateNoteCount();
   }
 
@@ -218,7 +247,7 @@ function createPilotView(deps){
       <th title="TP: crash windows (label 1) the teacher called yes; [95% Wilson]">crash → yes (TP)</th><th title="TN: normal windows (label 0) the teacher called no; [95% Wilson]">normal → no (TN)</th>
       <th title="rank AUC of risk_score, crash vs normal">risk AUC</th><th>total time</th><th>latency median / p95</th><th>cost / window</th><th>cost total</th><th>soft problems</th></tr></thead><tbody>${rows}</tbody>`;
     const mc = D.mcnemar || {};
-    $("pilotPaired").innerHTML = Object.keys(mc).length ? "Paired tests on the same 51 windows (verdict = GT): " + Object.entries(mc).map(([k, v]) => {
+    $("pilotPaired").innerHTML = D.paired_note ? D.paired_note : Object.keys(mc).length ? "Paired tests on the same 51 windows (verdict = GT): " + Object.entries(mc).map(([k, v]) => {
       const [a, b] = k.split("|");
       return `<b>${a} vs ${b}</b> only-${a}-right ${v.only_first}, only-${b}-right ${v.only_second}, exact p = ${v.p}`;
     }).join(" · ") + ". p ≥ 0.1 = not distinguishable, not equal. E3 → E34 is label-routed and therefore not a perception test." : "";
@@ -249,22 +278,24 @@ function createPilotView(deps){
 
   function build(){
     built = true;
-    $("pilotNote").textContent = D.note;
+    if (D.note_html) $("pilotNote").innerHTML = D.note_html; else $("pilotNote").textContent = D.note;
     renderChips();
     renderRuns();
     renderHead();
     $("pilotClear").addEventListener("click", () => { state.filters = {}; state.sort = null; state.dir = 1; state.disagree = false; state.failsOnly = false;
-      $("pilotDisagree").classList.remove("active"); $("pilotFails").classList.remove("active"); renderHead(); renderBody(); });
-    $("pilotFails").classList.toggle("active", state.failsOnly);
-    $("pilotFails").addEventListener("click", e => { state.failsOnly = !state.failsOnly; e.currentTarget.classList.toggle("active", state.failsOnly); renderBody(); });
-    if (D.routing_fig){ $("pilotRoute").src = D.routing_fig; $("pilotRouteLink").href = D.routing_fig; }
+      if ($("pilotDisagree")) $("pilotDisagree").classList.remove("active"); if ($("pilotFails")) $("pilotFails").classList.remove("active"); renderHead(); renderBody(); });
+    if ($("pilotFails")){
+      $("pilotFails").classList.toggle("active", state.failsOnly);
+      $("pilotFails").addEventListener("click", e => { state.failsOnly = !state.failsOnly; e.currentTarget.classList.toggle("active", state.failsOnly); renderBody(); });
+    }
+    if (D.routing_fig && $("pilotRoute")){ $("pilotRoute").src = D.routing_fig; $("pilotRouteLink").href = D.routing_fig; }
     $("pilotBody").addEventListener("change", e => {
       const s = e.target.closest("select[data-hv]");
       if (!s) return;
       setHV(s.dataset.hv, s.value);
       s.classList.toggle("has-note", !!s.value);
     });
-    $("pilotDisagree").addEventListener("click", e => { state.disagree = !state.disagree; e.currentTarget.classList.toggle("active", state.disagree); renderBody(); });
+    if ($("pilotDisagree")) $("pilotDisagree").addEventListener("click", e => { state.disagree = !state.disagree; e.currentTarget.classList.toggle("active", state.disagree); renderBody(); });
     $("pilotBody").addEventListener("input", e => {
       const ta = e.target.closest("textarea[data-key]");
       if (!ta) return;
