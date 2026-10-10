@@ -40,7 +40,7 @@ from aa1_yolop_cache import iou_xyxy  # noqa: E402
 from aa4_token_labels import box_to_cells  # noqa: E402
 
 OUT = Path(__import__("os").environ.get("R1_PILOT_OUT") or ROOT / "outputs" / "teacher_pilot_2026-10")   # R1_PILOT_OUT: separate test folders
-TRAIN = ROOT / "dataset" / "train"
+TRAIN = Path(__import__("os").environ.get("R1_TRAIN_DIR") or ROOT / "dataset" / "train")        # R1_TRAIN_DIR: pod override
 VRU_PROMPT = "person. bicycle. motorcycle."
 CONF = 0.30
 GDINO_EVERY = 3
@@ -79,9 +79,17 @@ def gdino_vru(det, frame_bgr):
 
 
 # --------------------------------------------------------------------------- pass 1
-def stage_tracks(wins, limit):
+def pick_shard(vids, shard):
+    """shard = 'K/N' -> every N-th video starting at K (parallel processes on one pod; each file is written by exactly one)."""
+    if not shard:
+        return vids
+    k, n = map(int, shard.split("/"))
+    return [v for i, v in enumerate(vids) if i % n == k]
+
+
+def stage_tracks(wins, limit, shard=None):
     (OUT / "tracks").mkdir(parents=True, exist_ok=True)
-    vids = sorted({w["video_id"] for w in wins})[: limit or None]
+    vids = pick_shard(sorted({w["video_id"] for w in wins})[: limit or None], shard)
     todo = [v for v in vids if not (OUT / "tracks" / f"{v}.json").exists()]
     print(f"[tracks] {len(vids)} videos, {len(todo)} to do", flush=True)
     if not todo:
@@ -169,9 +177,9 @@ def score_tracks(r, tracks, idx, fps):
     return scores, float((W8 * union_mass).sum()), float((W8 * r.reshape(8, -1).sum(1)).sum())
 
 
-def stage_attn(wins, limit):
+def stage_attn(wins, limit, shard=None):
     (OUT / "attn").mkdir(parents=True, exist_ok=True)
-    vids = set(sorted({w["video_id"] for w in wins})[: limit or None])
+    vids = set(pick_shard(sorted({w["video_id"] for w in wins})[: limit or None], shard))
     todo = [w for w in wins if w["video_id"] in vids and not (OUT / "attn" / f"{w['frames_dir']}.json").exists()]
     print(f"[attn] {len(todo)} windows to do", flush=True)
     if not todo:
@@ -267,15 +275,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="all", choices=["tracks", "attn", "boxes", "all"])
     ap.add_argument("--limit-videos", type=int, default=0)
+    ap.add_argument("--shard", default=None, help="K/N: process every N-th video starting at K (tracks / attn stages)")
     ap.add_argument("--set", default=None, choices=["A", "B", "R"], help="only the windows of this set (R = rescue test)")
     args = ap.parse_args()
     wins = load_windows()
     if args.set:
         wins = [w for w in wins if w["set"] == args.set]
     if args.stage in ("tracks", "all"):
-        stage_tracks(wins, args.limit_videos)
+        stage_tracks(wins, args.limit_videos, args.shard)
     if args.stage in ("attn", "all"):
-        stage_attn(wins, args.limit_videos)
+        stage_attn(wins, args.limit_videos, args.shard)
     if args.stage in ("boxes", "all"):
         stage_boxes(wins, args.limit_videos)
 

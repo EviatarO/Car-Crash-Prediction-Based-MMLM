@@ -42,10 +42,9 @@ import cv2
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_CAPTIONS = PROJECT_ROOT / "outputs" / "semantic_captions" / "Caption_Train4500_Mixed_1761.jsonl"
 OUT_CAPTIONS = PROJECT_ROOT / "outputs" / "semantic_captions" / "Caption_Train4500_MidpointNeg_1761.jsonl"
-SRC_VIDEOS = Path(
+SRC_VIDEOS = Path(__import__("os").environ.get("NEXAR_VIDEOS") or (     # NEXAR_VIDEOS: pod override
     r"C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis"
-    r"\Data-Centric-Crash-Prediction-Using-3LC-and-MViT\src\Nexar_DataSet\train"
-)
+    r"\Data-Centric-Crash-Prediction-Using-3LC-and-MViT\src\Nexar_DataSet\train"))
 DST_ROOT = PROJECT_ROOT / "dataset" / "train"
 
 WINDOW = 16

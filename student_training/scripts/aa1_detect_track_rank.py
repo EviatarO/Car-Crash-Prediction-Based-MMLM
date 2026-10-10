@@ -65,10 +65,9 @@ import numpy as np
 import torch
 
 REPO = Path(__file__).resolve().parents[2]
-RAW_VIDEO_ROOT = Path(
+RAW_VIDEO_ROOT = Path(__import__("os").environ.get("NEXAR_VIDEOS") or (     # NEXAR_VIDEOS: pod override
     r"C:\Users\eviatar.ohayon\Ramon Space\PycharmProjects\Thesis"
-    r"\Data-Centric-Crash-Prediction-Using-3LC-and-MViT\src\Nexar_DataSet\train"
-)
+    r"\Data-Centric-Crash-Prediction-Using-3LC-and-MViT\src\Nexar_DataSet\train"))
 TRAIN_CSV = REPO / "dataset" / "train.csv"
 OUT_DIR_DEFAULT = REPO / "outputs" / "aa1_smoke_18clips"
 
