@@ -50,8 +50,8 @@ W8 = np.arange(1, 9, dtype=np.float64)
 W8 /= W8.sum()
 
 
-def load_windows():
-    return [json.loads(l) for l in open(OUT / "windows.jsonl", encoding="utf-8")]
+def load_windows(path=None):
+    return [json.loads(l) for l in open(path or OUT / "windows.jsonl", encoding="utf-8")]
 
 
 def nms_merge(boxes, scores, labels, thr=0.5):
@@ -275,10 +275,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="all", choices=["tracks", "attn", "boxes", "all"])
     ap.add_argument("--limit-videos", type=int, default=0)
+    ap.add_argument("--windows-file", default=None, help="windows jsonl to use instead of OUT/windows.jsonl (a batch of videos on the pod)")
     ap.add_argument("--shard", default=None, help="K/N: process every N-th video starting at K (tracks / attn stages)")
     ap.add_argument("--set", default=None, choices=["A", "B", "R"], help="only the windows of this set (R = rescue test)")
     args = ap.parse_args()
-    wins = load_windows()
+    wins = load_windows(args.windows_file)
     if args.set:
         wins = [w for w in wins if w["set"] == args.set]
     if args.stage in ("tracks", "all"):

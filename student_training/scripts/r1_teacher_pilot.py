@@ -212,7 +212,7 @@ def make_jobs(args, wins, e3):
 
 
 def run_jobs(jobs, args, client, out_path, name, boxes, parallel=True):
-    done = {json.loads(l)["frames_dir"] for l in open(out_path, encoding="utf-8")} if out_path.exists() else set()
+    done = {r["frames_dir"] for r in map(json.loads, open(out_path, encoding="utf-8")) if r.get("parsed")} if out_path.exists() else set()   # failed calls are retried
     todo = [j for j in jobs if j["w"]["frames_dir"] not in done]
     print(f"[{name}] {len(done)} already done, {len(todo)} to run", flush=True)
 
@@ -340,7 +340,7 @@ def main():
     ap.add_argument("--frames", choices=["raw", "boxed"], default="boxed")
     ap.add_argument("--debate-from", help="run name of Exp #3: re-run only its mistakes with e4_tp (crash missed) / e4_tn (normal flagged)")
     ap.add_argument("--name")
-    ap.add_argument("--set", choices=["A", "B", "R"])
+    ap.add_argument("--set", choices=["A", "B", "R", "full"])
     ap.add_argument("--tier", choices=["standard", "flex"], default="standard")
     ap.add_argument("--order", choices=["explanation_first", "verdict_first"], default="explanation_first")
     ap.add_argument("--model", required=True)
@@ -388,7 +388,7 @@ def main():
     runs = OUT / "runs"
     runs.mkdir(exist_ok=True)
     out_path = runs / f"{args.name}.jsonl"
-    done = {json.loads(l)["frames_dir"] for l in open(out_path, encoding="utf-8")} if out_path.exists() and not args.flex_test else set()
+    done = {r["frames_dir"] for r in map(json.loads, open(out_path, encoding="utf-8")) if r.get("parsed")} if out_path.exists() and not args.flex_test else set()   # failed calls are retried
     todo = [w for w in rows if w["frames_dir"] not in done]
     print(f"[cfg] {len(done)} already done, {len(todo)} to run", flush=True)
 

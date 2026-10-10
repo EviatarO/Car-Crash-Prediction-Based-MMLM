@@ -2,11 +2,11 @@
 # Step B of the full teacher run (plan 2026-10-10_Plan-Teacher-Full-Run.md): tracks + A1 attention for 4,203 windows on a RunPod pod.
 # The pod does the GPU work only: it writes tracks/<vid>.json and attn/<frames_dir>.json (small). The PC draws the boxes and runs the teacher.
 # Usage:  bash r1_teacher_pod.sh <stage> [arg]
-#   setup | hf_check | videos | cut | smoke | tracks_attn [n_procs] | push | verify | check_stop | stop <pod_id> | auto
+#   setup | hf_check | smoke | batches [videos_per_batch] | videos | cut | tracks_attn [n_procs] | push | verify | check_stop | stop <pod_id> | auto
 # Layout on the pod: code /root/r1, work dir /root/teacher_dataset (windows.jsonl in, tracks/ attn/ out), videos /root/nexar/train, frames /root/frames.
 # Videos: Hugging Face dataset nexar-ai/nexar_collision_prediction (gated 'auto'; the HF account of the token must have accepted the terms).
 # Credentials (never printed): HF -> /root/.cache/huggingface/token.
-# `auto` runs videos -> cut -> tracks_attn -> push -> verify and stops the pod ONLY if the results are verified on HF.
+# `auto` runs batches -> push -> verify and stops the pod ONLY if the results are verified on HF.
 set -u
 export PYTHONIOENCODING=utf-8 PYTHONUTF8=1 PYTHONUNBUFFERED=1
 ROOT=${ROOT:-/root/r1}
@@ -20,7 +20,8 @@ export NEXAR_VIDEOS=$VIDEOS R1_TRAIN_DIR=$FRAMES R1_PILOT_OUT=$WORK
 for TOKEN_FILE in ${TOKEN_FILE:-} /root/.cache/huggingface/token /workspace/.cache/huggingface/token; do
   [ -f "$TOKEN_FILE" ] && export HF_TOKEN=$(cat "$TOKEN_FILE") && break
 done
-mkdir -p $WORK/logs $VIDEOS $FRAMES
+NPROC=${NPROC:-3}   # tracking / attention processes per batch (GPU has room for several)
+mkdir -p $WORK/logs $WORK/batches $VIDEOS $FRAMES
 STAGE=${1:?stage}; ARG=${2:-}
 LOG=$WORK/logs/$STAGE${ARG:+_$ARG}.log
 cd $SC 2>/dev/null || true
@@ -28,11 +29,50 @@ cd $SC 2>/dev/null || true
 run() { echo "=== [$STAGE $ARG] start $(date -u) ===" | tee -a $LOG; "$@" >> $LOG 2>&1; EX=$?
         echo "=== [$STAGE $ARG] exit=$EX $(date -u) ===" | tee -a $LOG; [ $EX -eq 0 ] && touch ${LOG%.log}.done; return $EX; }
 
+do_batch() {   # do_batch <windows file of one batch> <tag>
+  local F=$1 T=$2 K T0=$(date +%s)
+  [ -f $WORK/logs/batch_$T.done ] && { echo "[batch $T] already done"; return 0; }
+  $PY -u r1_pod_get_videos.py --windows $F --out $VIDEOS --threads 16 > $WORK/logs/batch_${T}_videos.log 2>&1 || { echo "[batch $T] video download failed"; return 1; }
+  local T1=$(date +%s)
+  for K in 0 1 2 3; do $PY -u r1_pod_cut_windows.py --windows $F --shard $K/4 > $WORK/logs/batch_${T}_cut_$K.log 2>&1 & done; wait
+  [ "$(grep -h "\[cut\] done" $WORK/logs/batch_${T}_cut_?.log | grep -c " 0 incomplete")" -eq 4 ] || { echo "[batch $T] cut failed"; return 1; }
+  local T2=$(date +%s)
+  # two phases, NOT overlapped: the A1 model of the attention step needs ~6 GB per process and OOMs next to tracking processes
+  for K in $(seq 0 $((NPROC-1))); do
+    $PY -u r1_attention_boxes.py --stage tracks --windows-file $F --shard $K/$NPROC > $WORK/logs/batch_${T}_tracks_$K.log 2>&1 &
+  done; wait
+  local NA=${NPROC_ATTN:-3}
+  for K in $(seq 0 $((NA-1))); do
+    $PY -u r1_attention_boxes.py --stage attn --windows-file $F --shard $K/$NA > $WORK/logs/batch_${T}_attn_$K.log 2>&1 &
+  done; wait
+  local T3=$(date +%s)
+  $PY - $F <<'PY' || { echo "[batch $T] outputs incomplete"; return 1; }
+import json, os, sys
+w = os.environ.get("WORK", "/root/teacher_dataset")
+rows = [json.loads(l) for l in open(sys.argv[1])]
+mt = [v for v in {r["video_id"] for r in rows} if not os.path.exists(f"{w}/tracks/{v}.json")]
+ma = [r["frames_dir"] for r in rows if not os.path.exists(f"{w}/attn/{r['frames_dir']}.json")]
+print(f"batch outputs: {len(rows)} windows, missing tracks {len(mt)}, missing attn {len(ma)}")
+sys.exit(1 if (mt or ma) else 0)
+PY
+  $PY - $F <<'PY'
+import json, os, shutil, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+fr = os.environ.get("R1_TRAIN_DIR", "/root/frames"); vd = os.environ.get("NEXAR_VIDEOS", "/root/nexar/train")
+for r in rows: shutil.rmtree(f"{fr}/{r['frames_dir']}", ignore_errors=True)
+for v in {r["video_id"] for r in rows}:
+    try: os.remove(f"{vd}/{v}.mp4")
+    except FileNotFoundError: pass
+PY
+  touch $WORK/logs/batch_$T.done
+  echo "[batch $T] $(grep -c "" $F) windows | download $((T1-T0))s, cut $((T2-T1))s, tracks+attention $((T3-T2))s, total $(( $(date +%s)-T0 ))s" | tee -a $WORK/logs/batch_times.log
+}
+
 case $STAGE in
 setup)   # same pins as the week-1 pods and the local environment (transformers 5.8.0, peft 0.19.1); torch comes from the image
   python3 -m venv --system-site-packages /root/venv
   /root/venv/bin/pip install -q "transformers==5.8.0" "peft==0.19.1" "huggingface_hub>=1.0,<2" opencv-python-headless pyyaml pandas accelerate \
-      safetensors einops timm scikit-learn scipy supervision trackers >> $LOG 2>&1
+      safetensors einops timm scikit-learn scipy supervision trackers albumentations >> $LOG 2>&1
   $PY -c "import torch,transformers,cv2,trackers;print(torch.__version__,transformers.__version__,cv2.__version__,torch.cuda.get_device_name(0))" | tee -a $LOG
   $PY -m pip freeze > $WORK/pod_env.txt
   df -h /root | tee -a $LOG
@@ -57,14 +97,32 @@ cut)      # the 4,203 windows at native resolution (JPEG q95), 4 processes
   echo "window folders: $(ls $FRAMES | wc -l) (expect 4203)" | tee -a $LOG
   du -sh $FRAMES | tee -a $LOG
   ;;
-smoke)    # 3 videos end to end: tracks + attention; prints seconds per video / window. READ before running everything.
-  START=$(date +%s)
-  run $PY -u r1_attention_boxes.py --stage tracks --limit-videos 3 || exit 1
-  MID=$(date +%s)
-  run $PY -u r1_attention_boxes.py --stage attn --limit-videos 3 || exit 1
-  END=$(date +%s)
-  echo "tracks: $((MID-START)) s for 3 videos | attention: $((END-MID)) s for $(ls $WORK/attn | wc -l) windows" | tee -a $LOG
-  nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv | tee -a $LOG
+smoke)    # first 3 videos through the whole batch procedure; prints the time per step. READ before running everything.
+  $PY - <<'PY'
+import json, os
+w = os.environ.get("WORK", "/root/teacher_dataset")
+rows = [json.loads(l) for l in open(f"{w}/windows.jsonl")]
+vids = sorted({r["video_id"] for r in rows})[:3]
+open(f"{w}/batches/smoke.jsonl", "w").write("".join(json.dumps(r) + chr(10) for r in rows if r["video_id"] in vids))
+PY
+  do_batch $WORK/batches/smoke.jsonl smoke
+  ;;
+batches)   # ARG = videos per batch (default 150): download -> cut -> tracks + attention -> delete videos and frames; resumable per batch
+  $PY - "${ARG:-150}" <<'PY'
+import json, os, sys
+w = os.environ.get("WORK", "/root/teacher_dataset"); n = int(sys.argv[1])
+rows = [json.loads(l) for l in open(f"{w}/windows.jsonl")]
+vids = sorted({r["video_id"] for r in rows})
+for b in range(0, len(vids), n):
+    vs = set(vids[b:b + n])
+    open(f"{w}/batches/b_{b // n:03d}.jsonl", "w").write("".join(json.dumps(r) + chr(10) for r in rows if r["video_id"] in vs))
+print(len(vids), "videos in", -(-len(vids) // n), "batches of", n)
+PY
+  for F in $WORK/batches/b_*.jsonl; do
+    T=$(basename $F .jsonl)
+    do_batch $F $T || { echo "BATCH $T FAILED" | tee -a $LOG; exit 1; }
+    echo "[batches] $T done $(date -u) | tracks $(ls $WORK/tracks | wc -l) of 1401 | attn $(ls $WORK/attn | wc -l) of 4203 | disk $(df -h /root | tail -1 | awk '{print $4}') free" | tee -a $LOG
+  done
   ;;
 tracks_attn)   # ARG = number of parallel processes (default 3). Each process: tracks then attention for its share of the videos. Resumable.
   N=${ARG:-3}
@@ -126,8 +184,8 @@ PY
   ;;
 auto)     # the whole run, unattended. Stops the pod only when `verify` passed. On any failure the pod stays up (nothing is lost, resumable).
   AUTO=$WORK/logs/auto.status; echo "start $(date -u)" > $AUTO
-  step() { echo "[auto] $1 $(date -u)" | tee -a $AUTO; bash $0 $1 $2 >> $WORK/logs/auto.out 2>&1 || { echo "[auto] FAILED at $1: pod left running" | tee -a $AUTO; exit 1; }; }
-  step videos; step cut; step tracks_attn 3; step push; step verify
+  step() { echo "[auto] $1 $(date -u)" | tee -a $AUTO; bash $0 $1 ${2:-} >> $WORK/logs/auto.out 2>&1 || { echo "[auto] FAILED at $1: pod left running" | tee -a $AUTO; exit 1; }; }
+  step batches; step push; step verify
   echo "[auto] verified on HF; stopping the pod $(date -u)" | tee -a $AUTO
   bash $0 stop >> $WORK/logs/auto.out 2>&1; echo "[auto] stop command returned $? $(date -u)" | tee -a $AUTO
   ;;
