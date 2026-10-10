@@ -35,7 +35,7 @@
   <div class="tabs">
     <button class="tab active" data-view="detail">Experiment detail</button>
     <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
-    <button class="tab" data-view="pilot">Boxed-teacher pilot</button>
+    <button class="tab" data-view="pilot">Teacher prompt study</button>
   </div>
   <span class="rowcount" id="viewHint"></span>
 </div>
@@ -141,17 +141,29 @@
 <div id="viewPilot" hidden>
   <section class="block">
     <div class="kicker">Teacher pilot · 2026-10</div>
-    <h2>Boxed-object teacher — R1 · R2 · R3 on the same windows</h2>
-    <p class="lede">The teacher (Gemini 3.8 Flash) sees the 16 frames with ONE road user boxed in red — the object the frozen
-       crash model attends to — and returns a fixed-list description, a 25–40-word explanation and a collision yes/no.
-       <b>R1</b> Standard tier, explanation then verdict · <b>R2</b> Flex tier, same prompt · <b>R3</b> Standard tier,
-       verdict then explanation. Verdict cells are green when they equal the GT label (1 = crash, 0 = normal).
-       Click a frame grid or its ＋ to enlarge.</p>
+    <h2>Teacher prompt study — E1 · E2 · E3 · E4 on the same windows</h2>
+    <p class="lede">The teacher (Gemini 3.8 Flash, Flex tier, blind to the label) sees 16 frames and writes a 25–45-word explanation, then a
+       <code>risk_score</code> and a collision yes/no. <b>E1</b> V12 neutral prompt, raw frames · <b>E2</b> same + the attention-chosen object boxed
+       in red · <b>E3</b> the v6_balanced prompt re-balanced toward TP, boxed · <b>E4</b> debate: the TP- or TN-recovery prompt on the windows E3
+       got wrong, routed by the label (so <b>E34</b> = E3 with E4 substituted is not a perception test). Verdict cells are green when they equal
+       the GT label (1 = crash, 0 = normal); the small number is the risk score; ↻ E4 marks a debate answer. The older pilot runs R1–R3 stay
+       available through the column chips. Click a frame grid or its ＋ to enlarge.</p>
     <div class="table-wrap pilot-runs"><table class="mini" id="pilotRuns"></table></div>
+    <p class="lede">Second stage (E3's 15 mistakes): <b>E5</b> shows the teacher a correct sibling window of the same video (its 16 frames + E3's own
+       reasoning for it) and asks it to judge the failed window; <b>E6</b> adds a timing check and <code>hazard_visible</code>; <b>E7</b> is
+       told the outcome and sees the frames after the window — it is used only where the flow needs it, at TTE 0.5 of 00997 (all three windows
+       wrong). The E6 answers on 00997 TTE 1.0 / 1.5 carry <b>↻ E6C</b>: the same E6 prompt, chained after E7. Only answers that are part of the
+       flow below are shown. <b>ROUTED</b> is the final answer per window; its tag names the prompt that produced it (no tag = E3 kept). These
+       answers are label-informed by design, so judge them on whether the text matches the frames, not on accuracy. Fill the “Hitter visible?”
+       column per crash window; Export notes saves it.</p>
+    <p class="note"><a id="pilotRouteLink" href="#" target="_blank" rel="noopener"><img id="pilotRoute" alt="routing of the teacher prompts" style="max-width:100%;height:auto;border:1px solid #2a3560;border-radius:8px;background:#fff"></a></p>
+    <p class="note" id="pilotPaired"></p>
     <p class="note" id="pilotNote"></p>
+    <div class="cmp-toolbar" id="pilotChips"></div>
     <div class="cmp-toolbar">
       <button class="pill clearbtn" id="pilotClear">Clear filters</button>
-      <button class="pill" id="pilotDisagree" title="show only windows where the three runs do not give the same verdict">Runs disagree</button>
+      <button class="pill" id="pilotFails" title="show only the windows E3 got wrong (15)">E3 mistakes only (15)</button>
+      <button class="pill" id="pilotDisagree" title="show only windows where the shown runs do not give the same verdict">Runs disagree</button>
       <span class="rowcount" id="pilotCount"></span>
       <span class="rowcount notecount" id="pilotNoteCount"></span>
       <button class="pill pushright" id="pilotExport">Export notes</button>
@@ -296,7 +308,7 @@ function applyRoute(){
   document.querySelectorAll(".tab[data-view]").forEach(t =>
     t.classList.toggle("active", t.dataset.view === view));
   document.getElementById("viewHint").textContent = view === "detail"
-    ? "one arm, in full" : view === "pilot" ? "teacher runs R1 · R2 · R3, side by side" : "up to 3 arms, side by side";
+    ? "one arm, in full" : view === "pilot" ? "teacher prompt study E1 – E4 (and pilot R1 – R3), side by side" : "up to 3 arms, side by side";
   if (view === "pilot") pilotView.show();
   if (view === "detail"){
     if (arg && ARM_BY_KEY[arg]) lastArm = arg;

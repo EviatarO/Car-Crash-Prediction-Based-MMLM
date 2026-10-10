@@ -71,8 +71,16 @@ One line per rejected option so it is not re-proposed. Full reasoning for June�
 - **Removing the attention box** → kept, but first a paired no-box A/B on the same 51 windows (Flex) and a check of the chosen object against the 14 hand-labelled clips.
 - **Explanation text that copies the closed-list words** → rejected; next prompt requires natural sentences.
 - **Window selection from the 1,761 pool** → rejected for teacher pilots (failure-enriched); use videos outside it.
+- **Teacher prompt study (user, 2026-10-08):** extra arms (Gemini Pro model, outcome + hindsight frames) → declined; only the user's E1-E4. Box stays in E2-E4. Set B (51 more windows) → not used.
+- **Fine-tuning the teacher on Nexar** → not now: Nexar has labels and times but no reasoning targets, and tuning Gemini Flash is not confirmed available. Alternatives kept for later: in-context
+  corrected examples (e.g. 00013), self-consistency (3 samples), a stronger model only where Flash conflicts with the label.
+- **"V12 was the best prompt" as a verdict prompt** → false: V12 never predicted a verdict (caption-only). Most balanced blind verdict prompt measured at scale: `PROMPT_G_OPT_v6_balanced` on Gemini 3.1 Pro
+  (e3a: recall 0.75 / specificity 0.785; private test 677: 0.78 / 0.58); on Flash and other models it under-calls (Gemini 3.6 Flash 4/9, Qwen / GPT 2/9, Qwen3-VL-235B 0/18).
+- **Debate / two-pass recovery as a measure of teacher quality** → it is routed by the ground-truth label (mismatches only), so its accuracy (67.9 % to 90 % on the private test) rises by construction;
+  recovered explanations scored lower (mean 3.6/10) and sometimes kept the first pass's invented agent. Use only to get a label-consistent explanation, never as a perception metric.
 
 ## Unresolved (need the user)
+00. **Teacher prompt study outcome:** which of E1-E4 becomes the base of the production teacher (outcome given, visible cues only); does the box help (no-box A/B). Flex vs Standard is decided (Flex).
 0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the
    Phase-1 checkpoint with explicit verdict / time-to-impact fields (≈1 h), (b) re-weight DADA no-crash to cut the 83 % false-alarm rate, (c) more / richer Nexar text (BADAS-2.0 recipe with
    detection boxes; teacher spend), (d) calibrate the DADA threshold (AUC 0.735 is fine, 0.5 is not).
