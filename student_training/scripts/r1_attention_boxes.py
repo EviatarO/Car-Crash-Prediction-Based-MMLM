@@ -39,7 +39,7 @@ from aa1_tracks import extend_edge_tracks, is_ego_hood, stitch_fragments, track_
 from aa1_yolop_cache import iou_xyxy  # noqa: E402
 from aa4_token_labels import box_to_cells  # noqa: E402
 
-OUT = ROOT / "outputs" / "teacher_pilot_2026-10"
+OUT = Path(__import__("os").environ.get("R1_PILOT_OUT") or ROOT / "outputs" / "teacher_pilot_2026-10")   # R1_PILOT_OUT: separate test folders
 TRAIN = ROOT / "dataset" / "train"
 VRU_PROMPT = "person. bicycle. motorcycle."
 CONF = 0.30
@@ -267,7 +267,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="all", choices=["tracks", "attn", "boxes", "all"])
     ap.add_argument("--limit-videos", type=int, default=0)
-    ap.add_argument("--set", default=None, choices=["A", "B"], help="only the windows of this pilot set")
+    ap.add_argument("--set", default=None, choices=["A", "B", "R"], help="only the windows of this set (R = rescue test)")
     args = ap.parse_args()
     wins = load_windows()
     if args.set:

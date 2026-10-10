@@ -149,11 +149,24 @@ def _e3() -> str:
 
 # ------------------------------------------------------------------ e5 / e6 (anchored) and e7 (hindsight)
 E56_VARIANTS = ("e5", "e6")
-PREDICTION = (
+PREDICTION_V1 = (                                   # used for the 2026-10-09 E5-E7 runs; repeated the explanation (median ~21 words)
     "PREDICTION (last):\n"
     "One sentence in your own words that ties what you saw to what happens next, for example in the style of "
     "\"..., so a crash is about to happen.\" or \"..., so the road stays clear and no hazard appears.\" Outcome words are "
     "allowed here only. Do not copy these examples.\n\n"
+)
+PREDICTION = (                                      # 2026-10-10: outcome only
+    "PREDICTION (last):\n"
+    "Only the outcome, in one short clause of 4-15 words. Do not repeat or summarise the explanation -- it is already written "
+    "above. Name the road user involved if there is one. Examples of the form: \"A collision with the truck follows.\" / "
+    "\"No collision; the road stays clear.\" Outcome words are allowed here. Do not copy these examples.\n\n"
+)
+PRED_KEY = '"4-15 words, outcome only"'
+PRE_ALERT_NOTE = (
+    "TIMING (verified annotation): the collision happens at the end of clip C, but by the annotation the danger becomes "
+    "recognisable only AFTER clip B ends. Check this against clip B: is the involved road user, or any warning cue, already "
+    "visible in clip B? Answer hazard_visible honestly; if nothing in clip B announces the collision yet, a low risk_score is "
+    "the correct judgement for clip B's moment.\n\n"
 )
 CLIP_RULE = ("Never mention clip A, clip C, the reference, the reviewer or the hindsight in any field.")
 
@@ -204,7 +217,7 @@ def build_anchor_prompt(variant: str, delta: float, earlier: bool, anchor: dict)
             ("collision_interpretation", '""'), ("box_ok", "true"), ("same_agent", "true")]
     if variant == "e6":
         keys += [("hazard_visible", '"yes|partly|no"'), ("first_visible_frame", "null")]
-    keys += [("explanation", '"25-45 words"'), ("risk_score", "0"), ("collision", '"yes|no"'), ("prediction", '"one sentence"')]
+    keys += [("explanation", '"25-45 words"'), ("risk_score", "0"), ("collision", '"yes|no"'), ("prediction", PRED_KEY)]
     return t + WRITING + DECISION + PREDICTION + _json(keys)
 
 
@@ -226,18 +239,20 @@ E7_INPUT = (
 )
 
 
-def build_hindsight_prompt(n_after: int, label: int) -> str:
-    """E7: clip B (raw) + clip C (after-frames) + the verified outcome in text; explanation limited to clip B."""
+def build_hindsight_prompt(n_after: int, label: int, pre_alert: bool = False) -> str:
+    """E7: clip B (raw) + clip C (after-frames) + the verified outcome in text; explanation limited to clip B.
+    pre_alert=True (E7-pre): clip B ends before the annotated alert, so the prompt asks whether the hazard is already visible."""
     t = _e3_head(False)
     t = _rep(t, "INPUT:\n- 16 chronologically ordered dashcam frames\n- Frame 1 = oldest\n- Frame 16 = current moment\n"
                 "- Sequence duration ≈ 2 seconds\n- Forward-facing ego vehicle camera\n\n",
              E7_INPUT.format(n_after=n_after) + HINDSIGHT.format(
                  outcome=("the ego vehicle COLLIDED with another road user or object at the end of clip C." if label
-                          else "NO collision happens in clip C or afterwards; the drive continues normally.")))
+                          else "NO collision happens in clip C or afterwards; the drive continues normally.")) +
+                 (PRE_ALERT_NOTE if pre_alert else ""))
     keys = [("scene_context", '""'), ("dynamic_objects", '""'), ("temporal_analysis", '""'), ("safe_interpretation", '""'),
             ("collision_interpretation", '""'), ("involved_agent", '""'), ("hazard_visible", '"yes|partly|no"'),
             ("first_visible_frame", "null"), ("early_cues", '""'), ("explanation", '"25-45 words"'), ("risk_score", "0"),
-            ("collision", '"yes|no"'), ("prediction", '"one sentence"')]
+            ("collision", '"yes|no"'), ("prediction", PRED_KEY)]
     return t + WRITING + DECISION + PREDICTION + _json(keys)
 
 
@@ -277,7 +292,7 @@ def build_multi_prompt(variant: str, **kw) -> str:
     if variant in E56_VARIANTS:
         return build_anchor_prompt(variant, kw["delta"], kw["earlier"], kw["anchor"])
     assert variant == "e7", variant
-    return build_hindsight_prompt(kw["n_after"], kw["label"])
+    return build_hindsight_prompt(kw["n_after"], kw["label"], kw.get("pre_alert", False))
 
 
 def dummy_multi(variant: str) -> str:
@@ -297,7 +312,7 @@ def audit():
     for v in MULTI_VARIANTS:
         p = dummy_multi(v)
         out[v] = {"chars": len(p), "has_box": "BOXED OBJECT" in p, "forbidden": [f for f in FORBIDDEN if re.search(r"\b" + re.escape(f) + r"\b", p)],
-                  "ends_with_prediction_key": p.rstrip().endswith('"prediction": "one sentence"\n}'),
+                  "ends_with_prediction_key": p.rstrip().endswith('"prediction": ' + PRED_KEY + '\n}'),
                   "has_decision": "DECISION (last)" in p, "has_prediction": "PREDICTION (last)" in p,
                   "unfilled_braces": re.findall(r"\{[a-z_]+\}", p)}
     # E6 differs from E5 by the TIMING block and the two hazard keys only

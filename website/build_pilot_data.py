@@ -64,11 +64,12 @@ def load_run(name, multi=None):
     return {r["frames_dir"]: r for r in map(json.loads, open(p, encoding="utf-8"))} if p.exists() else {}
 
 
-def large_grid(frames_dir, label):
-    out = PILOT / "grid_large" / f"{frames_dir}.jpg"
+def large_grid(frames_dir, label, base=None):
+    base = base or PILOT
+    out = base / "grid_large" / f"{frames_dir}.jpg"
     if out.exists():
         return True
-    src = sorted((PILOT / "boxed" / frames_dir).glob("frame_*.jpg"))
+    src = sorted((base / "boxed" / frames_dir).glob("frame_*.jpg"))
     if len(src) != 16:
         return False
     out.parent.mkdir(exist_ok=True)
@@ -110,38 +111,94 @@ def calls_summary(recs):
             "cost_per_window_usd": sum(cst) / len(cst), "cost_total_usd": sum(cst), "with_problems": sum(bool(x["problems"]) for x in recs)}
 
 
+RESCUE = ROOT / "outputs" / "teacher_rescue_2026-10"
+REL_R = "../outputs/teacher_rescue_2026-10"
+
+
+def jl(path):
+    return [json.loads(l) for l in open(path, encoding="utf-8")] if path.exists() else []
+
+
+def by_fd(path):
+    return {r["frames_dir"]: r for r in jl(path)}
+
+
+def run_entry(n, x):
+    p = x["parsed"] if x and x.get("parsed") else None
+    src = ("E4" if (n == "E34" and x and x.get("from_e4")) else
+           x.get("final_from") if n == "ROUTED" and x and x.get("final_from") != "E3" else
+           x.get("src_tag") if x else None)
+    return None if not p else {
+        "verdict": p.get("collision"), "explanation": p.get("explanation"), "tags": tags(p, x),
+        "box_ok": p.get("box_ok"), "problems": x["problems"], "wall_s": x.get("wall_s"),
+        "risk": p.get("risk_score"), "from_e4": src, "prediction": p.get("prediction")}
+
+
+def set_runs(base):
+    """Answers of one output folder as they are used by the flow (flow_final.jsonl), with the short outcome-only predictions
+    (runs/<name>P2.jsonl) overlaid. E6 includes the chain (tag E6C); E7 includes E7-pre (tag E7pre); ROUTED = the final answer."""
+    names = {"E3": "E3", "E6": "E6", "E6C": "E6C", "E7": "E7", "E7pre": "E7PRE"}
+    src = {k: by_fd(base / "runs" / f"{f}.jsonl") for k, f in names.items()}
+    for k, f in (("E3", "E3"), ("E6", "E6"), ("E6C", "E6C"), ("E7", "E7")):   # E5 is overlaid in main()
+        p2 = {r["frames_dir"]: r["prediction"] for r in jl(base / "runs" / f"{f}P2.jsonl") if r.get("prediction")}
+        for fd, r in src[k].items():
+            if r.get("parsed") and fd in p2:
+                r["parsed"] = dict(r["parsed"], prediction=p2[fd])
+    flow = by_fd(base / "flow_final.jsonl")
+    out = {"E3": src["E3"], "E6": {}, "E7": {}, "ROUTED": {}, "flow": flow}
+    for fd, f in flow.items():
+        fr = f["final_from"]
+        rec = dict(src[fr].get(fd) or {}, final_from=fr)
+        out["ROUTED"][fd] = rec
+        if fr in ("E6", "E6C"):
+            out["E6"][fd] = dict(rec, src_tag="E6C" if fr == "E6C" else None)
+        elif fr in ("E7", "E7pre"):
+            out["E7"][fd] = dict(rec, src_tag="E7pre" if fr == "E7pre" else None)
+    return out
+
+
+def gt_label(fl, w):
+    return {"label": w["label"], "pre_alert": bool(fl and fl.get("pre_alert")), "label_vis": fl.get("label_vis") if fl else w["label"],
+            "label_vis_source": fl.get("label_vis_source") if fl else None, "status": fl.get("status") if fl else None}
+
+
 def main():
-    wins =[json.loads(l) for l in open(PILOT / "windows.jsonl", encoding="utf-8")]
-    boxes = {json.loads(l)["frames_dir"]: json.loads(l) for l in open(PILOT / "boxes.jsonl", encoding="utf-8")} \
-        if (PILOT / "boxes.jsonl").exists() else {}
+    pilot_wins = [w for w in map(json.loads, open(PILOT / "windows.jsonl", encoding="utf-8")) if w["set"] == SET]
+    res_wins = [w for w in jl(RESCUE / "windows.jsonl")]
+    boxes = {**by_fd(PILOT / "boxes.jsonl"), **by_fd(RESCUE / "boxes.jsonl")}
     multi = study.compute_multi(study.compute())
-    runs = {n: load_run(n, multi) for n in RUNS}
+    old = {n: load_run(n, multi) for n in RUNS if n not in ("E3", "E6", "E7", "ROUTED")}        # prompt-study runs, pilot windows only
+    sr_p, sr_r = set_runs(PILOT), set_runs(RESCUE)
+    p5 = {r["frames_dir"]: r["prediction"] for r in jl(PILOT / "runs" / "E5P2.jsonl") if r.get("prediction")}
+    for fd, r in old["E5"].items():                                         # E5: same short outcome-only sentence
+        if r.get("parsed") and fd in p5:
+            r["parsed"] = dict(r["parsed"], prediction=p5[fd])
+    merged = {k: {**sr_p[k], **sr_r[k]} for k in ("E3", "E6", "E7", "ROUTED", "flow")}
+    runs_all = dict(old, **{k: merged[k] for k in ("E3", "E6", "E7", "ROUTED")})
     rows = []
-    for w in sorted([w for w in wins if w["set"] == SET], key=lambda w: (w["label"] == 0, w["video_id"], -w["horizon"])):
+    allw = [(w, PILOT, "pilot") for w in pilot_wins] + [(w, RESCUE, "rescue") for w in res_wins]
+    for w, base, sname in sorted(allw, key=lambda t: (t[2] != "pilot", t[0].get("group", ""), t[0]["label"] == 0, t[0]["video_id"], -t[0]["horizon"])):
         f = w["frames_dir"]
         b = boxes.get(f)
-        lab = f"{f}  label {w['label']}  {'TTE' if w['label'] else 'mid -'}{w['horizon']}s"
-        row = {"key": f, "video_id": w["video_id"], "tte": w["horizon"], "label": w["label"],
-               "grid": f"{REL}/review/{f}.jpg" if (PILOT / "review" / f"{f}.jpg").exists() else None,
-               "grid_large": f"{REL}/grid_large/{f}.jpg" if b and large_grid(f, lab) else None,
+        rel = REL if sname == "pilot" else REL_R
+        valid = w.get("valid", True)
+        lab = f"{f}  label {w['label']}  {'TTE' if w['label'] else 'mid -'}{w['horizon']}s" + ("" if valid else "  PRE-ALERT (removed by the rule)")
+        row = {"key": f, "set": sname, "valid": valid, "group": w.get("group"), "video_id": w["video_id"], "tte": w["horizon"],
+               "label": w["label"], **{k: v for k, v in gt_label(merged["flow"].get(f), w).items() if k != "label"},
+               "grid": f"{rel}/review/{f}.jpg" if (base / "review" / f"{f}.jpg").exists() else None,
+               "grid_large": f"{rel}/grid_large/{f}.jpg" if b and large_grid(f, lab, base) else None,
                "box_flag": b["flag"] if b else None, "a1_p": b["a1_p_collision"] if b else None, "runs": {}}
-        for n, r in runs.items():
-            x = r.get(f)
-            p = x["parsed"] if x and x["parsed"] else None
-            src = ("E4" if (n == "E34" and x and x.get("from_e4")) else
-                   x.get("final_from") if n == "ROUTED" and x and x.get("final_from") != "E3" else
-                   x.get("src_tag") if x else None)
-            row["runs"][n] = None if not p else {
-                "verdict": p.get("collision"), "explanation": p.get("explanation"), "tags": tags(p, x),
-                "box_ok": p.get("box_ok"), "problems": x["problems"], "wall_s": x.get("wall_s"),
-                "risk": p.get("risk_score"), "from_e4": src, "prediction": p.get("prediction")}
+        for n in RUNS:
+            row["runs"][n] = run_entry(n, runs_all[n].get(f)) if n in runs_all else None
         rows.append(row)
     summary = {}
     stats = study.compute()["stats"]
-    for n, r in runs.items():
+    pilot_keys = {w["frames_dir"] for w in pilot_wins}
+    for n in RUNS:
+        r = {fd: x for fd, x in runs_all[n].items() if fd in pilot_keys}
         sp = PILOT / "runs" / f"{n}.summary.json"
         s = json.load(open(sp)) if sp.exists() else None
-        got = [x for x in r.values() if x["parsed"]]
+        got = [x for x in r.values() if x.get("parsed")]
         acc = lambda sel: (sum((x["parsed"]["collision"] == "yes") == bool(x["label"]) for x in got if sel(x)),  # noqa: E731
                            sum(1 for x in got if sel(x)))
         if n in ("E6", "E7"):                                                 # run files hold more calls than the flow shows
@@ -155,7 +212,7 @@ def main():
         if n in ("E34", "ROUTED"):
             summary[n]["run"] = None
     data = {"set": SET, "dataset_key": "pilot_boxed_2026-10", "runs": RUNS, "rows": rows, "summary": summary, "default_on": DEFAULT_ON, "mcnemar": multi["mcnemar"], "hv_key": HV_KEY,
-            "routing_fig": "../reports/figures/teacher_prompt_routing_2026-10-09.png",
+            "routing_fig": "../reports/figures/teacher_prompt_routing_2026-10-10.png",
             "note": "Gemini 3.8 Flash via OpenRouter, Flex, native-resolution frames. E3 is blind to the label; E5-E7 and the routed answers are label-informed by design (they are told the outcome through the correct sibling window or in text), so read them for text grounding, not as accuracy. E1 sees raw frames; E2-E6 see the attention-chosen object boxed in red."}
     n_with = {n: sum(1 for r in rows if r["runs"][n]) for n in RUNS}
     keys = [r["key"] for r in rows]

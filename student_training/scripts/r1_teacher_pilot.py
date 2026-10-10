@@ -35,7 +35,7 @@ from prompts.PROMPT_TEACHER_STUDY import BOXED as STUDY_BOXED, REQUIRED as STUDY
 from prompts.PROMPT_TEACHER_STUDY import build_multi_prompt, build_prompt as build_study_prompt  # noqa: E402
 from semsup_caption_promptbakeoff import _build_messages, _encode_image, _extract_json_object  # noqa: E402
 
-OUT = ROOT / "outputs" / "teacher_pilot_2026-10"
+OUT = Path(__import__("os").environ.get("R1_PILOT_OUT") or ROOT / "outputs" / "teacher_pilot_2026-10")   # R1_PILOT_OUT: separate test folders
 BOXED = OUT / "boxed"
 REQUIRED = ("agent_class", "position", "object_motion", "gap", "box_ok", "evidence_frames", "explanation", "collision")
 
@@ -182,8 +182,14 @@ def make_jobs(args, wins, e3):
     byfd = {w["frames_dir"]: w for w in wins}
     fails = [w for w in wins if w["frames_dir"] in e3 and not is_correct(e3[w["frames_dir"]])]
     jobs, noanchor = [], []
+    # an anchor must be a CORRECT stage-1 answer on a VALID window (visibility rule); windows without "valid" (pilot) count as valid
+    good = lambda s: is_correct(e3.get(s["frames_dir"], {})) and s.get("valid", True)  # noqa: E731
     for w in fails:
         fd = w["frames_dir"]
+        if args.prompt == "e7" and args.flow:
+            # flow only: the TTE-0.5 window of a video with no correct valid window (start of the chain)
+            if w["horizon"] != 0.5 or any(good(s) for s in wins if s["video_id"] == w["video_id"]):
+                continue
         if args.prompt == "e7":
             n = json.load(open(AFTER / "index.json"))[fd]["n_after"]
             clips = [("CLIP B -- target (16 frames, chronological)", frames_of(ROOT / "dataset" / "train" / fd)),
@@ -191,7 +197,7 @@ def make_jobs(args, wins, e3):
             jobs.append({"w": w, "variant": "e7", "prompt": build_multi_prompt("e7", n_after=n, label=w["label"]), "clips": clips,
                          "extra": {"n_after": n}})
             continue
-        sib = [s for s in wins if s["video_id"] == w["video_id"] and s["frames_dir"] != fd and is_correct(e3.get(s["frames_dir"], {}))]
+        sib = [s for s in wins if s["video_id"] == w["video_id"] and s["frames_dir"] != fd and good(s)]
         if not sib:
             noanchor.append(fd)
             continue
@@ -252,7 +258,7 @@ def write_summary(name, recs, args, t_total):
 
 
 def main_multi(args):
-    wins = [w for w in map(json.loads, open(OUT / "windows.jsonl", encoding="utf-8")) if w["set"] == "A"]
+    wins = [w for w in map(json.loads, open(OUT / "windows.jsonl", encoding="utf-8")) if w["set"] == (args.set or "A")]
     boxes = {json.loads(l)["frames_dir"]: json.loads(l) for l in open(OUT / "boxes.jsonl", encoding="utf-8")}
     e3 = load_run_file(args.stage1 or "E3")
     (OUT / "runs").mkdir(exist_ok=True)
@@ -282,8 +288,9 @@ def main_chain(args, wins, boxes, e3):
     plan = []
     for v in vids:
         vw = {w["horizon"]: w for w in wins if w["video_id"] == v}
-        if any(is_correct(e3.get(w["frames_dir"], {})) for w in vw.values()) or not all(w["frames_dir"] in e3 for w in vw.values()):
-            continue                                                       # has an anchor in stage 1 -> not a chain video
+        if any(is_correct(e3.get(w["frames_dir"], {})) and w.get("valid", True) for w in vw.values()) or \
+                not all(w["frames_dir"] in e3 for w in vw.values()):
+            continue                                                       # has a valid anchor in stage 1 -> not a chain video
         plan.append((v, vw))
     print(f"[chain] videos with no correct E3 window: {[v for v, _ in plan]}", flush=True)
     for v, vw in plan:
@@ -291,6 +298,9 @@ def main_chain(args, wins, boxes, e3):
         order = [(1.0, vw[1.0]), (1.5, vw[1.5])]
         anchor_w, anchor_rec = vw[0.5], prev
         for h, w in order:
+            if is_correct(e3.get(w["frames_dir"], {})):
+                print(f"[chain] {v} TTE {h}: E3 already correct -> kept, not re-run", flush=True)
+                continue
             reason = None
             if not anchor_rec or not anchor_rec.get("parsed"):
                 reason = "no parsed answer at the previous step"
@@ -326,10 +336,11 @@ def main():
     ap.add_argument("--stage1", help="E5/E6/E7: the stage-1 run whose mistakes are re-run (default E3)")
     ap.add_argument("--chain", action="store_true", help="chain for videos with no correct stage-1 window: E7 -> E6 (1.0) -> E6 (1.5)")
     ap.add_argument("--chain-from", help="run holding the E7 answers (default E7)")
+    ap.add_argument("--flow", action="store_true", help="E7: only where the flowchart uses it (TTE 0.5 of a video with no correct valid window)")
     ap.add_argument("--frames", choices=["raw", "boxed"], default="boxed")
     ap.add_argument("--debate-from", help="run name of Exp #3: re-run only its mistakes with e4_tp (crash missed) / e4_tn (normal flagged)")
     ap.add_argument("--name")
-    ap.add_argument("--set", choices=["A", "B"])
+    ap.add_argument("--set", choices=["A", "B", "R"])
     ap.add_argument("--tier", choices=["standard", "flex"], default="standard")
     ap.add_argument("--order", choices=["explanation_first", "verdict_first"], default="explanation_first")
     ap.add_argument("--model", required=True)

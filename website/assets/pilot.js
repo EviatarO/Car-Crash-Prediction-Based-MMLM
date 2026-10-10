@@ -14,7 +14,7 @@ function createPilotView(deps){
   let RUNS = (D.default_on || ALL_RUNS).filter(r => ALL_RUNS.includes(r));       // runs shown as columns (chip row)
   const $ = id => document.getElementById(id);
   const state = {sort: null, dir: 1, filters: {}, disagree: false, failsOnly: true};
-  const e3Wrong = r => { const x = r.runs.E3; return !!(x && x.verdict && ((x.verdict === "yes") !== (r.label === 1))); };
+  const e3Wrong = r => { const x = r.runs.E3; return !!(x && x.verdict && ((x.verdict === "yes") !== ((r.label_vis !== undefined ? r.label_vis : r.label) === 1))); };
   let built = false;
 
   const HV = D.hv_key || (KEY + "_hv");
@@ -39,7 +39,7 @@ function createPilotView(deps){
 
   const isRight = (r, run) => {
     const x = r.runs[run];
-    return x && x.verdict ? ((x.verdict === "yes") === (r.label === 1)) : null;
+    return x && x.verdict ? ((x.verdict === "yes") === ((r.label_vis !== undefined ? r.label_vis : r.label) === 1)) : null;
   };
   const verdictGet = run => r => { const x = r.runs[run]; return x && x.verdict ? x.verdict : null; };
 
@@ -50,9 +50,20 @@ function createPilotView(deps){
       {key: "tte", label: "TTE", type: "select", get: r => r.tte.toFixed(1),
        opts: [["", "All"], ["0.5", "0.5 s"], ["1.0", "1.0 s"], ["1.5", "1.5 s"]],
        cell: r => r.label === 1 ? `${r.tte.toFixed(1)} s` : `<span class="dim" title="normal clip: window ends ${r.tte.toFixed(1)} s before a fake event at the video midpoint">mid ${r.tte.toFixed(1)} s</span>`},
-      {key: "label", label: "GT label", type: "select", get: r => String(r.label),
-       opts: [["", "All"], ["1", "1 · crash"], ["0", "0 · normal"]],
-       cell: r => `<span class="chip ${r.label === 1 ? "pos" : "neg"}">${r.label}</span>`},
+      {key: "set", label: "Set", type: "select",
+       title: "pilot = the 51-window prompt study; rescue = E6 rescue test on crash windows the visibility rule removes (window ends before time_of_alert + 0.27 s)",
+       get: r => r.set === "rescue" ? (r.valid ? "rescue_kept" : "rescue_removed") : "pilot",
+       opts: [["", "All"], ["pilot", "pilot"], ["rescue_kept", "rescue · kept by rule"], ["rescue_removed", "rescue · removed by rule"]],
+       cell: r => r.set !== "rescue" ? '<span class="dim">pilot</span>'
+         : (r.valid ? '<span class="chip neg" title="the visibility rule keeps this window">rescue · kept</span>'
+                    : '<span class="chip pos" title="the visibility rule removes this window: it ends before time_of_alert + 0.27 s">rescue · removed</span>')},
+      {key: "label", label: "GT label", type: "select",
+       title: "Nexar event label → visible-hazard label (label_vis). A crash window that ends before the annotated alert shows 1 → 0 · pre-alert: nothing announces the collision yet, so the target verdict is no. 1 → 1 · seen early = E7-pre found the hazard already visible.",
+       get: r => r.pre_alert ? (r.label_vis === 1 ? "1>1" : "1>0") : String(r.label),
+       opts: [["", "All"], ["1", "1 · crash"], ["0", "0 · normal"], ["1>0", "1 → 0 · pre-alert"], ["1>1", "1 → 1 · seen early"]],
+       cell: r => r.pre_alert
+         ? `<span class="chip pos" title="Nexar label 1, visible-hazard label ${r.label_vis}">1 → ${r.label_vis}</span><div class="dim hvhint">pre-alert${r.label_vis === 1 ? " · seen early" : ""}${r.status && r.status !== "ok" ? " · " + esc(r.status) : ""}</div>`
+         : `<span class="chip ${r.label === 1 ? "pos" : "neg"}">${r.label}</span>${r.status && r.status !== "ok" ? `<div class="dim hvhint">${esc(r.status)}</div>` : ""}`},
     ];
     RUNS.forEach(run => cols.push({
       key: run + "_v", label: run + "_verdict", type: "verdict", run,
@@ -93,7 +104,7 @@ function createPilotView(deps){
   let COLS = columns();
 
   function passes(r){
-    if (state.failsOnly && !e3Wrong(r)) return false;
+    if (state.failsOnly && r.set !== "rescue" && !e3Wrong(r)) return false;
     if (state.disagree){
       const vs = RUNS.map(run => verdictGet(run)(r)).filter(v => v !== null);
       if (new Set(vs).size < 2) return false;
@@ -230,7 +241,7 @@ function createPilotView(deps){
     if (!r || !(r.grid_large || r.grid)) return;
     $("gImg").src = r.grid_large || r.grid;
     $("gTitle").textContent = `#${r.video_id} · ${r.key}`;
-    $("gMeta").textContent = `GT ${r.label === 1 ? "1 (crash)" : "0 (normal)"} · ${r.label === 1 ? "TTE" : "mid"} ${r.tte.toFixed(1)} s · ` +
+    $("gMeta").textContent = `GT ${r.pre_alert ? "1 → " + r.label_vis + " (pre-alert)" : r.label === 1 ? "1 (crash)" : "0 (normal)"} · ${r.label === 1 ? "TTE" : "mid"} ${r.tte.toFixed(1)} s · ` +
       RUNS.map(run => `${run} ${(r.runs[run] && r.runs[run].verdict) || "–"}`).join(" · ");
     $("gridOverlay").classList.add("open");
   }

@@ -23,7 +23,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 from build_midpoint_negatives import SRC_VIDEOS, get_video_meta, read_window_sequential  # noqa: E402
 
-OUT = ROOT / "outputs" / "teacher_pilot_2026-10"
+OUT = Path(__import__("os").environ.get("R1_PILOT_OUT") or ROOT / "outputs" / "teacher_pilot_2026-10")   # R1_PILOT_OUT: separate test folders
 AFTER = OUT / "after"
 MAX_AFTER = 16
 PAST_EVENT_FRAMES = 8
@@ -47,23 +47,15 @@ def failures(run_name):
     return [fd for fd, r in run.items() if r.get("parsed") and (r["parsed"]["collision"] == "yes") != bool(r["label"])]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--from-run")
-    ap.add_argument("--all", action="store_true")
-    args = ap.parse_args()
-    wins = [json.loads(l) for l in open(OUT / "windows.jsonl", encoding="utf-8")]
-    wins = [w for w in wins if w["set"] == "A"]
-    if args.from_run:
-        keep = set(failures(args.from_run))
-        wins = [w for w in wins if w["frames_dir"] in keep]
-    elif not args.all:
-        raise SystemExit("pass --from-run RUN or --all")
+def ensure(wins):
+    """Cut (if missing) the after-frames of every window and update after/index.json. Returns the index."""
     AFTER.mkdir(exist_ok=True)
     ip = AFTER / "index.json"
     index = json.load(open(ip)) if ip.exists() else {}
     for w in wins:
         fd = w["frames_dir"]
+        if fd in index and (AFTER / fd).exists() and len(list((AFTER / fd).glob("frame_*.jpg"))) == index[fd]["n_after"]:
+            continue
         _, total = get_video_meta(w["video_id"])
         idxs, ev = after_indices(w, total)
         d = AFTER / fd
@@ -79,6 +71,22 @@ def main():
         index[fd] = {"n_after": len(idxs), "frame_idx": idxs, "event_idx": ev, "label": w["label"], "horizon": w["horizon"]}
         print(f"{fd}: {len(idxs)} frames after the window (event frame {ev}, window ends {w['frame_idx'][-1]})", flush=True)
     ip.write_text(json.dumps(index, indent=1), encoding="utf-8")
+    return index
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--from-run")
+    ap.add_argument("--all", action="store_true")
+    args = ap.parse_args()
+    wins = [json.loads(l) for l in open(OUT / "windows.jsonl", encoding="utf-8")]
+    wins = [w for w in wins if w["set"] in ("A", "R")]
+    if args.from_run:
+        keep = set(failures(args.from_run))
+        wins = [w for w in wins if w["frames_dir"] in keep]
+    elif not args.all:
+        raise SystemExit("pass --from-run RUN or --all")
+    ensure(wins)
 
 
 if __name__ == "__main__":

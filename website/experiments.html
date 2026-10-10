@@ -156,13 +156,19 @@
        flow below are shown. <b>ROUTED</b> is the final answer per window; its tag names the prompt that produced it (no tag = E3 kept). These
        answers are label-informed by design, so judge them on whether the text matches the frames, not on accuracy. Fill the “Hitter visible?”
        column per crash window; Export notes saves it.</p>
+    <p class="lede"><b>Pre-alert windows and the GT label.</b> A crash window that ends before <code>time_of_alert</code> + 0.27 s (the old
+       “removed by the rule” windows) is kept in the dataset with a visible-hazard label of 0: nothing announces the collision yet. Its GT cell
+       reads <b>1 → 0 · pre-alert</b> (the Nexar label stays 1 for the crash evaluation). If blind E3 said “yes” on such a window, <b>E7-pre</b>
+       (tag ↻ E7pre in the E7 column) checks with the frames after the window whether the hazard is already visible: if it is, the target
+       becomes <b>1 → 1 · seen early</b>; otherwise the explanation describes the window as it is. The <b>rescue test</b> (Set = rescue, 10 crash
+       videos, 30 windows) shows this on real windows: read the “rescue · removed” rows — does the explanation match the frames?</p>
     <p class="note"><a id="pilotRouteLink" href="#" target="_blank" rel="noopener"><img id="pilotRoute" alt="routing of the teacher prompts" style="max-width:100%;height:auto;border:1px solid #2a3560;border-radius:8px;background:#fff"></a></p>
     <p class="note" id="pilotPaired"></p>
     <p class="note" id="pilotNote"></p>
     <div class="cmp-toolbar" id="pilotChips"></div>
     <div class="cmp-toolbar">
       <button class="pill clearbtn" id="pilotClear">Clear filters</button>
-      <button class="pill" id="pilotFails" title="show only the windows E3 got wrong (15)">E3 mistakes only (15)</button>
+      <button class="pill" id="pilotFails" title="pilot: only the 15 windows E3 got wrong; plus all 30 windows of the rescue test">Review rows: pilot mistakes + rescue test (45)</button>
       <button class="pill" id="pilotDisagree" title="show only windows where the shown runs do not give the same verdict">Runs disagree</button>
       <span class="rowcount" id="pilotCount"></span>
       <span class="rowcount notecount" id="pilotNoteCount"></span>
