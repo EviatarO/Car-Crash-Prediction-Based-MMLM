@@ -114,14 +114,16 @@ matters. Across the 3 TTE of a crash video: same class 8/9, same position 6–7/
 box_ok 94–96%. Known text problem: explanations copy the list words ("A truck/bus travels beside right, moving same direction…").
 User check of 00013 TTE 0.5: the car is pulling out of a parking spot without noticing ego (collision follows); all three runs said "stopped car".
 
-### 2j. Teacher prompt study (planned 2026-10-08, nothing run yet; plan `2026-10-08_Plan-Teacher-Prompt-Study.md`)
-Same 51 set-A windows as the pilot, Flex, `google/gemini-3.8-flash`, temperature 0.1, blind, free-text 25-45-word explanation, no closed lists / TTE / stock phrases, ending
-`risk_score` 0-100 + `collision` yes/no (yes if >= 50). Variants (`prompts/PROMPT_TEACHER_STUDY.py`): **e1** V12 neutral blocks, raw frames; **e2** e1 + BOX paragraph, boxed frames;
-**e3** `PROMPT_G_OPT_v6_balanced` with the "prefer NO / default safe" blocks replaced by a 50 % base-rate sentence, STEP 4 on the boxed agent, symmetric gates, + BOX; **e4_tp / e4_tn** the v7.1
-TP/TN recovery prompts + BOX, applied to e3 false negatives / false positives (routed by the label). Report: TP/TN with Wilson intervals, paired McNemar (e1 vs e2 box, e2 vs e3 prompt, e3 vs e3+e4 debate),
-risk-score AUC and best balanced threshold, cost/time, cross-TTE consistency. Detectable difference at n = 27 crash / 24 normal is about 7-8 windows per class.
-History used (blind teacher verdicts, `docs_agents/history/2026-08_EXPERIMENTS.md:320-457`): v6_balanced / Gemini 3.1 Pro high-res: e3a 178 windows TP63 FN21 FP20 TN73; private test 677 TP263 FN75 FP142 TN197;
-v11 100 clips TP34 FN15 FP18 TN32. Flash-class models: 2/9 crash (recall 0.22) with every prompt tried; counter-instructions had zero effect; 0-100 risk scores were never tried at scale on v6_balanced / Pro.
+### 2j. Teacher prompt study (2026-10-08..09; 51 pilot windows, then the pilot-to-flow design)
+Same 51 set-A windows, Flex, `google/gemini-3.8-flash`, temperature 0.1, blind, free-text 25-45-word explanation, ending `risk_score` 0-100 + `collision` yes/no. Prompts in `prompts/PROMPT_TEACHER_STUDY.py`
+(E1 V12 neutral, E2 + box, E3 re-balanced v6 + box, E4 debate; E5/E6 anchored on a correct sibling window, E7/E7-pre with hindsight frames). Outcome: E3 is the production blind prompt (the user judged its reasoning good),
+it fails on about 28 % of windows (mostly crash windows called "no"); the failures are fixed by the anchored (E6) or hindsight (E7) second look, which is label-informed by design (read for text vs frames, not as accuracy).
+Rescue test on 10 videos removed earlier: the E6 chain works when the first anchor is valid. Option (a) (E7 check on every anchored window) rejected as too expensive.
+
+### 2k. Full teacher run (2026-10-10..11; `outputs/teacher_dataset_2026-10/`; flow doc `teacher_distillation/TEACHER_DATASET_FLOW.md` §6-9)
+4,203 windows (1,401 videos). Boxes: 1,304 attention-top, 2,486 propagated, 325 own-top, 88 without a tracked object. E3 vs `label_vis`: crash kept 724 / 1,361 yes, normal 2,320 / 2,842 no; of 610 pre-alert windows E3 said no on 404.
+Stage 2: E7-pre 206 · E6 412 · E7 280 · E6 chain 233 (final E6C 258 after the normal-window fix). Cost: E3 ≈ $44, stage 2 ≈ $13, predictions $6.4, total ≈ $63. 35 genuine crash outliers removed.
+Hand review 2026-10-12: 30 windows rewritten (`edits.jsonl`), "check" list 19 → 0. Final export: **4,169 windows / 1,392 videos / label_vis 1,330 positive, 2,839 negative.**
 
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.

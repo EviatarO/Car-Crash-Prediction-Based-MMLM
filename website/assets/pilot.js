@@ -76,6 +76,13 @@ function createPilotView(deps){
         get: r => r.path, opts: [["", "All"], ...D.path_opts.map(o => [o[0], o[1]])],
         cell: r => `<span class="chip ${r.path === "E3" ? "neg" : "pos"}">${esc((D.path_opts.find(o => o[0] === r.path) || [0, r.path])[1])}</span>`});
     }
+    if (D.status_opts){
+      cols.splice(cols.findIndex(c => c.key === "label") + 1, 0, {key: "status", label: "Review", type: "select",
+        title: "ok = nothing to review. check = the stage-2 yes/no differs from the target label, so the explanation should be read against the frames.",
+        get: r => (r.status || "ok").split(":")[0], opts: [["", "All"], ...D.status_opts],
+        cell: r => { const s = (r.status || "ok").split(":")[0];
+          return s === "ok" ? '<span class="dim">ok</span>' : `<span class="chip pos" title="${esc(r.status)}">${esc(s)}</span><div class="dim hvhint">${esc((r.status || "").split(":").slice(1).join(":").trim())}</div>`; }});
+    }
     RUNS.forEach(run => cols.push({
       key: run + "_v", label: run + "_verdict", type: "verdict", run,
       title: D.runs[run], get: verdictGet(run),
@@ -84,7 +91,7 @@ function createPilotView(deps){
         if (!x || !x.verdict) return '<span class="dim">–</span>';
         const ok = isRight(r, run);
         const rk = x.risk !== null && x.risk !== undefined ? ` <span class="prisk" title="risk_score 0-100 (yes if ≥ 50)">${esc(x.risk)}</span>` : "";
-        const fl = x.from_e4 ? ` <span class="pflip" title="this answer replaces E3's: it comes from the ${esc(x.from_e4)} re-run (the window was an E3 mistake)">↻ ${esc(x.from_e4)}</span>` : "";
+        const fl = x.from_e4 ? ` <span class="pflip" title="${x.from_e4 === "edited" ? "rewritten by hand after the frames were reviewed (2026-10-12)" : `this answer replaces E3's: it comes from the ${esc(x.from_e4)} re-run (the window was an E3 mistake)`}">↻ ${esc(x.from_e4)}</span>` : "";
         return `<span class="pv ${ok ? "ok" : "no"}" title="${ok ? "matches" : "differs from"} the GT label">${esc(x.verdict)} ${ok ? "✓" : "✗"}</span>${rk}${fl}`;
       }}));
     RUNS.forEach(run => cols.push({

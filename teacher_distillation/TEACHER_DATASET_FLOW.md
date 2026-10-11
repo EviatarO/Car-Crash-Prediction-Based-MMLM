@@ -131,7 +131,19 @@ On the website a pre-alert window reads **1 → 0 · pre-alert**, or **1 → 1 �
 - **Where:** `outputs/teacher_dataset_2026-10/` (`windows.jsonl`, `boxes.jsonl`, `boxed/`, `review/`, `runs/E3.jsonl`, `flow_final.jsonl`);
   website: Dataset page, tab "Teacher reasoning" (`website/build_teacher_data.py` → `teacher_data.js`).
 
-## 7. Open before the student training
-1. **The 66 flagged windows:** keep with `label_vis` 0 and the honest E7 / E3 text, or drop.
-2. **The 19 "check" windows** (stage-2 verdict differs from `label_vis`): review on the website.
-3. **Hand review** of a sample of the E3-kept windows (the 497 colour flags are cosmetic) and of the E6 / E7 explanations (E6 can follow its anchor too closely).
+## 7. Resolved after the full run (2026-10-11 / 12)
+- **Flagged windows:** 35 genuine crash outliers removed (`removed_windows.json`); the 31 normal windows first flagged were fixed in the chain logic instead of removed.
+- **"Check" windows (19):** reviewed by hand on the website (comment column, exported to `ccp-review-notes-2026-10-11.json`); all resolved by section 8.
+
+## 8. Hand edits (2026-10-12)
+- **What:** 30 windows rewritten from the 28 review comments plus the sibling TTE windows of the same videos (18 crash, 12 normal; 4 of the crash siblings
+  after viewing the frames: 00373 TTE 1.0, 00668 TTE 1.0, 00895 TTE 1.0 / 1.5). Same format as the teacher's answers (25-45-word explanation, outcome-only prediction of at most 15 words, yes -> risk >= 50, no -> risk < 50).
+- **Where:** `outputs/teacher_dataset_2026-10/edits.jsonl` (one line per window: new text, the user's comment, the original answer, `edited_on`). `website/build_teacher_data.py` applies it on top of the teacher's answer;
+  an edited window is never dropped as an outlier (00512 TTE 1.5 came back). The site tags them "edited".
+- **`label_vis`:** every edited crash window is 1, every edited normal window 0. Final export `dataset_final.jsonl`: **4,169 windows, 1,392 videos, 1,330 positive / 2,839 negative**
+  (1,309 crash windows kept by the rule, 610 pre-alert, 2,250 normal); "check" list empty.
+- **Not edited, user confirmed hitter visible:** 00200 TTE 0.5, 00515 TTE 1.5, 00644 TTE 1.0 / 1.5, 00699 TTE 0.5.
+
+## 9. Still open before the student training
+1. Hand review of a sample of the E3-kept windows (497 colour flags are cosmetic) and of the E6 / E7 explanations (E6 can follow its anchor too closely).
+2. Text-only leakage test: how much of the label do the explanations alone reveal (E6 / E7 were written knowing the outcome).

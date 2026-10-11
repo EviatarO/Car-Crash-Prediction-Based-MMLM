@@ -79,8 +79,18 @@ One line per rejected option so it is not re-proposed. Full reasoning for June�
 - **Debate / two-pass recovery as a measure of teacher quality** → it is routed by the ground-truth label (mismatches only), so its accuracy (67.9 % to 90 % on the private test) rises by construction;
   recovered explanations scored lower (mean 3.6/10) and sometimes kept the first pass's invented agent. Use only to get a label-consistent explanation, never as a perception metric.
 
+### Teacher dataset (user decisions 2026-10-10..12)
+- **Training target for crash windows that end before the hazard is visible** → `label_vis` = 0 (the Nexar `label` stays 1 for the crash model); E7-pre turns it 1 only when hindsight shows the hazard already visible (18 windows).
+- **Option (a): E7 visibility check on every anchored window** → rejected (too expensive); keep the E3 → E6 / E7 flowchart.
+- **Removing 66 flagged windows** → only the 35 genuine crash outliers removed; the 31 normal windows were a chain-logic bug (for a normal window "hazard not visible" is the correct state) and were fixed.
+- **Dropping the 99 crash videos with no kept window** → done in the manifest (4,203 windows from 1,401 videos); the 18 former val_e3a videos stay in the dataset.
+- **Kaggle for the pod videos** → replaced by the HF Nexar dataset; the pod stops itself only after the HF push is verified.
+- **Prediction sentence** → outcome only, 4-15 words (not a summary of the explanation).
+- **Hand edits override the teacher** → `edits.jsonl` is applied last and an edited window is never dropped as an outlier; edited crash windows are `label_vis` 1.
+- **Professor-facing documents** → no run names (E3/E6/E7) or file paths.
+
 ## Unresolved (need the user)
-00. **Teacher prompt study outcome:** which of E1-E4 becomes the base of the production teacher (outcome given, visible cues only); does the box help (no-box A/B). Flex vs Standard is decided (Flex).
+00. **Student retrain on the new dataset:** mix DADA back in or Nexar only; targets and split by video as in PROJECT_STATE TODO 1. (Teacher prompt question resolved: E3 → E6/E7 flow, box kept, Flex.)
 0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the
    Phase-1 checkpoint with explicit verdict / time-to-impact fields (≈1 h), (b) re-weight DADA no-crash to cut the 83 % false-alarm rate, (c) more / richer Nexar text (BADAS-2.0 recipe with
    detection boxes; teacher spend), (d) calibrate the DADA threshold (AUC 0.735 is fine, 0.5 is not).

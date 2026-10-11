@@ -11,7 +11,7 @@ alert from the frozen V-JEPA2 encoder's own features** (frozen encoder → train
 so explanation and score share one vision pass. BADAS-2.0 (p.8) names this latent-based reasoning as future work.
 New work lives on git branch `reasoning-path-vjepa2-llm` (root `README.md` = goal + folder map).
 
-## Status as of 2026-10-08
+## Status as of 2026-10-12
 
 ### Crash-score path (frozen — do not reopen without the user)
 - Champion **A1-compress256**: test AP **0.9128** (private 677) / **0.9096** (public 667). Recipe: LoRA r16/α32/dropout 0.05 on
@@ -36,31 +36,34 @@ New work lives on git branch `reasoning-path-vjepa2-llm` (root `README.md` = goa
 - **Supporting results:** feature probe (`outputs/r0_feature_probe/n600/`), dataset reviews (`outputs/dataset_review_2026-10/`, incl. `training_windows_hf/`),
   data review (`outputs/r1_week1/data_review_2026-10-05/`), plan deck `reports/presentations/2026-10_reasoning-path-plan.pptx`.
 
-### Teacher data for the reasoning path (2026-10-08): boxed-object pilot done, prompt study planned
-- **Why:** Nexar has no reasoning text of its own; the V12 teacher captions are free of the label but full of what the encoder cannot carry (colour, model). The user wants a teacher that
-  explains the object the crash model attends to and a prompt with balanced TP/TN. Results of the pilot: EXPERIMENTS 2i; decisions: DECISIONS.md "Teacher".
-- **Built (committed `bd522f0`):** `r1_pilot_windows.py` (windows outside the 1,761 pool), `r1_attention_boxes.py` (YOLOPv2 + G-DINO + BoT-SORT tracks, A1 crash-head attention per track, target = top
-  track of the last window propagated by track ID, boxed frames + grids), `prompts/PROMPT_SEMSUP_V12BOX.py`, `r1_teacher_pilot.py` (OpenRouter runner with Flex/Standard tier),
-  `r1_teacher_pilot_report.py`, website tab "Boxed-teacher pilot" (`website/assets/pilot.js`, `build_pilot_data.py`). Data: `outputs/teacher_pilot_2026-10/`, HF `eviatarO-org/teacher-pilot-2026-10`.
-- **Pilot windows:** set A (51; used for all runs) and set B (51; cut + tracked, attention only partly computed, UNUSED). Boxes exist for set A only.
-- **In progress (plan `~/.claude/plans/CCP based BADAS/2026-10-08_Plan-Teacher-Prompt-Study.md`, approved):** five blind prompts (E1 V12 no box, E2 V12 + box, E3 v6_balanced re-balanced + box,
-  E4 debate TP/TN recovery on E3 mistakes) on the same 51 windows, Flex, ending with risk_score + collision yes/no, no closed lists / TTE / template words.
-  **`prompts/PROMPT_TEACHER_STUDY.py` is written (UNCOMMITTED) but its dry-run (`python -m prompts.PROMPT_TEACHER_STUDY`) was interrupted by the user before it printed: run it first and show every prompt to the user.**
-  Still to code: `r1_teacher_pilot.py` `--prompt/--frames raw|boxed/--debate-from`, report generalisation (TP/TN with Wilson CIs, McNemar, risk AUC), website run picker (E1-E4).
+### Nexar reasoning dataset (teacher run DONE 2026-10-10..12; hand-reviewed; ready for the student retrain)
+- **Why:** Nexar has no reasoning text; the August captions carry what the encoder cannot (colour, model). Goal: explanation of the object the frozen crash model attends to, in words the V-JEPA2 tokens can support.
+- **Dataset** (`outputs/teacher_dataset_2026-10/dataset_final.jsonl`, rebuilt by `website/build_teacher_data.py`): **4,169 windows, 1,392 videos** (3 windows per video: crash TTE 1.5 / 1.0 / 0.5 s, normal windows before a
+  fake event at the midpoint), **`label_vis` 1,330 positive / 2,839 negative** (1,309 crash windows kept by the visibility rule, 610 pre-alert crash windows (label 1 → label_vis 0, 18 of them turned 1 by hindsight), 2,250 normal).
+  Per window: Nexar `label`, `pre_alert`, `label_vis`, `tte`, 25-45-word explanation, 4-15-word outcome-only prediction, risk 0-100, path, status, `edited`. 35 genuine crash outliers removed (`removed_windows.json`).
+- **Teacher flow** (full description + results: `teacher_distillation/TEACHER_DATASET_FLOW.md` §1-9; routing figure `reports/figures/teacher_prompt_routing_2026-10-10.png`): Gemini 3.8 Flash on OpenRouter Flex, boxed frames.
+  Stage 1 E3 (blind) on every window + text-only short prediction; stage 2 only where the verdict differs from `label_vis`: E7-pre (hindsight, pre-alert windows), E6 (anchored on a correct sibling), E7 on TTE 0.5 when no anchor,
+  then an E6 chain (E6C). Final paths: E3 3,027 · E6 412 · E6C 258 · E7 266 · E7-pre 206. Teacher spend ≈ $63 (OpenRouter balance ≈ $7.5 left); GPU step on a RunPod pod (boxes, tracks, attention), results on HF.
+- **Hand review (2026-10-12):** the user commented on 28 windows on the website; 30 windows were rewritten (18 crash, 12 normal) in `outputs/teacher_dataset_2026-10/edits.jsonl` (new text + comment + original),
+  applied by `build_teacher_data.py`; windows with an edit are never dropped (00512 TTE 1.5 reinstated); every edited crash window is `label_vis` 1. The "check" list (verdict ≠ label_vis) is empty. The user's notes file: `ccp-review-notes-2026-10-11.json` (repo root).
+- **Website:** Dataset page → tab "Teacher reasoning" (4,169 rows, Review filter, notes with export/import; `website/teacher_data.js` is generated and git-ignored: rebuild with `PYTHONUTF8=1 python website/build_teacher_data.py`).
+- **HF:** private repo `eviatarO-org/teacher-dataset-2026-10` (tracks.tar.gz, attn.tar.gz, windows.jsonl, logs; boxed frames are rebuilt locally in `outputs/teacher_dataset_2026-10/boxed/`).
+- **Report:** `reports/progress_reports/2026_10_11_progress_report.docx` (2 pages, delivered; numbers updated to 4,169 / 1,330 / 2,839 on 2026-10-12 via `reports/_scripts/_build_progress_report.py`).
 
 ### Access requests
 Sent by the user 2026-10-04: TAU-106K (train split), VRU-Accident (source-id mapping + collision times).
 Not sent: DRAMA form, WTS form, RoadSafe365 email, MM-AU authors email (lotvsmmau@gmail.com; draft in §7 of
 `2026-10-05_Plan-Week1-GoNoGo-rev3.md`; asks for academic-use confirmation + per-video fps of CAP-DATA). BDD100K portal showed a certificate error 2026-10-04. Drafts:
 `outputs/dataset_review_2026-10/access_requests.md`. Nexar HF repo `nexar-ai/nexar_collision_prediction` is gated and the local HF
-account is not authorised (full clips unavailable; 16-frame windows exist locally).
+account is not authorised (full clips unavailable locally; the pod downloaded the training videos from this dataset with its HF token for the teacher run).
 
 ## Open TODOs (in order)
-1. **Teacher prompt study:** dry-run + review `PROMPT_TEACHER_STUDY.py`; code the runner/report/website changes; run E1-E3 in parallel on Flex (~$2 total with E4), then E4 on E3 mistakes; the user reviews on the website.
-2. Then: the no-box A/B result decides whether the box stays; check the chosen object against the 14 hand-labelled clips (free, local); production teacher = winning prompt + outcome given, visible cues only; full run on 4,446 windows (about $52 Flex).
-3. Student side (after teacher data): Phase 1 / Phase 2 retrain with the new explanation targets (explanation first, verdict last = from the label, no TTE field); Nexar test-set features (677 / 667 windows, GPU) for a representative evaluation.
-4. Not done: DADA **test** split features (about 4 min on a GPU pod); the reasoning path has only been evaluated on the 1,761-pool val split (failure-enriched, A1 did not train on it).
-5. Optional / postponed by the user: per-word-piece probabilities, LLM judge on inference outputs only.
+1. **Student retrain on the new dataset** (needs a GPU pod; stop-gated, user approves the runbook): Phase 1 / Phase 2 with targets = explanation, outcome sentence, `label_vis` verdict; split by video; compare with the DADA+caption model on the same Nexar windows
+   (BERTScore vs floor 0.359, retrieval, yes/no AUC). Open: whether to mix DADA back in.
+2. **Text-only leakage test** (how much of `label_vis` the explanation alone reveals; E6 / E7 explanations were written knowing the outcome) and a hand review of a sample of the E3-kept windows.
+3. Nexar test-set features (677 / 667 windows, GPU) for a representative final evaluation; DADA **test** split features (about 4 min on a GPU pod).
+4. Housekeeping: `website/teacher_data.js` blob (4.5 MB) is still in git history (commit `084fb56`) - offer to rewrite if the branch is not pushed yet.
+5. Optional / postponed by the user: per-word-piece probabilities, LLM judge on inference outputs only; Δpredictor/ΔLoRA look-back (memory `pending_delta_ratio_diagnostic`).
 6. Unsent access requests (DRAMA form, WTS form, RoadSafe365 email, MM-AU authors email); TAU / VRU replies pending.
 7. User pushes branch `reasoning-path-vjepa2-llm` and tags: `git push origin reasoning-path-vjepa2-llm --tags`; Claude never pushes.
 
@@ -87,8 +90,8 @@ account is not authorised (full clips unavailable; 16-frame windows exist locall
   `http://localhost:8765/MMLM_For_Cars_Collision_Anticipation/MMLM_AI/website/experiments.html#pilot`). Rebuild `pilot_data.js` with `website/build_pilot_data.py` after any run changes.
 
 ## Pod state
-Nothing running. Last pod `8tnse35hx8rnqe` (RTX PRO 4500, 60 GB container disk, no volume needed) was stopped by Claude 2026-10-06 13:26 UTC after the bundle was
-downloaded. Claude can stop pods itself: key from the pod's `/proc/1/environ` (`bash r1_pod_run.sh check_stop` first, `stop <pod_id>` after the bundle is local;
+Nothing running. The teacher-run pod (RTX PRO 4500, 30 GB disk, batches of 150 videos) stopped itself via `r1_teacher_pod.sh auto` only after the results were verified on HF (2026-10-10). Earlier pod `8tnse35hx8rnqe`
+was stopped by Claude 2026-10-06 13:26 UTC after the bundle was downloaded. Claude can stop pods itself: key from the pod's `/proc/1/environ` (`bash r1_pod_run.sh check_stop` first, `stop <pod_id>` after the bundle is local;
 memory `pod-self-stop`). The user's RunPod account has the PC's public key saved (new pods accept it). HF token for pods: `/workspace/.cache/huggingface/token`
 if the old volume is attached, else the user pastes it in the pod's web terminal. Container disk must be ≥ 60 GB.
 
@@ -111,7 +114,12 @@ python r1_pilot_windows.py [--dry-run]                      # pilot window selec
 python r1_attention_boxes.py --stage tracks|attn|boxes [--set A]   # detection+tracking, crash-head attention, boxed frames + grids
 python r1_teacher_pilot.py --name R2 --set A --tier flex --order explanation_first --model google/gemini-3.8-flash --concurrency 16   # --flex-test = one call
 python r1_teacher_pilot_report.py                            # outputs/teacher_pilot_2026-10/summary.md + review.xlsx
-python ../../website/build_pilot_data.py                     # website tab data
+python ../../website/build_pilot_data.py                     # website tab data (pilot)
+python r1_teacher_windows.py                                 # manifest of the 4,203 teacher windows (Step A)
+bash r1_teacher_pod.sh <setup|hf_check|smoke|batches|push|verify|auto|stop>   # on the pod (GPU step B: tracks, attention, boxes -> HF)
+python r1_teacher_pilot.py --prompt e3 --set full --tier flex --concurrency 32   # stage 1; stage 2: python r1_teacher_flow.py; short predictions: python r1_add_prediction.py
+PYTHONUTF8=1 python ../../website/build_teacher_data.py      # teacher-dataset website tab + dataset_final.jsonl + check_windows.txt (applies edits.jsonl)
+PYTHONUTF8=1 python ../../reports/_scripts/_build_progress_report.py   # progress report .docx
 python dataset_sample_review.py --only <dada|tau|caviar|mmau|vru|llava|bddx>   # 3 seeded review samples per dataset
 python r0_feature_probe.py --config ../configs/e4_stageA.yaml --lora-adapter ../../outputs/a1_compress256/train/epoch_02/lora_adapter --n-windows 600 --out-dir <dir>
 python build_reasoning_path_deck_2026-10.py                # rebuilds the October deck (asserts numbers from score files)
@@ -119,10 +127,9 @@ python build_reasoning_path_deck_2026-10.py                # rebuilds the Octobe
 Crash-path commands (champion recipe, public scoring, paired bootstrap) are unchanged: see `history/2026-09_PROJECT_STATE.md`.
 
 ## Git state
-Branch **`reasoning-path-vjepa2-llm`**, HEAD `bd522f0` (boxed-teacher pilot); `origin/main` at `3463da6`; **not pushed** (user pushes, with `--tags`).
-Tags `phase1-2026-10-06` (= `ac40861`), `phase2-2026-10-06`. Uncommitted: `prompts/PROMPT_TEACHER_STUDY.py` (new) and this handoff's docs. `dataset/`, `outputs/`, `reports/` are git-ignored
-(results are also on HF: `eviatarO-org/checkpoints`, `eviatarO-org/teacher-pilot-2026-10`).
+Branch **`reasoning-path-vjepa2-llm`**, HEAD = the commit after `0b1c8c0` that adds the hand-edit support + this handoff (see `git log`); `origin/main` at `3463da6`; **not pushed** (user pushes, with `--tags`).
+Tags `phase1-2026-10-06` (= `ac40861`), `phase2-2026-10-06`. `dataset/`, `outputs/`, `reports/` are git-ignored (so `edits.jsonl` and the report are local only; results are also on HF:
+`eviatarO-org/checkpoints`, `eviatarO-org/teacher-pilot-2026-10`, `eviatarO-org/teacher-dataset-2026-10`).
 
 ## Next step
-Run `python -m prompts.PROMPT_TEACHER_STUDY` (dry-run, no API calls), show the five prompts and the e1 to e2 diff to the user, then implement the runner/report/website changes of the
-approved teacher-prompt-study plan and run E1-E4 on Flex. Stop for the user's review on the website before any larger spend.
+Write the runbook + dry-run for the student retrain on `dataset_final.jsonl` (new targets, split by video, DADA mix decision), show it to the user, and stop for approval before starting any pod (memory `e4_stage_gating`).

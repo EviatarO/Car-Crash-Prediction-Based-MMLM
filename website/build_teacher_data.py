@@ -53,15 +53,21 @@ def main():
         with ThreadPoolExecutor(8) as ex:
             ok = list(ex.map(mk, wins))
         print(f"[grids] large grids: {sum(ok)} of {len(wins)}")
+    edits = {}                                                               # manual edits, see below
+    ep = FULL / "edits.jsonl"
+    if ep.exists():
+        for line in open(ep, encoding="utf-8"):
+            if line.strip():
+                e = json.loads(line); edits[e["frames_dir"]] = e
     rows, paths, removed = [], collections.Counter(), []
     for w in sorted(wins, key=lambda w: (w["video_id"], -w["horizon"])):
         fd = w["frames_dir"]
         f = flow.get(fd) or {}
-        if str(f.get("status", "ok")).startswith("flagged"):           # outlier windows: the hazard is not visible even with hindsight (user decision 2026-10-11)
+        if str(f.get("status", "ok")).startswith("flagged") and fd not in edits:           # outlier windows: the hazard is not visible even with hindsight (user decision 2026-10-11)
             removed.append({"frames_dir": fd, "label": w["label"], "status": f["status"]})
             continue
         fr = f.get("final_from", "E3")
-        path = "flagged" if str(f.get("status", "ok")).startswith("flagged") else fr
+        path = "flagged" if (str(f.get("status", "ok")).startswith("flagged") and fd not in edits) else fr
         paths[path] += 1
         b = boxes.get(fd) or {}
         row = {"key": fd, "set": "full", "valid": w.get("valid", True), "video_id": w["video_id"], "tte": w["horizon"], "label": w["label"],
@@ -75,6 +81,28 @@ def main():
         row["runs"]["E7"] = bp.run_entry("E7", sr["E7"].get(fd)) if fd in sr["E7"] and path in ("E7", "E7pre") else None
         row["runs"]["FINAL"] = {"ref": "E3"} if fr == "E3" and row["runs"]["E3"] else bp.run_entry("ROUTED", sr["ROUTED"].get(fd))
         rows.append(row)
+    # manual edits (outputs/teacher_dataset_2026-10/edits.jsonl, one line per window: frames_dir + any of explanation / prediction / verdict /
+    # risk / label_vis + comment): applied on top of the teacher's answer; the original is kept in the edit record. Shown as "edited".
+    n_edit = 0
+    for r in rows:
+        e = edits.get(r["key"])
+        if not e:
+            continue
+        base = r["runs"]["FINAL"] if (r["runs"]["FINAL"] and not r["runs"]["FINAL"].get("ref")) else r["runs"]["E3"]
+        fin = dict(base)
+        for k_src, k_dst in (("explanation", "explanation"), ("prediction", "prediction"), ("verdict", "verdict"), ("risk", "risk")):
+            if k_src in e:
+                fin[k_dst] = e[k_src]
+        fin["problems"] = []
+        fin["from_e4"] = "edited"
+        r["runs"]["FINAL"] = fin
+        if "label_vis" in e:
+            r["label_vis"] = e["label_vis"]
+        if str(r["status"]).startswith(("check", "flagged")) and e.get("resolved", True):
+            r["status"] = "ok: edited by hand"
+        r["edited"] = True
+        n_edit += 1
+    print(f"[edits] applied {n_edit} manual edits")
     # summary vs the visible-hazard label
     summary = {}
     for n in RUNS:
@@ -94,6 +122,13 @@ def main():
         summary[n] = {"setting": RUNS[n], "n": len(got), "parsed": len(got), "acc_all": [tp + tn, len(got)], "acc_crash": [tp, len(pos)], "acc_normal": [tn, len(neg)],
                       "tp_ci": study.wilson(tp, len(pos)), "tn_ci": study.wilson(tn, len(neg)), "risk_auc": round(auc, 3) if auc is not None else None, "run": s}
     n_all = len(rows)
+    chk = [r for r in rows if str(r["status"]).startswith("check")]
+    with open(FULL / "check_windows.txt", "w", encoding="utf-8") as fc:      # the windows to review by eye
+        fc.write("window | target label_vis | final yes/no | risk | routing | explanation" + chr(10))
+        for r in chk:
+            x = r["runs"]["FINAL"]
+            x = r["runs"]["E3"] if x and x.get("ref") else x
+            fc.write(f"{r['key']} | {r['label_vis']} | {x['verdict']} | {x['risk']} | {r['path']} | {x['explanation']}" + chr(10))
     (FULL / "removed_windows.json").write_text(json.dumps({"reason": "outliers: crash windows whose hazard is not visible even with hindsight; removed from the dataset", "windows": removed}, indent=1), encoding="utf-8")
     with open(FULL / "dataset_final.jsonl", "w", encoding="utf-8") as fo:      # the dataset: window, labels, final explanation + prediction
         for r in rows:
@@ -101,7 +136,7 @@ def main():
             x = r["runs"]["E3"] if x and x.get("ref") else x
             fo.write(json.dumps({"frames_dir": r["key"], "video_id": r["video_id"], "tte": r["tte"], "label": r["label"], "pre_alert": r["pre_alert"],
                                  "label_vis": r["label_vis"], "path": r["path"], "status": r["status"], "explanation": x["explanation"],
-                                 "prediction": x["prediction"], "risk": x["risk"]}, ensure_ascii=False) + chr(10))
+                                 "prediction": x["prediction"], "risk": x["risk"], "edited": bool(r.get("edited"))}, ensure_ascii=False) + chr(10))
     cnt = lambda k: paths.get(k, 0)  # noqa: E731
     pre = sum(r["pre_alert"] for r in rows)
     flagged_soft = sum(bool((r["runs"]["E3"] or {}).get("problems")) for r in rows)
@@ -113,7 +148,7 @@ def main():
             f"The GT column shows the Nexar label and the visible-hazard label the student is trained on (pre-alert windows read 1 → 0). "
             f"FINAL answers on windows E3 got wrong are label-informed by design: read them for whether the text matches the frames, not as accuracy.")
     data = {"set": "full", "dataset_key": "teacher_dataset_2026-10", "runs": RUNS, "rows": rows, "summary": summary, "default_on": ["E3", "E6", "E7", "FINAL"],
-            "hv_key": "teacher_dataset_hitter_visible_2026-10", "hide_cols": ["set"], "fails_default": False, "path_opts": PATHS, "paired_note": "",
+            "hv_key": "teacher_dataset_hitter_visible_2026-10", "hide_cols": ["set"], "fails_default": False, "path_opts": PATHS, "status_opts": [["check", "check (verdict differs from the target)"]], "paired_note": "",
             "note_html": note, "routing_fig": "../reports/figures/teacher_prompt_routing_2026-10-10.png"}
     keys = [r["key"] for r in rows]
     assert len(keys) == len(set(keys)) == n_all
