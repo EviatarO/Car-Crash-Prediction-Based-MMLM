@@ -36,6 +36,7 @@
     <button class="tab active" data-view="detail">Experiment detail</button>
     <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
     <button class="tab" data-view="pilot">Teacher prompt study</button>
+    <button class="tab" data-view="r2" title="Run 1: Phase-2 fine training on the Nexar reasoning dataset, scored on 612 validation windows">Reasoning model - Run 1</button>
   </div>
   <span class="rowcount" id="viewHint"></span>
 </div>
@@ -185,6 +186,57 @@
   </section>
 </div>
 
+<!-- ================= REASONING MODEL (RUN 1) VIEW ================= -->
+<div id="viewR2" hidden>
+  <section class="block">
+    <div class="kicker">Reasoning model · Run 1 · 2026-10-12</div>
+    <h2>Reasoning model - Run 1</h2>
+    <p class="lede">The model is a frozen V-JEPA2 encoder, a trained projector and LoRA on Qwen3-VL-4B. It was trained on <b id="r2NTrain">3,557</b> windows
+       and evaluated on <b id="r2NWin">612</b> validation windows (<span id="r2NVid">204</span> videos never trained on). The answer has the format
+       <code>Reasoning</code> / <code>Collision</code> / <code>Outcome</code>, and the decision score is read at <code>Collision:</code>.
+       <b>S_before</b> = the reasoning cut out (decision straight after the frames), <b>S_after</b> = the decision after the model's own reasoning,
+       <b>S_teacher</b> = the decision after the teacher's reasoning (an upper bound, since it is label-informed). Thresholded numbers are at P = 0.5
+       (log-odds 0). AUC and AP do not depend on the threshold.</p>
+
+    <h3 class="subh">Decision scores</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Decision"></table></div>
+
+    <h3 class="subh">By group: crash model vs the reasoning path</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Groups"></table></div>
+    <p class="note" id="r2Paired"></p>
+
+    <h3 class="subh">Text quality and grounding</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Overlap"></table></div>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Other"></table></div>
+
+    <h3 class="subh">Training curve</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Curve"></table></div>
+    <p class="note" id="r2CurveNote"></p>
+
+    <h3 class="subh">Every validation window</h3>
+    <p class="lede small">Scores are P(yes) = sigmoid of the log-odds, green when the call at its threshold (crash model 0.5, S 0.5) matches the visible-hazard label.
+       “Paths disagree” = the crash model and S_after give different yes/no. “Generic explanation” = the same model explanation is written for 10 or more windows.
+       Click a frame sheet or ＋ to enlarge.</p>
+    <div class="cmp-toolbar" id="r2Flags">
+      <select id="r2Group" class="hvsel"></select>
+      <button class="pill" data-flag="disagree">Paths disagree</button>
+      <button class="pill" data-flag="reason_wrong">Reasoning wrong</button>
+      <button class="pill" data-flag="crash_wrong">Crash model wrong</button>
+      <button class="pill" data-flag="generic">Generic explanation</button>
+      <button class="pill clearbtn" id="r2Clear">Clear filters</button>
+      <span class="rowcount" id="r2Count"></span>
+    </div>
+    <div class="cmp-toolbar" id="r2Pager"></div>
+    <div class="table-wrap cmp-scroll pilot-scroll">
+      <table class="cmp-table pilot-table">
+        <thead id="r2Head"></thead>
+        <tbody id="r2Body"></tbody>
+      </table>
+    </div>
+    <div class="cmp-toolbar" id="r2Pager2"></div>
+  </section>
+</div>
+
 <footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION · LOCAL EXPERIMENT BROWSER</footer>
 
 <div class="overlay" id="gridOverlay">
@@ -256,6 +308,7 @@
 <script src="assets/charts.js"></script>
 <script src="assets/player.js"></script>
 <script src="assets/pilot.js"></script>
+<script src="assets/r2.js"></script>
 <script>
 "use strict";
 const EX   = window.EXPERIMENTS_DATA;
@@ -304,23 +357,47 @@ const f4 = v => (v === null || v === undefined) ? "–" : Number(v).toFixed(4);
 function currentRoute(){
   const h = (location.hash || "").replace(/^#/, "");
   const [view, arg] = h.split("/");
-  return {view: view === "compare" ? "compare" : view === "pilot" ? "pilot" : "detail", arg: arg || null};
+  return {view: ["compare", "pilot", "r2"].includes(view) ? view : "detail", arg: arg || null};
 }
 function applyRoute(){
   const {view, arg} = currentRoute();
   document.getElementById("viewDetail").hidden = view !== "detail";
   document.getElementById("viewCompare").hidden = view !== "compare";
   document.getElementById("viewPilot").hidden = view !== "pilot";
+  document.getElementById("viewR2").hidden = view !== "r2";
   document.querySelectorAll(".tab[data-view]").forEach(t =>
     t.classList.toggle("active", t.dataset.view === view));
   document.getElementById("viewHint").textContent = view === "detail"
-    ? "one arm, in full" : view === "pilot" ? "teacher prompt study E1 – E4 (and pilot R1 – R3), side by side" : "up to 3 arms, side by side";
+    ? "one arm, in full" : view === "pilot" ? "teacher prompt study E1 – E4 (and pilot R1 – R3), side by side"
+    : view === "r2" ? "reasoning model, 612 validation windows" : "up to 3 arms, side by side";
   if (view === "pilot") pilotView.show();
+  if (view === "r2") showR2();
   if (view === "detail"){
     if (arg && ARM_BY_KEY[arg]) lastArm = arg;
     renderDetail(arg && ARM_BY_KEY[arg] ? arg : null);
   }
 }
+/* Reasoning model - Run 1: r2_data.js (about 0.6 MB, built by build_r2_data.py) is loaded the first time the tab is opened. */
+let r2View = null, r2Loading = false;
+function showR2(){
+  if (r2View){ r2View.show(); return; }
+  if (r2Loading) return;
+  r2Loading = true;
+  document.getElementById("r2Count").textContent = "loading the results…";
+  const sc = document.createElement("script");
+  sc.src = "r2_data.js";
+  sc.onload = () => {
+    const D = window.R2_DATA;
+    document.getElementById("r2NTrain").textContent = D.n_train.toLocaleString("en-US");
+    document.getElementById("r2NWin").textContent = D.n_windows;
+    document.getElementById("r2NVid").textContent = D.n_videos;
+    r2View = createR2View({data: D, esc});
+    r2View.show();
+  };
+  sc.onerror = () => { r2Loading = false; document.getElementById("r2Count").textContent = "r2_data.js not found: run website/build_r2_data.py"; };
+  document.head.appendChild(sc);
+}
+
 /* Switching to Compare and back must not silently discard the arm being read, so
    the tab remembers it and puts it back into the hash. */
 let lastArm = null;
