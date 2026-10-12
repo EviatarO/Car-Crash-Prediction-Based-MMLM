@@ -37,7 +37,8 @@ sys.path.insert(0, str(HERE.parent / "models"))
 from r1_common import window_indices  # noqa: E402
 
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
-            "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl"}
+            "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
+            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"}
 ADAPTER = ROOT / "outputs" / "a1_compress256" / "train" / "epoch_02" / "lora_adapter"
 CFG = HERE.parent / "configs" / "e4_stageA.yaml"
 DADA_URL = "https://huggingface.co/datasets/JeffreyChou/MM-AU/resolve/main/DADA-2000_chunks/DADA2000.part_{}"
@@ -116,8 +117,8 @@ def load_rows(source, splits, limit):
 # ----------------------------------------------------------------------------- Nexar
 def run_nexar(args, badas):
     from PIL import Image
-    rows = load_rows("nexar", args.splits, args.limit)
-    sink = Sink(Path(args.out_dir), "nexar", capacity=len(rows))
+    rows = load_rows(args.source, args.splits, args.limit)
+    sink = Sink(Path(args.out_dir), args.source, capacity=len(rows))
     todo = [r for r in rows if r["id"] not in sink.done]
     print(f"[nexar] {len(rows)} valid windows, {len(todo)} to encode")
     t0 = time.time()
@@ -343,7 +344,7 @@ def consolidate(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", required=True, choices=["nexar", "dada"])
+    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "dada"])
     ap.add_argument("--from-hf", default=None, help="encode the shards of this private HF window repo (chunked, resumable)")
     ap.add_argument("--max-shards", type=int, default=0, help="with --from-hf: encode only the first N shards (smoke runs)")
     ap.add_argument("--push-repo", default=None, help="with --from-hf: upload each encoded chunk here, then delete it locally")
@@ -365,7 +366,7 @@ def main():
     badas = load_model()
     if args.from_hf:
         return run_from_hf(args, badas)
-    (run_nexar if args.source == "nexar" else run_dada)(args, badas)
+    (run_nexar if args.source.startswith("nexar") else run_dada)(args, badas)
 
 
 if __name__ == "__main__":

@@ -15,11 +15,12 @@ import torch
 import sys
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from r1_common import Q_PHASE1, Q_PHASE2, TAG  # noqa: E402
+from r1_common import Q_PHASE1, Q_PHASE2, TAG, q_reason, reasoning_group, reasoning_target  # noqa: E402
 
 ROOT = HERE.parents[1]
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
-            "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl"}
+            "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
+            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"}
 
 
 class Cache:
@@ -49,7 +50,7 @@ class Cache:
         return self.rows[wid]["p_collision"]
 
 
-def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False):
+def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first"):
     """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
     min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
     Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set)."""
@@ -57,6 +58,13 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
     for l in open(MANIFEST[source], encoding="utf-8"):
         r = json.loads(l)
         if not r["valid"] or r["split"] != split or r["id"] not in cache:
+            continue
+        if source == "nexar_reasoning":      # reasoning dataset: the class is the VISIBLE-HAZARD label; the Nexar label is kept for comparison
+            g = r["gt"]
+            out.append({"id": r["id"], "source": source, "video_key": r["video_key"], "label": g["label_vis"], "label_nexar": r["label"],
+                        "tte": r["tte"], "pre_alert": g["pre_alert"], "group": reasoning_group(r["label"], r["tte"], g["pre_alert"]),
+                        "question": q_reason(order), "tag": TAG[source], "order": order, "gt": g,
+                        "answer": reasoning_target(g["explanation"], g["prediction"], g["label_vis"], order)})
             continue
         if nocrash_only:              # phase-1 hallucination check: no-crash windows, no target text (generation only)
             if r["label"] != 0:
@@ -85,15 +93,34 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
 
 
 def epoch_items(items, rng: random.Random, balance: bool):
-    """Phase 2 sampler: all no-crash windows + an equal random draw of crash windows (50/50). Phase 1: all."""
+    """Phase 2 sampler: 50/50 on `label`. With k = min(#neg, #pos), draw k from BOTH classes (old DADA+Nexar data: negatives are the
+    minority, so all of them are kept - unchanged behaviour). If negatives are the majority (reasoning dataset) the k negatives are
+    drawn proportionally per `group` (normal / pre_alert), so the hard negatives keep their share. Phase 1: all."""
     items = list(items)
     if balance:
         neg = [i for i in items if i["label"] == 0]
         pos = [i for i in items if i["label"] == 1]
         if neg and pos:
-            items = neg + rng.sample(pos, min(len(neg), len(pos)))
+            k = min(len(neg), len(pos))
+            items = _draw(neg, k, rng) + _draw(pos, k, rng)
     rng.shuffle(items)
     return items
+
+
+def _draw(cls_items, k, rng):
+    """k items of one class; stratified by `group` when the items have one (largest-remainder rounding), plain sample otherwise."""
+    if k >= len(cls_items):
+        return list(cls_items)
+    groups = {}
+    for it in cls_items:
+        groups.setdefault(it.get("group"), []).append(it)
+    if len(groups) == 1:
+        return rng.sample(cls_items, k)
+    quota = {g: k * len(v) / len(cls_items) for g, v in groups.items()}
+    take = {g: int(q) for g, q in quota.items()}
+    for g in sorted(quota, key=lambda g: quota[g] - take[g], reverse=True)[:k - sum(take.values())]:
+        take[g] += 1
+    return [x for g, v in groups.items() for x in rng.sample(v, take[g])]
 
 
 def other_index(items, seed=0):

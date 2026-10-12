@@ -85,7 +85,11 @@ def nexar_extra(row, times, a1):
     return {"time_of_alert_s": t.get("alert"), "time_of_event_s": t.get("event"),
             "window_end_s": (round(t["event"] - row["tte"], 3) if t.get("event") is not None and row["label"] == 1 else None),
             "source_frames_dir": row["frames_dir"], "source_frame_indices": None,
-            "reasoning_text": row["gt"]["v12_caption"], "reasoning_kind": "teacher V12 neutral caption (Gemini, blind)",
+            **({"reasoning_text": row["gt"]["explanation"], "reasoning_kind": "teacher explanation (Gemini 3.8 Flash, boxed frames; E3/E6/E7 flow, partly hand-edited)",
+                "prediction_text": row["gt"]["prediction"], "risk_score": row["gt"]["risk"], "label_vis": row["gt"]["label_vis"],
+                "pre_alert": row["gt"]["pre_alert"], "teacher_path": row["gt"]["path"], "edited": row["gt"]["edited"]}
+               if row["source"] == "nexar_reasoning" else
+               {"reasoning_text": row["gt"]["v12_caption"], "reasoning_kind": "teacher V12 neutral caption (Gemini, blind)"}),
             "a1_p_collision": a1.get(row["frames_dir"])}
 
 
@@ -222,7 +226,7 @@ def run_nexar(args, proc, writer, done_ids):
         for l in open(A1_SCORES, encoding="utf-8"):
             r = json.loads(l)
             a1[r["frames_dir"]] = round(r["score"], 5)
-    rows, excluded = load_manifest("nexar", args.splits, args.limit)
+    rows, excluded = load_manifest(args.source, args.splits, args.limit)
     todo = [r for r in rows if r["id"] not in done_ids]
     print(f"[nexar] {len(rows)} valid windows, {len(todo)} to build, {len(excluded)} excluded by the visibility rule", flush=True)
 
@@ -387,11 +391,19 @@ def finish(args, rows_all, excluded, work: Path, up: Uploader):
     c = collections.Counter(r["split"] for r in rows_all)
     meta = {"nexar": dict(name="nexar-windows", src="Nexar collision-prediction train videos (our 1,761-window V12 pool; text = teacher V12 captions)",
                           lic="Nexar dataset terms", vis="end >= time_of_alert", neg="negative videos, 'Cause: not annotated' in the targets"),
+            "nexar_reasoning": dict(name="nexar-reasoning-windows", src="Nexar collision-prediction train videos: the reasoning dataset (3 windows per video, teacher explanation + outcome sentence + visible-hazard label `label_vis`)",
+                                    lic="Nexar dataset terms", vis="no filter here: pre-alert crash windows (hazard not yet visible) are kept with label_vis 0",
+                                    neg="normal windows before a fake event at the video midpoint"),
             "dada": dict(name="mmau-dada-windows", src="MM-AU / DADA-2000 part (JeffreyChou/MM-AU, 30 fps, 1584x660 -> squashed); text = human annotations",
                          lic="MM-AU CC BY-NC", vis="end >= t_ai + 8 frames", neg="end 0.5 s before the abnormal start t_ai")}[args.source]
-    (work / "README.md").write_text(CARD.format(
+    card = (CARD.format(
         n=len(rows_all), per_split=", ".join(f"{k} {v}" for k, v in sorted(c.items())), nex=len(excluded), stride=STRIDE, fps=FPS_SRC,
-        prep=PREPROCESS, **meta), encoding="utf-8")
+        prep=PREPROCESS, **meta))
+    if args.source == "nexar_reasoning":
+        card += ("\n## Reasoning-dataset fields\n`reasoning_text` = 25-45-word explanation, `prediction_text` = 4-15-word outcome sentence, `risk_score` 0-100, "
+                 "`label_vis` = visible-hazard label (the verdict target; Nexar `label` stays the event label), `pre_alert` = crash window that ends before the alert + 8 frames, "
+                 "`teacher_path` = which prompt wrote the final text, `edited` = rewritten by hand after frame review. Split is by video: val = the validation videos of the earlier Nexar manifest.\n")
+    (work / "README.md").write_text(card, encoding="utf-8")
     for f in ("windows.jsonl", "windows.csv", "windows_excluded.jsonl", "README.md"):
         up.submit(work / f, f, delete=False)
     up.drain()
@@ -400,7 +412,7 @@ def finish(args, rows_all, excluded, work: Path, up: Uploader):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", required=True, choices=["nexar", "dada"])
+    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "dada"])
     ap.add_argument("--repo", required=True)
     ap.add_argument("--work-dir", default=None)
     ap.add_argument("--splits", default="train,val,test")
@@ -428,7 +440,7 @@ def main():
     print(f"[resume] {len(prev)} windows already in {args.repo}" if prev else "[resume] fresh repo", flush=True)
     proc = get_processor()
     writer = ShardWriter(work, up, args.shard_size, nxt)
-    rows, excluded = (run_nexar if args.source == "nexar" else run_dada)(args, proc, writer, done_ids)
+    rows, excluded = (run_nexar if args.source.startswith("nexar") else run_dada)(args, proc, writer, done_ids)
     writer.close()
     finish(args, prev + writer.rows, excluded, work, up)
 

@@ -78,3 +78,48 @@ def parse_phase2(text: str) -> dict:
     if m:
         out["cause"] = m.group(1).strip()
     return out
+
+
+# ----------------------------------------------------------------------------- reasoning dataset (2026-10-12)
+# Nexar reasoning dataset: answer = "Reasoning: <explanation>\nCollision: yes|no.\nOutcome: <sentence>" (Run 1, "reason_first");
+# Run 2 ("verdict_first") puts the verdict line first. The prompt announces the fields in the same order. The decision score is
+# read at the label "Collision:" (see r1_reasoning.py); nothing in the prompt asks for it.
+TAG["nexar_reasoning"] = "[Nexar]"
+_FIELDS = {"reason_first": ("Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
+                            "Collision: yes or no.\nOutcome: one short sentence."),
+           "verdict_first": ("Collision: yes or no.\n"
+                             "Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
+                             "Outcome: one short sentence.")}
+ORDERS = tuple(_FIELDS)
+
+
+def q_reason(order: str = "reason_first") -> str:
+    return "Look at the road user that matters most for the ego vehicle. Answer in three parts:\n" + _FIELDS[order]
+
+
+def reasoning_target(expl: str, pred: str, label_vis: int, order: str = "reason_first") -> str:
+    expl, pred = expl.strip(), pred.strip()
+    if not pred.endswith((".", "!", "?")):
+        pred += "."
+    v = f"Collision: {'yes' if label_vis else 'no'}."
+    r, o = f"Reasoning: {expl}", f"Outcome: {pred}"
+    return "\n".join([r, v, o] if order == "reason_first" else [v, r, o])
+
+
+def parse_reasoning(text: str) -> dict:
+    """Parse a generated answer of either order -> {explanation, collision (1/0/None), outcome}."""
+    out = {"explanation": None, "collision": None, "outcome": None}
+    m = re.search(r"Collision:\s*(yes|no)", text, re.I)
+    if m:
+        out["collision"] = 1 if m.group(1).lower() == "yes" else 0
+    m = re.search(r"Reasoning:\s*(.*?)\s*(?=\n?\s*(?:Collision:|Outcome:)|$)", text, re.I | re.S)
+    if m:
+        out["explanation"] = m.group(1).strip() or None
+    m = re.search(r"Outcome:\s*(.*)$", text, re.I | re.S)
+    if m:
+        out["outcome"] = m.group(1).strip() or None
+    return out
+
+
+def reasoning_group(label: int, tte, pre_alert: bool) -> str:
+    return "normal" if not label else ("pre_alert" if pre_alert else f"tte{tte}")

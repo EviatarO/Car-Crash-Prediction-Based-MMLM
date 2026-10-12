@@ -117,6 +117,10 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0, help="smoke test: stop after N optimizer steps")
     ap.add_argument("--stop-on-val-rise", type=int, default=0,
                     help="also stop when the monitored validation loss (own video) rose this many epochs in a row (0 = off)")
+    ap.add_argument("--sources", default="dada,nexar",
+                    help="training/validation sources; 'nexar_reasoning' = Nexar reasoning dataset only (plan 2026-10-12), then --phase 2")
+    ap.add_argument("--order", default="reason_first", choices=["reason_first", "verdict_first"],
+                    help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first")
     ap.add_argument("--p1-min-p", type=float, default=0.5,
                     help="phase 1: train/select only on DADA crash windows with A1 P(collision) >= this (0 = all; option b)")
     args = ap.parse_args()
@@ -137,8 +141,16 @@ def main():
         bridge.text.gradient_checkpointing_enable()
     bridge.merger.float()
 
-    caches = {s: Cache(args.cache_dir, s) for s in ("dada", "nexar")}
-    if args.phase == 1:
+    srcs = args.sources.split(",")
+    caches = {s: Cache(args.cache_dir, s) for s in srcs}
+    reasoning = srcs == ["nexar_reasoning"]
+    if reasoning and args.phase != 2:
+        ap.error("--sources nexar_reasoning is a phase-2 dataset")
+    if reasoning:
+        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order)
+        val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order)}
+        monitor = "nexar_reasoning"
+    elif args.phase == 1:
         mp = args.p1_min_p if args.p1_min_p > 0 else None
         train = load_items("dada", 1, "train", caches["dada"], min_p=mp)
         val = {"dada": load_items("dada", 1, args.val_split, caches["dada"], min_p=mp),
@@ -200,6 +212,10 @@ def main():
         rec = {"epoch": ep, "step": step, "train_loss": run / max(1, n_run)}
         for k, v in val.items():
             rec[f"val_{k}"] = evaluate(bridge, v, caches, dev)
+        if reasoning:            # decision AUC read at the label "Collision:" (r1_reasoning.py), no generation needed
+            from r1_reasoning import epoch_decision_report
+            rec["decision"] = epoch_decision_report(bridge, val["nexar_reasoning"], caches, dev, args.order)
+            print("  [decision] " + json.dumps(rec["decision"]), flush=True)
         log.write(json.dumps(rec) + "\n")
         log.flush()
         bridge.save(out / f"epoch_{ep:02d}.pt")
