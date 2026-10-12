@@ -458,6 +458,8 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 .prisk{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-left:4px}
 .pflip{font-family:var(--mono);font-size:11.5px;color:var(--amber);margin-left:4px}
 .pilot-runs tr.dimrow td{opacity:.55}
+.pilot-runs tr.hl td{background:rgba(0,191,255,.12)}
+.pilot-runs tr.cmprow{cursor:pointer}
 .ppred{margin-top:6px;font-size:13.4px;line-height:1.45;color:var(--soft-green);font-style:italic}
 .hvsel{background:var(--panel-dk);color:var(--white);border:1px solid #2a3560;border-radius:7px;padding:5px 6px;font-size:13px}
 .hvsel.has-note{border-color:var(--cyan)}
