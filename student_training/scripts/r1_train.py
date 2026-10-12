@@ -121,6 +121,11 @@ def main():
                     help="training/validation sources; 'nexar_reasoning' = Nexar reasoning dataset only (plan 2026-10-12), then --phase 2")
     ap.add_argument("--order", default="reason_first", choices=["reason_first", "verdict_first"],
                     help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first")
+    ap.add_argument("--box-hint", action="store_true", help="option 3: append the position of the attended road user to the prompt")
+    ap.add_argument("--template-cap", type=int, default=0,
+                    help="option 2: training windows whose explanation opening (first 9 words) occurs more than N times are kept with prob N/count per epoch")
+    ap.add_argument("--select", default="gap", choices=["gap", "val_loss"],
+                    help="best.pt by the wrong-video gap (pre-registered week-1 rule) or by the lowest validation loss (option 1 lesson)")
     ap.add_argument("--p1-min-p", type=float, default=0.5,
                     help="phase 1: train/select only on DADA crash windows with A1 P(collision) >= this (0 = all; option b)")
     args = ap.parse_args()
@@ -147,8 +152,17 @@ def main():
     if reasoning and args.phase != 2:
         ap.error("--sources nexar_reasoning is a phase-2 dataset")
     if reasoning:
-        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order)
-        val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order)}
+        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)
+        val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)}
+        if args.template_cap:
+            from collections import Counter
+            op = lambda it: " ".join(it["gt"]["explanation"].lower().split()[:9])  # noqa: E731
+            cnt = Counter(op(it) for it in train)
+            for it in train:
+                c = cnt[op(it)]
+                if c > args.template_cap:
+                    it["keep_p"] = args.template_cap / c
+            print(f"[template-cap] {sum('keep_p' in it for it in train)} windows down-weighted (openings seen > {args.template_cap} times)")
         monitor = "nexar_reasoning"
     elif args.phase == 1:
         mp = args.p1_min_p if args.p1_min_p > 0 else None
@@ -220,7 +234,7 @@ def main():
         log.flush()
         bridge.save(out / f"epoch_{ep:02d}.pt")
         mon = rec.get(f"val_{monitor}", {})
-        score = mon.get("gap_wrong", -1e9)
+        score = mon.get("gap_wrong", -1e9) if args.select == "gap" else -mon.get("loss_real", 1e9)
         print(f"[epoch {ep}] train {rec['train_loss']:.4f} | " + " | ".join(
             f"{k}: real {r.get('loss_real', float('nan')):.3f} blank-gap {r.get('gap_blank', float('nan')):+.3f} "
             f"wrong-gap {r.get('gap_wrong', float('nan')):+.3f} {r.get('gap_wrong_ci', '')}" for k, r in
@@ -232,7 +246,7 @@ def main():
         if score > best + 1e-6 or (ep == 1 and best == -1e9):
             best, bad = score, 0
             bridge.save(out / "best.pt")
-            print(f"  new best ({monitor} wrong-video gap {score:+.4f}) -> best.pt")
+            print(f"  new best ({monitor} {'wrong-video gap' if args.select == 'gap' else '-val loss'} {score:+.4f}) -> best.pt")
         else:
             bad += 1
             if bad >= args.patience:
@@ -244,7 +258,7 @@ def main():
         if args.max_steps and step >= args.max_steps:
             break
     log.close()
-    print(f"[done] {out}  best {monitor} wrong-video gap {best:+.4f}")
+    print(f"[done] {out}  best {monitor} {'wrong-video gap' if args.select == 'gap' else '-val loss'} {best:+.4f}")
 
 
 if __name__ == "__main__":

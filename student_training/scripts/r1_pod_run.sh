@@ -12,7 +12,7 @@ ROOT=${ROOT:-/root/r1}
 OUT=${OUT:-/root/r1_week1}
 PY=${PY:-/root/venv/bin/python}
 SC=$ROOT/student_training/scripts
-CACHE=$OUT/cache
+CACHE=${CACHE:-$OUT/cache}      # this pod: container disk 30 GB -> export CACHE=/dev/shm/r1_cache (RAM disk, 29 GB, cache is 17.5 GB)
 DADA_PARTS=${DADA_PARTS:-/root/dada_parts}
 for TOKEN_FILE in ${TOKEN_FILE:-} /root/.cache/huggingface/token /workspace/.cache/huggingface/token; do   # never printed
   [ -f "$TOKEN_FILE" ] && export HF_TOKEN=$(cat "$TOKEN_FILE") && break

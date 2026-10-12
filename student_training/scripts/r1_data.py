@@ -50,7 +50,7 @@ class Cache:
         return self.rows[wid]["p_collision"]
 
 
-def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first"):
+def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first", box_hint=False):
     """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
     min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
     Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set)."""
@@ -63,7 +63,7 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
             g = r["gt"]
             out.append({"id": r["id"], "source": source, "video_key": r["video_key"], "label": g["label_vis"], "label_nexar": r["label"],
                         "tte": r["tte"], "pre_alert": g["pre_alert"], "group": reasoning_group(r["label"], r["tte"], g["pre_alert"]),
-                        "question": q_reason(order), "tag": TAG[source], "order": order, "gt": g,
+                        "question": q_reason(order) + ("\n" + g["box_hint"] if box_hint else ""), "tag": TAG[source], "order": order, "gt": g,
                         "answer": reasoning_target(g["explanation"], g["prediction"], g["label_vis"], order)})
             continue
         if nocrash_only:              # phase-1 hallucination check: no-crash windows, no target text (generation only)
@@ -97,6 +97,8 @@ def epoch_items(items, rng: random.Random, balance: bool):
     minority, so all of them are kept - unchanged behaviour). If negatives are the majority (reasoning dataset) the k negatives are
     drawn proportionally per `group` (normal / pre_alert), so the hard negatives keep their share. Phase 1: all."""
     items = list(items)
+    if any("keep_p" in i for i in items):                  # option 2: template cap (items with a frequent opening kept with prob cap/count)
+        items = [i for i in items if rng.random() < i.get("keep_p", 1.0)]
     if balance:
         neg = [i for i in items if i["label"] == 0]
         pos = [i for i in items if i["label"] == 1]

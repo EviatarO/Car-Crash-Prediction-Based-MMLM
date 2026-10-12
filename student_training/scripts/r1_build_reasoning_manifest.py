@@ -17,11 +17,16 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "outputs" / "teacher_dataset_2026-10" / "dataset_final.jsonl"
 OLD = ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl"
 OUT = ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"
+BOXES = ROOT / "outputs" / "teacher_dataset_2026-10" / "boxes.jsonl"          # the teacher's red box per frame (option 3: box_hint)
 
 
 def main():
     rows = [json.loads(l) for l in open(SRC, encoding="utf-8")]
     val_videos = {r["video_key"] for r in map(json.loads, open(OLD, encoding="utf-8")) if r["split"] == "val"}
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from r1_common import box_hint
+    boxes = {json.loads(l)["frames_dir"]: json.loads(l) for l in open(BOXES, encoding="utf-8")}
     out = []
     for x in sorted(rows, key=lambda x: x["frames_dir"]):
         assert x["explanation"] and x["prediction"] and x["label_vis"] in (0, 1), x["frames_dir"]
@@ -30,7 +35,8 @@ def main():
                     "video_key": x["video_id"], "frames_dir": x["frames_dir"], "label": x["label"], "tte": x["tte"] if x["label"] else None,
                     "valid": True, "drop_reason": None,
                     "gt": {"explanation": x["explanation"], "prediction": x["prediction"], "risk": x["risk"], "label_vis": x["label_vis"],
-                           "pre_alert": x["pre_alert"], "path": x["path"], "status": x["status"], "edited": x["edited"]},
+                           "pre_alert": x["pre_alert"], "path": x["path"], "status": x["status"], "edited": x["edited"],
+                           "box_hint": box_hint((boxes.get(x["frames_dir"]) or {}).get("boxes"))},
                     "targets": {"reasoning": {"explanation": x["explanation"], "prediction": x["prediction"], "label_vis": x["label_vis"]}}})
     assert len({r["id"] for r in out}) == len(out)
     vids = collections.defaultdict(set)

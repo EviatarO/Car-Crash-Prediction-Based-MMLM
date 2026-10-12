@@ -202,6 +202,7 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--before-ckpt", default=None, help="Phase-1 checkpoint: loss / perplexity / gaps on the new targets (the 'before' row)")
     ap.add_argument("--old-ckpt", default=None, help="old Phase-2 checkpoint: its verdict score on the same windows (its own question)")
+    ap.add_argument("--box-hint", action="store_true", help="option 3 model: the prompt carries the position of the attended road user")
     ap.add_argument("--max-new", type=int, default=160)
     ap.add_argument("--n-blank", type=int, default=20)
     ap.add_argument("--limit", type=int, default=0)
@@ -215,7 +216,7 @@ def main():
     bridge = R1Bridge(qwen, tok).to(dev)
     caches = {"nexar_reasoning": Cache(args.cache_dir, "nexar_reasoning")}
     cache = caches["nexar_reasoning"]
-    items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order)
+    items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order, box_hint=args.box_hint)
     if args.limit:
         items = items[:args.limit]
     assert items, "no validation windows in the cache"

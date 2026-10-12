@@ -123,3 +123,17 @@ def parse_reasoning(text: str) -> dict:
 
 def reasoning_group(label: int, tte, pre_alert: bool) -> str:
     return "normal" if not label else ("pre_alert" if pre_alert else f"tte{tte}")
+
+
+def box_hint(boxes, frame_w=1280, frame_h=720) -> str:
+    """Option 3 (2026-10-12): WHERE the road user the frozen crash model attends to is, as words (no class, no motion - those
+    must come from the video features). boxes = the 16 per-frame boxes of the teacher's red box ([x1,y1,x2,y2] or None)."""
+    last = next((b for b in reversed(boxes or []) if b), None)
+    if last is None:
+        return "No road user is marked."
+    x1, y1, x2, y2 = last
+    cx, bottom, area = (x1 + x2) / 2 / frame_w, y2 / frame_h, (x2 - x1) * (y2 - y1) / (frame_w * frame_h)
+    side = "on the left" if cx < 1 / 3 else ("on the right" if cx > 2 / 3 else "ahead in the centre")
+    dist = "very close" if bottom > 0.85 else ("close" if bottom > 0.65 else "farther away")
+    size = "large" if area > 0.12 else ("medium-sized" if area > 0.025 else "small")
+    return f"The road user that matters most is {side}, {dist}, and {size} in the last frame."
