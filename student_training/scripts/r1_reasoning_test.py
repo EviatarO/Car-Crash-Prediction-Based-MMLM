@@ -112,6 +112,68 @@ def main():
             direct = float(lp[yes_id[0]] - lp[no_id[0]])
             assert abs(direct - want) < 1e-3, (direct, want)
     print("5 ok: logodds == direct next-piece log P(' yes') - log P(' no')", [round(x, 3) for x in got])
+
+    # 6 ---- merger input types: shapes, original parameters unchanged, extra channels matter
+    import tempfile
+    import numpy as np
+    from r1_bridge import INPUTS, Merger
+    for name, (nl, at) in INPUTS.items():
+        m = Merger(1024, 64, nl, at)
+        C = nl * 1024 + int(at)
+        x = torch.randn(2, 2048, C)
+        y = m(x)
+        assert y.shape == (2, 512, 64), (name, y.shape)
+    base = Merger(1024, 64)
+    assert set(base.state_dict()) == {"norm.weight", "norm.bias", "linear_fc1.weight", "linear_fc1.bias", "linear_fc2.weight", "linear_fc2.bias"}
+    m2 = Merger(1024, 64, 1, True)
+    x = torch.randn(1, 2048, 1025)
+    x2 = x.clone()
+    x2[..., 1024] += 3.0
+    assert not torch.allclose(m2(x), m2(x2)), "attention channel has no effect"
+    print("6 ok: merger shapes for", list(INPUTS), "; original parameters unchanged; attention channel acts")
+
+    # 7 ---- Cache returns the right channel layout for each input
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        n = 3
+        rng = np.random.default_rng(0)
+        last, l11 = rng.standard_normal((n, 2048, 1024)).astype(np.float16), rng.standard_normal((n, 2048, 1024)).astype(np.float16)
+        att = np.abs(rng.standard_normal((n, 2048))).astype(np.float16) + 0.01
+        np.save(td / "features_nexar_reasoning.npy", last)
+        np.save(td / "features_nexar_reasoning_l11.npy", l11)
+        np.save(td / "attn_nexar_reasoning.npy", att)
+        (td / "index_nexar_reasoning.jsonl").write_text("".join(json.dumps({"id": f"w{i}", "row": i, "p_collision": 0.5}) + chr(10) for i in range(n)))
+        from r1_data import Cache
+        for name, C in (("last", 1024), ("last+attn", 1025), ("l11+last", 2048), ("l11+last+attn", 2049)):
+            g = Cache(td, "nexar_reasoning", name).get(["w2", "w0"])
+            assert g.shape == (2, 2048, C), (name, g.shape)
+        g = Cache(td, "nexar_reasoning", "l11+last+attn").get(["w1"])
+        assert torch.allclose(g[0, :, :1024], torch.from_numpy(l11[1]).float()) and torch.allclose(g[0, :, 1024:2048], torch.from_numpy(last[1]).float())
+        assert abs(float(torch.expm1(g[0, :, 2048]).mean()) - 1.0) < 1e-3, "attention not scaled to mean 1"
+    print("7 ok: Cache channel layout [l11 | last | attn] and attention scaling")
+
+    # 8 ---- fact extractor spot checks
+    from r1_fact_eval import facts
+    f = facts("A white SUV directly ahead in the same lane brakes hard. The gap closes rapidly.")
+    assert f == {"type": "suv", "side": "ahead", "motion": "braking", "gap": "closing"}, f
+    f = facts("A pickup truck from the left lane merges into the ego lane while the distance decreases.")
+    assert f["side"] == "left" and f["motion"] == "cutting_in" and f["gap"] == "closing", f
+    assert facts("A car is parked along the right curb. The ego vehicle passes it, keeping a steady distance.") ==         {"type": "car", "side": "right", "motion": "parked", "gap": "stable"}
+    print("8 ok: fact extractor")
+
+    # 9 ---- probe learns a separable synthetic fact and stays near chance on noise
+    from r1_fact_probe import bal_acc, fit_probe
+    g = torch.Generator().manual_seed(0)
+    y = torch.randint(0, 3, (900,), generator=g)
+    sig = torch.randn(3, 512, generator=g)
+    X = torch.randn(900, 512, generator=g) * 2 + sig[y]
+    net, f = fit_probe(X[:600], y[:600], X[600:750], y[600:750], 3, torch.device("cpu"))
+    acc = bal_acc(y[750:].numpy(), net(f(X[750:])).argmax(1).numpy(), 3)
+    Xn = torch.randn(900, 512, generator=g)
+    net2, f2 = fit_probe(Xn[:600], y[:600], Xn[600:750], y[600:750], 3, torch.device("cpu"))
+    acc_n = bal_acc(y[750:].numpy(), net2(f2(Xn[750:])).argmax(1).numpy(), 3)
+    assert acc > 0.85 and acc_n < 0.5, (acc, acc_n)
+    print(f"9 ok: probe on a separable fact {acc:.2f}, on noise {acc_n:.2f} (chance 0.33)")
     print("ALL OK")
 
 

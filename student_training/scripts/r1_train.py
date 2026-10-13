@@ -121,6 +121,8 @@ def main():
                     help="training/validation sources; 'nexar_reasoning' = Nexar reasoning dataset only (plan 2026-10-12), then --phase 2")
     ap.add_argument("--order", default="reason_first", choices=["reason_first", "verdict_first"],
                     help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first")
+    ap.add_argument("--input", default="last", choices=["last", "last+attn", "l11+last", "l11+last+attn"],
+                    help="merger input (plan 2026-10-13): last-layer tokens (original), + crash-head attention channel, + layer-11 tokens")
     ap.add_argument("--box-hint", action="store_true", help="option 3: append the position of the attended road user to the prompt")
     ap.add_argument("--template-cap", type=int, default=0,
                     help="option 2: training windows whose explanation opening (first 9 words) occurs more than N times are kept with prob N/count per epoch")
@@ -136,7 +138,7 @@ def main():
     dev = torch.device(args.device)
 
     qwen, tok = load_lm(args.lm, dev)
-    bridge = R1Bridge(qwen, tok, init=args.init if args.phase == 1 else "random").to(dev)
+    bridge = R1Bridge(qwen, tok, init=args.init if args.phase == 1 else "random", inp=args.input).to(dev)
     if args.init_from:
         bridge.load(args.init_from)
         print(f"[init] merger from {args.init_from}")
@@ -147,10 +149,8 @@ def main():
     bridge.merger.float()
 
     srcs = args.sources.split(",")
-    caches = {s: Cache(args.cache_dir, s) for s in srcs}
+    caches = {s: Cache(args.cache_dir, s, args.input) for s in srcs}
     reasoning = srcs == ["nexar_reasoning"]
-    if reasoning and args.phase != 2:
-        ap.error("--sources nexar_reasoning is a phase-2 dataset")
     if reasoning:
         train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)
         val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)}
@@ -190,7 +190,7 @@ def main():
           + (f" + LoRA {sum(p.numel() for p in lora)/1e6:.1f}M" if lora else ""))
 
     accum = max(1, args.eff_bs // args.micro_bs)
-    spe = math.ceil(len(epoch_items(train, random.Random(0), args.phase == 2)) / args.eff_bs)
+    spe = math.ceil(len(epoch_items(train, random.Random(0), args.phase == 2 or reasoning)) / args.eff_bs)
     total, warm = spe * args.epochs, max(1, int(0.03 * spe * args.epochs))
     print(f"[sched] {spe} optimizer steps/epoch x {args.epochs} epochs = {total} (warmup {warm}); eff batch {args.eff_bs} = {accum} x {args.micro_bs}")
 
@@ -198,7 +198,7 @@ def main():
     best, bad, step, t0 = -1e9, 0, 0, time.time()
     prev_vl, rises = None, 0
     for ep in range(1, args.epochs + 1):
-        items = epoch_items(train, rng, balance=args.phase == 2)
+        items = epoch_items(train, rng, balance=args.phase == 2 or reasoning)
         bridge.train()
         run, n_run = 0.0, 0
         for s in range(0, len(items), args.eff_bs):

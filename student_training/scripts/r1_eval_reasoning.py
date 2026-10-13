@@ -202,7 +202,10 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--before-ckpt", default=None, help="Phase-1 checkpoint: loss / perplexity / gaps on the new targets (the 'before' row)")
     ap.add_argument("--old-ckpt", default=None, help="old Phase-2 checkpoint: its verdict score on the same windows (its own question)")
+    ap.add_argument("--input", default="last", choices=["last", "last+attn", "l11+last", "l11+last+attn"], help="merger input of the checkpoint")
     ap.add_argument("--box-hint", action="store_true", help="option 3 model: the prompt carries the position of the attended road user")
+    ap.add_argument("--train-threshold", type=int, default=0,
+                    help="N>0: choose the 'before reasoning' decision threshold on N random TRAINING windows (max balanced accuracy) and report it on validation")
     ap.add_argument("--max-new", type=int, default=160)
     ap.add_argument("--n-blank", type=int, default=20)
     ap.add_argument("--limit", type=int, default=0)
@@ -213,8 +216,8 @@ def main():
     dev = torch.device(args.device)
     torch.manual_seed(0)
     qwen, tok = load_lm(args.lm, dev)
-    bridge = R1Bridge(qwen, tok).to(dev)
-    caches = {"nexar_reasoning": Cache(args.cache_dir, "nexar_reasoning")}
+    bridge = R1Bridge(qwen, tok, inp=args.input).to(dev)
+    caches = {"nexar_reasoning": Cache(args.cache_dir, "nexar_reasoning", args.input)}
     cache = caches["nexar_reasoning"]
     items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order, box_hint=args.box_hint)
     if args.limit:
@@ -245,6 +248,24 @@ def main():
         for r, s in zip(rows, sc):
             r[f"s_{kind}"] = s
         score_keys.append(f"s_{kind}")
+    if args.train_threshold:
+        import random as _r
+        tr_all = load_items("nexar_reasoning", 2, "train", cache, order=args.order, box_hint=args.box_hint)
+        tr_items = _r.Random(0).sample(tr_all, min(args.train_threshold, len(tr_all)))
+        kind0 = kinds[0]
+        s_tr = np.array(logodds(bridge, tr_items, [prefix_for(kind0, it) for it in tr_items], caches, dev))
+        y_tr = np.array([it["label"] for it in tr_items])
+        cand = np.unique(s_tr)
+        bal = [0.5 * ((s_tr[y_tr == 1] >= t).mean() + (s_tr[y_tr == 0] < t).mean()) for t in cand]
+        thr = float(cand[int(np.argmax(bal))])
+        s_va = np.array([r[f"s_{kind0}"] for r in rows])
+        y_va = np.array([r["label"] for r in rows])
+        pred = (s_va >= thr).astype(int)
+        rep["train_threshold"] = {"score": f"s_{kind0}", "n_train_windows": len(tr_items), "log_odds_threshold": thr,
+                                  "p_threshold": float(1 / (1 + np.exp(-thr))), "balanced_acc_on_train_windows": float(max(bal)),
+                                  "val_acc": float((pred == y_va).mean()), "val_confusion": conf(y_va, pred),
+                                  "val_balanced_acc": float(0.5 * ((pred[y_va == 1] == 1).mean() + (pred[y_va == 0] == 0).mean()))}
+        print("[train-threshold]", json.dumps(rep["train_threshold"]), flush=True)
     gens = generate_all(bridge, items, caches, dev, "real", args.max_new)
     parsed = [parse_reasoning(g) for g in gens]
     for r, g, p in zip(rows, gens, parsed):

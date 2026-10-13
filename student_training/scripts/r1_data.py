@@ -24,27 +24,43 @@ MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.json
 
 
 class Cache:
-    """Cached tokens for one source: features_<source>.npy (N,2048,1024) fp16 memmap + index_<source>.jsonl."""
+    """Cached tokens for one source: features_<source>.npy (N,2048,1024) fp16 memmap + index_<source>.jsonl.
+    inp (plan 2026-10-13) selects what get() returns, concatenated on the channel axis:
+      last          (B,2048,1024)  last-layer tokens (the original input)
+      last+attn     (B,2048,1025)  + the crash head's attention per token (attn_<source>.npy), scaled to mean 1 per window, log1p
+      l11+last      (B,2048,2048)  layer-11 tokens (features_<source>_l11.npy) first, then the last layer
+      l11+last+attn (B,2048,2049)"""
 
-    def __init__(self, cache_dir, source):
+    def __init__(self, cache_dir, source, inp="last"):
         d = Path(cache_dir)
-        self.source = source
+        self.source, self.inp = source, inp
         self.rows = {}
+        self.mm = self.mm_l11 = self.mm_attn = None
         ix = d / f"index_{source}.jsonl"
         if ix.exists():
             for l in open(ix, encoding="utf-8"):
                 r = json.loads(l)
                 self.rows[r["id"]] = r
             self.mm = np.load(d / f"features_{source}.npy", mmap_mode="r")
-        else:
-            self.mm = None
+            if inp.startswith("l11"):
+                self.mm_l11 = np.load(d / f"features_{source}_l11.npy", mmap_mode="r")
+            if inp.endswith("attn"):
+                self.mm_attn = np.load(d / f"attn_{source}.npy", mmap_mode="r")
 
     def __contains__(self, wid):
         return wid in self.rows
 
     def get(self, ids):
         srcs = [self.rows[i]["row"] for i in ids]
-        return torch.from_numpy(np.stack([np.asarray(self.mm[r]) for r in srcs])).float()
+        parts = []
+        if self.mm_l11 is not None:
+            parts.append(torch.from_numpy(np.stack([np.asarray(self.mm_l11[r]) for r in srcs])).float())
+        parts.append(torch.from_numpy(np.stack([np.asarray(self.mm[r]) for r in srcs])).float())
+        if self.mm_attn is not None:
+            a = torch.from_numpy(np.stack([np.asarray(self.mm_attn[r]) for r in srcs])).float()      # (B, 2048) attention received per token
+            a = torch.log1p(a / a.mean(1, keepdim=True).clamp_min(1e-12))
+            parts.append(a.unsqueeze(-1))
+        return parts[0] if len(parts) == 1 else torch.cat(parts, -1)
 
     def p_collision(self, wid):
         return self.rows[wid]["p_collision"]

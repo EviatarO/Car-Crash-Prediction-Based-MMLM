@@ -54,6 +54,32 @@ def load_model():
     return badas
 
 
+def load_model_extras():
+    """(badas, captured, store): like load_model(), plus a hook on encoder layer 11 and one on the crash head's attention table
+    (plan 2026-10-13: richer inputs for the language-model bridge). captured[11] = (2048,1024) layer-11 tokens of the last forward,
+    store['attn'] = (1,2560,2560) attention of the crash head."""
+    import yaml
+    from aa1_token_probe import load_probe_model
+    cfg = yaml.safe_load(open(CFG, encoding="utf-8"))
+    badas, captured = load_probe_model(cfg, "compress256", [11], str(ADAPTER), "query,key,value")
+    store = {}
+    mods = [(n, m) for n, m in badas.nn_model.named_modules() if n.endswith("temporal_processor.attention")]
+    assert mods, "temporal_processor.attention not found"
+    mods[0][1].register_forward_hook(lambda m, a, out: store.__setitem__("attn", out[1].detach()))
+    return badas, captured, store
+
+
+@torch.no_grad()
+def encode_extras(badas, captured, store, clip):
+    """-> (last-layer tokens fp16, p_collision, layer-11 tokens fp16 (2048,1024), attention received per real token fp16 (2048,))"""
+    tokens, p = encode(badas, clip)
+    l11 = captured[11][:N_TOK]
+    assert l11.shape == (N_TOK, DIM), l11.shape
+    attn = store["attn"][0].float().mean(0)[:N_TOK]
+    assert attn.shape == (N_TOK,) and torch.isfinite(attn).all()
+    return tokens, p, l11.half().cpu().numpy(), attn.half().cpu().numpy()
+
+
 def preprocess_frames(vjepa, frames_rgb):
     """In-memory twin of e4_stageA_badas_open_eval.preprocess_clip(mode='compress256') (same processor call
     and overrides), for frames that did not come from JPEG files. r1_cache_features_test checks equality."""
@@ -78,8 +104,9 @@ def encode(badas, clip):
 class Sink:
     """Resumable fp16 memmap + jsonl index."""
 
-    def __init__(self, out_dir: Path, source: str, capacity: int):
+    def __init__(self, out_dir: Path, source: str, capacity: int, extras: bool = False):
         out_dir.mkdir(parents=True, exist_ok=True)
+        self.extras = extras
         self.fx = out_dir / f"features_{source}.npy"
         self.ix = out_dir / f"index_{source}.jsonl"
         self.done = {}
@@ -92,9 +119,16 @@ class Sink:
             if mode == "w+" else np.load(self.fx, mmap_mode="r+")
         self.n = len(self.done)
         self.f = open(self.ix, "a", encoding="utf-8")
+        self.mm_l11 = self.mm_attn = None
+        if extras:
+            fl, fa = out_dir / f"features_{source}_l11.npy", out_dir / f"attn_{source}.npy"
+            self.mm_l11 = np.load(fl, mmap_mode="r+") if fl.exists() else np.lib.format.open_memmap(fl, mode="w+", dtype=np.float16, shape=(capacity, N_TOK, DIM))
+            self.mm_attn = np.load(fa, mmap_mode="r+") if fa.exists() else np.lib.format.open_memmap(fa, mode="w+", dtype=np.float16, shape=(capacity, N_TOK))
 
-    def add(self, wid, tokens, p, extra=None):
+    def add(self, wid, tokens, p, extra=None, l11=None, attn=None):
         self.mm[self.n] = tokens
+        if self.extras:
+            self.mm_l11[self.n], self.mm_attn[self.n] = l11, attn
         rec = {"id": wid, "row": self.n, "p_collision": round(p, 5), **(extra or {})}
         self.f.write(json.dumps(rec) + "\n")
         self.done[wid] = rec
@@ -102,9 +136,15 @@ class Sink:
         if self.n % 25 == 0:
             self.mm.flush()
             self.f.flush()
+            if self.extras:
+                self.mm_l11.flush()
+                self.mm_attn.flush()
 
     def close(self):
         self.mm.flush()
+        if self.extras:
+            self.mm_l11.flush()
+            self.mm_attn.flush()
         self.f.close()
 
 
@@ -118,17 +158,22 @@ def load_rows(source, splits, limit):
 def run_nexar(args, badas):
     from PIL import Image
     rows = load_rows(args.source, args.splits, args.limit)
-    sink = Sink(Path(args.out_dir), args.source, capacity=len(rows))
+    sink = Sink(Path(args.out_dir), args.source, capacity=len(rows), extras=args.extras)
     todo = [r for r in rows if r["id"] not in sink.done]
-    print(f"[nexar] {len(rows)} valid windows, {len(todo)} to encode")
+    print(f"[nexar] {len(rows)} valid windows, {len(todo)} to encode (extras: {args.extras})")
     t0 = time.time()
     for i, r in enumerate(todo):
         fd = ROOT / "dataset" / "train" / r["frames_dir"]
         paths = sorted(fd.glob("frame_*.jpg"))
         assert len(paths) == 16, (fd, len(paths))
         frames = [np.array(Image.open(p).convert("RGB")) for p in paths]
-        tokens, p = encode(badas, preprocess_frames(badas.vjepa, frames))
-        sink.add(r["id"], tokens, p, {"split": r["split"], "label": r["label"]})
+        clip = preprocess_frames(badas.vjepa, frames)
+        if args.extras:
+            tokens, p, l11, attn = encode_extras(badas, args.captured, args.store, clip)
+            sink.add(r["id"], tokens, p, {"split": r["split"], "label": r["label"]}, l11=l11, attn=attn)
+        else:
+            tokens, p = encode(badas, clip)
+            sink.add(r["id"], tokens, p, {"split": r["split"], "label": r["label"]})
         if (i + 1) % 25 == 0 or i + 1 == len(todo):
             el = time.time() - t0
             print(f"  [{i + 1}/{len(todo)}] {el / (i + 1):.2f}s/window eta={(len(todo) - i - 1) * el / (i + 1) / 60:.1f}min", flush=True)
@@ -312,6 +357,82 @@ def run_from_hf(args, badas):
     print(f"[hf] done; max|p - recorded A1 p| = {worst:.4f} (tolerance 0.004)", flush=True)
 
 
+def run_from_hf_extras(args, badas, captured, store):
+    """Second pass over the window repo (plan 2026-10-13): per shard, encode again and push ONLY the extras next to the existing chunk:
+    <source>/<shard>.l11.npy (n,2048,1024) layer-11 tokens and <source>/<shard>.attn.npy (n,2048) crash-head attention received per
+    token, rows in the order of the chunk's <shard>.jsonl. The crash-model P must reproduce the recorded one (tolerance 0.004)."""
+    from huggingface_hub import HfApi, hf_hub_download
+    api, work = HfApi(), Path(args.out_dir)
+    assert args.push_repo, "--extras-only needs --push-repo (the features repo that already holds the chunks)"
+    remote = set(api.list_repo_files(args.push_repo, repo_type="dataset"))
+    rows = [json.loads(l) for l in open(hf_hub_download(args.from_hf, "windows.jsonl", repo_type="dataset", local_dir=str(work / "_hf")), encoding="utf-8")]
+    shards = sorted({r["shard"] for r in rows if r["split"] in args.splits})
+    t0, n_done, worst = time.time(), 0, 0.0
+    for si, shard in enumerate(shards):
+        if args.max_shards and si >= args.max_shards:
+            break
+        name = Path(shard).stem
+        if f"{args.source}/{name}.attn.npy" in remote:
+            print(f"  [skip] {name} extras already pushed", flush=True)
+            continue
+        ix = hf_hub_download(args.push_repo, f"{args.source}/{name}.jsonl", repo_type="dataset", local_dir=str(work / "_feat"))
+        meta = {r["id"]: r for r in map(json.loads, open(ix, encoding="utf-8"))}
+        sp = hf_hub_download(args.from_hf, shard, repo_type="dataset", local_dir=str(work / "_hf"))
+        l11 = np.lib.format.open_memmap(work / f"{name}.l11.npy", mode="w+", dtype=np.float16, shape=(len(meta), N_TOK, DIM))
+        att = np.zeros((len(meta), N_TOK), np.float16)
+        seen = 0
+        with tarfile.open(sp) as tf:
+            for m in tf:
+                wid = m.name[:-4]
+                if wid not in meta:
+                    continue
+                frames = np.load(io.BytesIO(tf.extractfile(m).read()))["frames"]
+                _, p, a11, a = encode_extras(badas, captured, store, preprocess_frames(badas.vjepa, list(frames)))
+                r = meta[wid]["row"]
+                l11[r], att[r] = a11, a
+                worst = max(worst, abs(p - meta[wid]["p_collision"]))
+                seen += 1
+        assert seen == len(meta), (name, seen, len(meta))
+        l11.flush()
+        del l11
+        np.save(work / f"{name}.attn.npy", att)
+        api.upload_file(path_or_fileobj=str(work / f"{name}.l11.npy"), path_in_repo=f"{args.source}/{name}.l11.npy", repo_id=args.push_repo, repo_type="dataset")
+        api.upload_file(path_or_fileobj=str(work / f"{name}.attn.npy"), path_in_repo=f"{args.source}/{name}.attn.npy", repo_id=args.push_repo, repo_type="dataset")
+        (work / f"{name}.l11.npy").unlink()
+        Path(sp).unlink(missing_ok=True)
+        n_done += seen
+        print(f"  [{si + 1}/{len(shards)}] {name}: {seen} windows, {(time.time() - t0) / n_done:.2f}s/window, max|p - chunk p| so far = {worst:.4f}", flush=True)
+    print(f"[extras] done; max|p - recorded p| = {worst:.4f} (tolerance 0.004)", flush=True)
+    assert worst <= 0.004, "crash-model P does not reproduce"
+
+
+def consolidate_extras(args):
+    """After consolidate(): merge the <shard>.l11.npy / .attn.npy chunks into features_<source>_l11.npy and attn_<source>.npy (rows as in index_<source>.jsonl)."""
+    from huggingface_hub import HfApi, hf_hub_download
+    out = Path(args.out_dir)
+    main_row = {r["id"]: r["row"] for r in map(json.loads, open(out / f"index_{args.source}.jsonl", encoding="utf-8"))}
+    names = sorted(Path(f).stem for f in HfApi().list_repo_files(args.consolidate_from, repo_type="dataset")
+                   if f.startswith(f"{args.source}/") and f.endswith(".jsonl"))
+    get = lambda f: hf_hub_download(args.consolidate_from, f, repo_type="dataset", local_dir=str(out / "_features_repo"))  # noqa: E731
+    fl, fa = out / f"features_{args.source}_l11.npy", out / f"attn_{args.source}.npy"
+    mm_l = np.lib.format.open_memmap(fl, mode="w+", dtype=np.float16, shape=(len(main_row), N_TOK, DIM))
+    mm_a = np.lib.format.open_memmap(fa, mode="w+", dtype=np.float16, shape=(len(main_row), N_TOK))
+    n = 0
+    for nm in names:
+        recs = [json.loads(l) for l in open(get(f"{args.source}/{nm}.jsonl"), encoding="utf-8")]
+        p11 = get(f"{args.source}/{nm}.l11.npy")
+        c11, ca = np.load(p11, mmap_mode="r"), np.load(get(f"{args.source}/{nm}.attn.npy"))
+        for r in recs:
+            mm_l[main_row[r["id"]]] = np.asarray(c11[r["row"]])
+            mm_a[main_row[r["id"]]] = ca[r["row"]]
+            n += 1
+        del c11
+        Path(p11).unlink(missing_ok=True)
+    mm_l.flush()
+    mm_a.flush()
+    print(f"[consolidate-extras] {args.source}: {n} windows -> {fl.name}, {fa.name}", flush=True)
+
+
 def consolidate(args):
     """Training pod: merge the <source>/*.npy|jsonl chunks of the features repo into the features_<source>.npy
     memmap + index_<source>.jsonl that r1_data.Cache reads. Chunks are fetched one at a time and deleted after
@@ -349,6 +470,9 @@ def main():
     ap.add_argument("--max-shards", type=int, default=0, help="with --from-hf: encode only the first N shards (smoke runs)")
     ap.add_argument("--push-repo", default=None, help="with --from-hf: upload each encoded chunk here, then delete it locally")
     ap.add_argument("--consolidate-from", default=None, help="merge the chunks of this HF features repo into features_<source>.npy")
+    ap.add_argument("--extras", action="store_true", help="local run: also store layer-11 tokens and crash-head attention (features_<source>_l11.npy, attn_<source>.npy)")
+    ap.add_argument("--extras-only", action="store_true", help="with --from-hf --push-repo: second pass that pushes only the layer-11 / attention chunks")
+    ap.add_argument("--with-extras", action="store_true", help="with --consolidate-from: also merge the layer-11 / attention chunks")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--splits", default="train,val")
     ap.add_argument("--limit", type=int, default=0, help="encode at most N windows (dry runs)")
@@ -360,10 +484,19 @@ def main():
     args = ap.parse_args()
     args.splits = set(args.splits.split(","))
     if args.consolidate_from:
-        return consolidate(args)
+        consolidate(args)
+        if args.with_extras:
+            consolidate_extras(args)
+        return
+    if args.extras_only:
+        badas, captured, store = load_model_extras()
+        return run_from_hf_extras(args, badas, captured, store)
     if args.source == "dada" and not (args.parts_dir or args.url_parts or args.from_hf):
         ap.error("dada needs --from-hf, --parts-dir or --url-parts")
-    badas = load_model()
+    if args.extras:
+        badas, args.captured, args.store = load_model_extras()
+    else:
+        badas = load_model()
     if args.from_hf:
         return run_from_hf(args, badas)
     (run_nexar if args.source.startswith("nexar") else run_dada)(args, badas)

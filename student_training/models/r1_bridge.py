@@ -24,6 +24,8 @@ TOK_PER_STEP = (GRID // MERGE) ** 2    # 64 merged tokens per time step
 N_VIS = N_T * TOK_PER_STEP             # 512
 WIN_FPS = 7.5                          # 16 frames over 2 s (every 4th frame of 30 fps)
 IGNORE = -100
+# merger input types (plan 2026-10-13): name -> (layers fed [1 = last only, 2 = layer 11 + last], attention channel appended)
+INPUTS = {"last": (1, False), "last+attn": (1, True), "l11+last": (2, False), "l11+last+attn": (2, True)}
 
 
 def regroup_2x2(x: torch.Tensor) -> torch.Tensor:
@@ -41,17 +43,33 @@ class Merger(nn.Module):
     """Same structure as Qwen3VLVisionPatchMerger (use_postshuffle_norm=False):
     LayerNorm(1024) on each token -> concat a 2x2 block (4096) -> Linear -> GELU -> Linear(2560)."""
 
-    def __init__(self, in_dim: int = 1024, out_dim: int = 2560):
+    def __init__(self, in_dim: int = 1024, out_dim: int = 2560, n_layers: int = 1, attn: bool = False):
         super().__init__()
+        self.in_dim, self.n_layers, self.attn = in_dim, n_layers, attn
         self.hidden = in_dim * MERGE * MERGE
-        self.norm = nn.LayerNorm(in_dim, eps=1e-6)
+        self.norm = nn.LayerNorm(in_dim, eps=1e-6)                     # the last-layer tokens (the only input of the original model)
+        if n_layers == 2 or attn:                                      # richer input (plan 2026-10-13): fuse per token back to in_dim
+            self.norm_l11 = nn.LayerNorm(in_dim, eps=1e-6) if n_layers == 2 else None
+            self.fuse = nn.Linear(n_layers * in_dim + int(attn), in_dim)
         self.linear_fc1 = nn.Linear(self.hidden, self.hidden)
         self.act_fn = nn.GELU()
         self.linear_fc2 = nn.Linear(self.hidden, out_dim)
 
-    def forward(self, feats: torch.Tensor) -> torch.Tensor:        # (B, 2048, 1024) -> (B, 512, out)
-        x = regroup_2x2(self.norm(feats.float()))
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+    def forward(self, feats: torch.Tensor) -> torch.Tensor:        # (B, 2048, C) -> (B, 512, out)
+        """C = n_layers * 1024 (+1 attention channel). Channel order: [layer-11 tokens], last-layer tokens, [attention]."""
+        feats = feats.float()
+        d = self.in_dim
+        if self.n_layers == 1 and not self.attn:                    # original model, unchanged parameters and numbers
+            return self.linear_fc2(self.act_fn(self.linear_fc1(regroup_2x2(self.norm(feats)))))
+        parts, k = [], 0
+        if self.n_layers == 2:
+            parts.append(self.norm_l11(feats[..., :d]))
+            k = d
+        parts.append(self.norm(feats[..., k:k + d]))
+        if self.attn:
+            parts.append(feats[..., k + d:k + d + 1])
+        x = self.fuse(torch.cat(parts, -1))
+        return self.linear_fc2(self.act_fn(self.linear_fc1(regroup_2x2(x))))
 
     def load_from_qwen(self, qwen_merger: nn.Module):
         """Optional init: copy Qwen3-VL's pretrained merger weights (they translate Qwen-ViT features,
@@ -109,12 +127,14 @@ class PromptBuilder:
 class R1Bridge(nn.Module):
     """Frozen Qwen3-VL language model + trainable Merger (+ optional LoRA on the LM)."""
 
-    def __init__(self, qwen, tokenizer, init: str = "random", in_dim: int = 1024):
+    def __init__(self, qwen, tokenizer, init: str = "random", in_dim: int = 1024, inp: str = "last"):
         super().__init__()
         self.qwen = qwen
         self.model = qwen.model
         out_dim = qwen.config.text_config.hidden_size
-        self.merger = Merger(in_dim, out_dim)
+        n_layers, attn = INPUTS[inp]
+        self.inp = inp
+        self.merger = Merger(in_dim, out_dim, n_layers, attn)
         if init == "qwen":
             self.merger.load_from_qwen(self.model.visual.merger)
         elif init != "random":
