@@ -226,19 +226,21 @@
     <h3 class="subh">Every validation window</h3>
     <p class="lede small">Scores are P(yes) = sigmoid of the log-odds, green when the call at its threshold (crash model 0.5, S 0.5) matches the visible-hazard label.
        “Paths disagree” = the crash model and S_after give different yes/no. “Generic explanation” = the same model explanation is written for 10 or more windows.
-       Click a frame sheet or ＋ to enlarge.</p>
+       Click a frame sheet or ＋ to enlarge. Click a column header to sort (again to reverse); the search box matches the window id and the teacher and model text.</p>
     <div class="cmp-toolbar" id="r2Flags">
       <select id="r2Group" class="hvsel"></select>
       <button class="pill" data-flag="disagree">Paths disagree</button>
       <button class="pill" data-flag="reason_wrong">Reasoning wrong</button>
       <button class="pill" data-flag="crash_wrong">Crash model wrong</button>
       <button class="pill" data-flag="generic">Generic explanation</button>
+      <input type="search" id="r2Search" class="hvsel r2search" placeholder="search id or text" aria-label="search id or text" autocomplete="off">
       <button class="pill clearbtn" id="r2Clear">Clear filters</button>
       <span class="rowcount" id="r2Count"></span>
     </div>
     <div class="cmp-toolbar" id="r2Pager"></div>
-    <div class="table-wrap cmp-scroll pilot-scroll">
-      <table class="cmp-table pilot-table">
+    <div class="r2win-wrap">
+      <table class="r2win">
+        <colgroup><col class="c-thumb"><col class="c-id"><col class="c-grp"><col class="c-lab"><col class="c-p"><col class="c-p"><col class="c-p"><col class="c-ver"><col class="c-txt"></colgroup>
         <thead id="r2Head"></thead>
         <tbody id="r2Body"></tbody>
       </table>

@@ -16,7 +16,8 @@ function createR2View(deps){
   const sgn = v => (v > 0 ? "+" : "") + v.toFixed(3);
   const ci = c => `[${sgn(c[0])}, ${sgn(c[1])}]`;
   const GROUP_LABEL = Object.fromEntries(D.groups.map(g => [g.key, g.label]));
-  const state = {run: D.runs[0].key, group: "", flags: {disagree: false, reason_wrong: false, crash_wrong: false, generic: false}, page: 0};
+  const state = {run: D.runs[0].key, group: "", flags: {disagree: false, reason_wrong: false, crash_wrong: false, generic: false}, page: 0,
+                 q: "", sort: {key: null, dir: 1}};
   let built = false, R = D.runs[0], ROWS = [];
   const rowCache = {};
   // shared window fields + the run's own columns
@@ -108,8 +109,28 @@ function createR2View(deps){
   }
 
   /* ----------------------------------------------------------- per-window table */
-  const passes = r => (!state.group || r.group === state.group) && Object.keys(state.flags).every(k => !state.flags[k] || r[k]);
-  const visible = () => ROWS.filter(passes);
+  // search text: window id + teacher and model text, lower-cased once per row
+  const hay = r => r._hay || (r._hay = [r.key, r.t_expl, r.t_out, r.m_expl, r.m_out].join(" ").toLowerCase());
+  const passes = r => (!state.group || r.group === state.group) && Object.keys(state.flags).every(k => !state.flags[k] || r[k])
+    && (!state.q || hay(r).includes(state.q));
+  // sortable columns: [state key, header, tooltip, value getter, numeric?]
+  const COLS = {
+    key: r => r.key, group: r => GROUP_LABEL[r.group] || r.group, label: r => r.label,
+    crash_p: r => r.crash_p, p_before: r => r.p_before, p_after: r => r.p_after, verdict: r => r.verdict,
+  };
+  const NUMERIC = {label: 1, crash_p: 1, p_before: 1, p_after: 1};
+  // filter, then sort the filtered set (stable: ties keep the original window order); the pager slices the result
+  function visible(){
+    const rows = ROWS.filter(passes), k = state.sort.key;
+    if (!k) return rows;
+    const get = COLS[k], d = state.sort.dir, num = !!NUMERIC[k];
+    return rows.map((r, i) => [r, i, get(r)]).sort((a, b) => {
+      const x = a[2], y = b[2], nx = x === null || x === undefined, ny = y === null || y === undefined;
+      if (nx || ny) return nx === ny ? a[1] - b[1] : (nx ? 1 : -1);   // missing values last in both directions
+      const c = num ? x - y : String(x).localeCompare(String(y), undefined, {numeric: true, sensitivity: "base"});
+      return c ? c * d : a[1] - b[1];
+    }).map(t => t[0]);
+  }
   const ok = (r, yes) => (yes === (r.label === 1));
   const pBadge = (p, yes) => `<span class="pv ${yes ? "ok" : "no"}" title="${yes ? "matches" : "differs from"} the visible-hazard label">${p.toFixed(2)}</span>`;
   const answer = (expl, out) => `<div class="ptext">${esc(expl)}</div><div class="ppred" title="the one-sentence outcome">→ ${esc(out)}</div>`;
@@ -122,17 +143,27 @@ function createR2View(deps){
       ? `<span class="chip ${r.label === 1 ? "pos" : "neg"}">${r.label}</span>`
       : `<span class="chip pos" title="Nexar label ${r.label_nexar}, visible-hazard label ${r.label}">${r.label_nexar} → ${r.label}</span><div class="dim hvhint">pre-alert</div>`;
     const w = r.verdict === "yes";
-    return `<tr><td>${g}</td><td>${esc(r.key)}</td><td>${esc(GROUP_LABEL[r.group] || r.group)}</td><td>${lab}</td>
+    return `<tr><td>${g}</td><td class="r2id">${esc(r.key)}</td><td>${esc(GROUP_LABEL[r.group] || r.group)}</td><td>${lab}</td>
       <td class="num">${pBadge(r.crash_p, r.crash_p >= 0.5)}</td><td class="num">${pBadge(r.p_before, r.p_before >= 0.5)}</td><td class="num">${pBadge(r.p_after, r.p_after >= 0.5)}</td>
       <td><span class="pv ${ok(r, w) ? "ok" : "no"}" title="the written Collision: line; it equals the S_after decision">${r.verdict} ${ok(r, w) ? "✓" : "✗"}</span>${r.generic ? ' <span class="pflip" title="the same explanation is written for ' + D.generic_min + ' or more windows">generic</span>' : ""}</td>
-      <td class="reason">${answer(r.t_expl, r.t_out)}</td><td class="reason">${answer(r.m_expl, r.m_out)}</td></tr>`;
+      <td class="r2txt"><div class="r2blk"><span class="r2lab">Teacher</span>${answer(r.t_expl, r.t_out)}</div>
+        <div class="r2blk model"><span class="r2lab">Model</span>${answer(r.m_expl, r.m_out)}</div></td></tr>`;
   }
 
   function renderHead(){
-    $("r2Head").innerHTML = `<tr><th>Frames 4×4 (red box)</th><th>Window</th><th>Group</th><th title="visible-hazard label (Nexar label → label when they differ)">Label</th>
-      <th title="crash model probability of a collision">crash model P</th><th title="P(yes) = sigmoid(S_before): decision with the reasoning cut out">P(yes) S_before</th>
-      <th title="P(yes) = sigmoid(S_after): decision after the model's own reasoning">P(yes) S_after</th><th title="the model's written Collision: answer">Written verdict</th>
-      <th>Teacher: explanation → outcome</th><th>Model: explanation → outcome</th></tr>`;
+    // [sort key | null, text, tooltip]
+    const H = [[null, "Frames 4×4 (red box)", ""], ["key", "Window", "window id"], ["group", "Group", ""],
+      ["label", "Label", "visible-hazard label (Nexar label → label when they differ)"],
+      ["crash_p", "Crash P", "crash model probability of a collision"],
+      ["p_before", "P before", "P(yes) = sigmoid(S_before): decision with the reasoning cut out"],
+      ["p_after", "P after", "P(yes) = sigmoid(S_after): decision after the model's own reasoning"],
+      ["verdict", "Written verdict", "the model's written Collision: answer"],
+      [null, "Teacher / model: explanation → outcome", ""]];
+    $("r2Head").innerHTML = "<tr>" + H.map(([k, t, tip]) => {
+      if (!k) return `<th>${t}</th>`;
+      const on = state.sort.key === k, cls = on ? (state.sort.dir > 0 ? "sort-asc" : "sort-desc") : "";
+      return `<th class="sortable ${cls}" data-sort="${k}" title="${esc(tip ? tip + " - " : "")}click to sort" aria-sort="${on ? (state.sort.dir > 0 ? "ascending" : "descending") : "none"}">${t}<span class="caret">${on ? (state.sort.dir > 0 ? "▲" : "▼") : "⇅"}</span></th>`;
+    }).join("") + "</tr>";
   }
 
   function renderBody(keepPage){
@@ -227,11 +258,19 @@ function createR2View(deps){
       b.addEventListener("click", () => { state.flags[b.dataset.flag] = !state.flags[b.dataset.flag]; b.classList.toggle("active", state.flags[b.dataset.flag]); renderBody(); });
     });
     $("r2Clear").addEventListener("click", () => {
-      state.group = ""; $("r2Group").value = "";
+      state.group = ""; $("r2Group").value = ""; state.q = ""; $("r2Search").value = "";
       Object.keys(state.flags).forEach(k => state.flags[k] = false);
       document.querySelectorAll("#r2Flags [data-flag]").forEach(b => b.classList.remove("active"));
       renderBody();
     });
+    $("r2Head").addEventListener("click", e => {
+      const th = e.target.closest("th[data-sort]");
+      if (!th) return;
+      const k = th.dataset.sort;
+      state.sort = state.sort.key === k ? {key: k, dir: -state.sort.dir} : {key: k, dir: 1};   // 1st click ascending, 2nd descending
+      renderHead(); renderBody();
+    });
+    $("r2Search").addEventListener("input", e => { state.q = e.target.value.trim().toLowerCase(); renderBody(); });
     $("r2Body").addEventListener("click", e => {
       const el = e.target.closest("[data-key]");
       if (el && (el.classList.contains("pplus") || el.classList.contains("pgrid") || e.target.tagName === "IMG")) openGrid(el.dataset.key);

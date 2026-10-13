@@ -471,3 +471,40 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 .gridbox{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;width:min(1920px,96vw);max-height:94vh;
          overflow:auto;box-shadow:0 30px 90px rgba(0,0,0,.6)}
 .gridbox img{display:block;width:100%;height:auto}
+
+/* ---- Reasoning model view (experiments.html #r2): everything fits a 1280px window without page-level horizontal scroll ---- */
+#viewR2 .cmp-toolbar{flex-wrap:wrap;gap:10px 12px}
+#viewR2 .r2search{width:190px;padding:7px 10px;font-family:var(--mono);font-size:13px}
+#viewR2 .r2search:focus{outline:none;border-color:var(--cyan)}
+/* numeric tables: compact, wrapping headers; a table that still cannot fit scrolls inside its own wrapper (inline overflow-x:auto) */
+#viewR2 table.mini{min-width:0}
+#viewR2 table.mini th{font-size:10.5px;letter-spacing:.04em;white-space:normal;padding:8px 6px;line-height:1.3;vertical-align:bottom}
+#viewR2 table.mini td{font-size:13px;padding:8px 6px}
+#viewR2 table.mini td.hpdesc{min-width:0 !important;max-width:none;font-size:12px}
+#viewR2 table.mini td .dim{display:block;font-size:11.5px}
+#viewR2 .pilot-runs{max-width:100%}
+/* the 612-window table: fixed layout, explicit column widths, text stacked in one cell */
+#viewR2 .r2win-wrap{margin:0 -3vw;border:1px solid #2a3560;border-radius:12px;max-height:min(760px,82vh);overflow:auto;max-width:100vw}
+#viewR2 table.r2win{table-layout:fixed;width:100%;min-width:0;border-collapse:separate;border-spacing:0}
+#viewR2 .r2win col.c-thumb{width:122px}
+#viewR2 .r2win col.c-id{width:92px}
+#viewR2 .r2win col.c-grp{width:96px}
+#viewR2 .r2win col.c-lab{width:62px}
+#viewR2 .r2win col.c-p{width:64px}
+#viewR2 .r2win col.c-ver{width:86px}
+#viewR2 .r2win thead th{position:sticky;top:0;z-index:3;font-size:10.5px;letter-spacing:.04em;white-space:normal;padding:8px 6px;
+                        line-height:1.3;vertical-align:bottom;border-bottom:1px solid #2a3560}
+#viewR2 .r2win thead th.sortable{cursor:pointer;user-select:none}
+#viewR2 .r2win thead th .caret{margin-left:3px;font-size:9px}
+#viewR2 .r2win tbody td{padding:8px 6px;font-size:13px;vertical-align:top;overflow-wrap:anywhere}
+#viewR2 .r2win td.r2id{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:var(--muted)}
+#viewR2 .r2win td.num{text-align:center}
+#viewR2 .r2win .pgrid{width:110px}
+#viewR2 .r2win .pplus{width:22px;height:22px;font-size:14px;top:3px;right:3px}
+#viewR2 .r2win .pv{padding:3px 7px;font-size:12px}
+#viewR2 .r2win .pflip{display:block;margin:3px 0 0}
+#viewR2 .r2win .ptext{font-size:13px;line-height:1.42}
+#viewR2 .r2win .ppred{margin-top:4px;font-size:12.5px;line-height:1.4}
+#viewR2 .r2win .r2blk + .r2blk{margin-top:9px;padding-top:8px;border-top:1px dashed #2a3560}
+#viewR2 .r2win .r2lab{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+#viewR2 .r2win .r2blk.model .r2lab{color:var(--cyan)}
