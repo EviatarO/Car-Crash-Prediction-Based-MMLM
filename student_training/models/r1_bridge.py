@@ -51,6 +51,13 @@ class Merger(nn.Module):
         if n_layers == 2 or attn:                                      # richer input (plan 2026-10-13): fuse per token back to in_dim
             self.norm_l11 = nn.LayerNorm(in_dim, eps=1e-6) if n_layers == 2 else None
             self.fuse = nn.Linear(n_layers * in_dim + int(attn), in_dim)
+            # start as "pass the last layer through unchanged, ignore the extras": identity on the last-layer block, zero elsewhere.
+            # The model then starts exactly as the original merger and uses layer 11 / attention only if training finds them useful.
+            with torch.no_grad():
+                self.fuse.weight.zero_()
+                self.fuse.bias.zero_()
+                k = in_dim if n_layers == 2 else 0
+                self.fuse.weight[:, k:k + in_dim] = torch.eye(in_dim)
         self.linear_fc1 = nn.Linear(self.hidden, self.hidden)
         self.act_fn = nn.GELU()
         self.linear_fc2 = nn.Linear(self.hidden, out_dim)

@@ -126,11 +126,28 @@ def main():
     base = Merger(1024, 64)
     assert set(base.state_dict()) == {"norm.weight", "norm.bias", "linear_fc1.weight", "linear_fc1.bias", "linear_fc2.weight", "linear_fc2.bias"}
     m2 = Merger(1024, 64, 1, True)
+    with torch.no_grad():
+        m2.fuse.weight[:, 1024] = 0.5                     # identity start ignores the attention channel; check that the channel is wired
     x = torch.randn(1, 2048, 1025)
     x2 = x.clone()
     x2[..., 1024] += 3.0
     assert not torch.allclose(m2(x), m2(x2)), "attention channel has no effect"
-    print("6 ok: merger shapes for", list(INPUTS), "; original parameters unchanged; attention channel acts")
+    # identity start: with the same norm / fc weights, every extended merger equals the original one on the last-layer part
+    torch.manual_seed(1)
+    ref = Merger(1024, 64)
+    xl = torch.randn(2, 2048, 1024)
+    for name, (nl, at) in INPUTS.items():
+        if name == "last":
+            continue
+        m = Merger(1024, 64, nl, at)
+        m.load_state_dict({**m.state_dict(), **ref.state_dict()})
+        extra_l11 = torch.randn(2, 2048, 1024) if nl == 2 else None
+        parts = ([extra_l11] if nl == 2 else []) + [xl] + ([torch.rand(2, 2048, 1)] if at else [])
+        assert torch.allclose(m(torch.cat(parts, -1)), ref(xl), atol=1e-5), name
+        w = m.fuse.weight
+        k = 1024 if nl == 2 else 0
+        assert torch.equal(w[:, k:k + 1024], torch.eye(1024)) and float(w.abs().sum()) == 1024.0
+    print("6 ok: merger shapes for", list(INPUTS), "; original parameters unchanged; attention channel acts; extended mergers start identical to the original")
 
     # 7 ---- Cache returns the right channel layout for each input
     with tempfile.TemporaryDirectory() as td:
