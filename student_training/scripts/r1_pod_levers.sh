@@ -5,7 +5,7 @@
 #   B4  : input 'last+attn'      + the crash head's attention per token
 #   B5  : input 'l11+last'       + layer-11 tokens
 #   B45 : input 'l11+last+attn'  both
-# Each run = Phase 1 (projector only, <= 2 epochs) -> Phase 2 (projector + LoRA, <= 5 epochs), best = lowest validation loss, stop at the first epoch
+# Each run = Phase 1 (projector only, <= 4 epochs, early stop) -> Phase 2 (projector + LoRA, <= 5 epochs), best = lowest validation loss, stop at the first epoch
 # without improvement; then r1_eval_reasoning (train-chosen threshold). Pairs run two at a time on the one GPU (about 10 GB each).
 #   setsid nohup bash r1_pod_levers.sh > /root/r1_week1/logs/levers.nohup 2>&1 < /dev/null &      status: $OUT/logs/levers.status
 set -u
@@ -47,7 +47,7 @@ $PY -u r1_fact_probe.py --cache-dir $CACHE --out-dir $OUT/probe --inputs last,l1
 # 2 ---- the four runs, two at a time
 run() {   # run NAME INPUT
   N=$1; I=$2
-  $PY -u r1_train.py --phase 1 --sources nexar_reasoning --input $I --cache-dir $CACHE --out-dir $OUT/$N/p1 --init random --epochs 2 --patience 1 \
+  $PY -u r1_train.py --phase 1 --sources nexar_reasoning --input $I --cache-dir $CACHE --out-dir $OUT/$N/p1 --init random --epochs 4 --patience 1 \
       --select val_loss --eff-bs 16 --micro-bs 4 --lr-merger 1e-3 --grad-ckpt > $OUT/logs/${N}_p1.log 2>&1 || return 1
   $PY -u r1_train.py --phase 2 --sources nexar_reasoning --input $I --cache-dir $CACHE --out-dir $OUT/$N/p2 --init-from $OUT/$N/p1/best.pt --epochs 5 --patience 1 \
       --select val_loss --eff-bs 16 --micro-bs 4 --lr-merger 2e-5 --lr-lora 2e-4 --grad-ckpt > $OUT/logs/${N}_p2.log 2>&1 || return 1
