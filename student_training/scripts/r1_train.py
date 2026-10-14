@@ -125,7 +125,7 @@ def main():
                     help="merger input (plan 2026-10-13): last-layer tokens (original), + crash-head attention channel, + layer-11 tokens")
     ap.add_argument("--aug-texts", default=None, help="paraphrases.jsonl: rephrased text versions of the training windows (plan 2026-10-14)")
     ap.add_argument("--aug-shifts", action="store_true", help="also draw frame-shifted copies of each training window (source nexar_reasoning_shifted in the cache)")
-    ap.add_argument("--val-texts", default=None, help="enlarged validation with these rephrased texts (default: --aug-texts); lets a control run be judged on the same pairs")
+    ap.add_argument("--val-texts", default=None, help="enlarged validation with these rephrased texts (default: --aug-texts; 'none' = teacher's texts only); lets a control run be judged on the same pairs")
     ap.add_argument("--val-shifts", action="store_true", help="enlarged validation with the shifted windows (default: --aug-shifts)")
     ap.add_argument("--p-teacher", type=float, default=0.4, help="probability that the teacher's own text is drawn when --aug-texts is on")
     ap.add_argument("--box-hint", action="store_true", help="option 3: append the position of the attended road user to the prompt")
@@ -161,7 +161,8 @@ def main():
     if reasoning:
         train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)
         val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)}
-        v_texts, v_shifts = args.val_texts or args.aug_texts, args.val_shifts or args.aug_shifts
+        v_texts = None if args.val_texts == "none" else (args.val_texts or args.aug_texts)   # "none": validate on the teacher's texts only
+        v_shifts = args.val_shifts or args.aug_shifts
         if args.aug_texts or args.aug_shifts or v_texts or v_shifts:    # augmentation: one random (window version, text version) per original window per epoch
             n0, v0 = len(train), len(val["nexar_reasoning"])
             if args.aug_texts or args.aug_shifts:

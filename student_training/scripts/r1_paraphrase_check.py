@@ -46,7 +46,7 @@ RISKY = {  # word -> group; a version may use a word of a group only if the orig
                                    "van": ("van", "minivan"), "pickup": ("pickup",), "suv": ("suv", "crossover", "jeep"), "animal": ("dog", "deer", "animal")}.items() for w in ws},
     **{w: "place:" + g for g, ws in {"intersection": ("intersection", "junction", "crossroads"), "crosswalk": ("crosswalk", "crossing"),
                                      "highway": ("highway", "freeway", "motorway", "interstate"), "parking": ("parking", "lot", "garage"),
-                                     "roundabout": ("roundabout",), "bridge": ("bridge",), "tunnel": ("tunnel",), "light": ("traffic", "signal"),
+                                     "roundabout": ("roundabout",), "bridge": ("bridge",), "tunnel": ("tunnel",), "light": ("signal", "signals", "stoplight"),
                                      "rain": ("rain", "wet", "snow"), "night": ("night", "dark", "nighttime")}.items() for w in ws},
 }
 
@@ -56,6 +56,7 @@ def words(t):
 
 
 def risky_groups(t):
+    t = re.sub(r"sport[- ]utility vehicles?", "suv", (t or "").lower())             # same class, different spelling
     return {RISKY[w] for w in words(t) if w in RISKY}
 
 
@@ -73,13 +74,16 @@ def export(batch):
     print(f"[export] {len(out)} windows -> {len(range(0, len(out), batch))} batches in {BATCHES}")
 
 
+EGO = r"\bego(?:'s)? (?:vehicle|car)\b|\bthe vehicle\b"
+
+
 def type_set(t):
-    t = re.sub(r"\bego vehicle\b|\bthe vehicle\b", " ", (t or "").lower())
+    t = re.sub(EGO, " ", (t or "").lower())
     return {n for n, p in TYPES if re.search(p, t)}
 
 
 def side_set(t):
-    t = re.sub(r"\bego vehicle\b|\bthe vehicle\b", " ", (t or "").lower())
+    t = re.sub(EGO, " ", (t or "").lower())
     return {n for n, p in (("left", LEFT), ("right", RIGHT), ("ahead", AHEAD_STRONG)) if re.search(p, t)}
 
 
@@ -129,8 +133,9 @@ def check_version(orig_e, orig_o, e, o, verdict=None):
 
 def check():
     orig = {json.loads(l)["id"]: json.loads(l) for p in sorted(BATCHES.glob("batch_*.jsonl")) for l in open(p, encoding="utf-8")}
-    acc, rej, flg, seen = [], [], [], set()
-    for p in sorted(OUTS.glob("batch_*.jsonl")):
+    acc, rej, flg = [], [], []
+    vers = {}                                                          # id -> every version written for it, in file order (Claude batches, Gemini, rewrites)
+    for p in sorted(OUTS.glob("batch_*.jsonl")) + sorted(OUTS.glob("gem*.jsonl")):
         for l in open(p, encoding="utf-8"):
             if not l.strip():
                 continue
@@ -138,12 +143,14 @@ def check():
                 x = json.loads(l)
             except json.JSONDecodeError:                               # a partial / marker line from an interrupted writer
                 continue
-            o = orig.get(x["id"])
-            if o is None or x["id"] in seen:
-                continue
-            seen.add(x["id"])
+            if x.get("id") in orig:
+                vers.setdefault(x["id"], []).extend(v for v in x.get("versions", []) if isinstance(v, dict))
+    seen = set(vers)
+    for xid, vs in vers.items():
+        o, x = orig[xid], {"id": xid}
+        if True:
             kept = []
-            for k, v in enumerate(x.get("versions", []), 1):
+            for k, v in enumerate(vs, 1):
                 e, oc = v.get("explanation", "").strip(), v.get("outcome", "").strip()
                 bad, flags = check_version(o["explanation"], o["outcome"], e, oc, o.get("verdict"))
                 if not bad and any(token_f1(e, z["explanation"]) >= 0.85 for z in kept):
