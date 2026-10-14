@@ -34,7 +34,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "models"))
 from r1_bridge import R1Bridge  # noqa: E402
-from r1_data import Cache, epoch_items, feats_for, load_items, make_batch, other_index  # noqa: E402
+from r1_data import Cache, attach_aug, epoch_items, feats_for, load_items, load_texts, make_batch, other_index, val_pairs  # noqa: E402
 
 QWEN_ID = "Qwen/Qwen3-VL-4B-Instruct"
 TOK_DIR = ROOT / "dataset" / "public_samples" / "qwen3vl_cfg"
@@ -123,6 +123,11 @@ def main():
                     help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first")
     ap.add_argument("--input", default="last", choices=["last", "last+attn", "l11+last", "l11+last+attn"],
                     help="merger input (plan 2026-10-13): last-layer tokens (original), + crash-head attention channel, + layer-11 tokens")
+    ap.add_argument("--aug-texts", default=None, help="paraphrases.jsonl: rephrased text versions of the training windows (plan 2026-10-14)")
+    ap.add_argument("--aug-shifts", action="store_true", help="also draw frame-shifted copies of each training window (source nexar_reasoning_shifted in the cache)")
+    ap.add_argument("--val-texts", default=None, help="enlarged validation with these rephrased texts (default: --aug-texts); lets a control run be judged on the same pairs")
+    ap.add_argument("--val-shifts", action="store_true", help="enlarged validation with the shifted windows (default: --aug-shifts)")
+    ap.add_argument("--p-teacher", type=float, default=0.4, help="probability that the teacher's own text is drawn when --aug-texts is on")
     ap.add_argument("--box-hint", action="store_true", help="option 3: append the position of the attended road user to the prompt")
     ap.add_argument("--template-cap", type=int, default=0,
                     help="option 2: training windows whose explanation opening (first 9 words) occurs more than N times are kept with prob N/count per epoch")
@@ -150,10 +155,23 @@ def main():
 
     srcs = args.sources.split(",")
     caches = {s: Cache(args.cache_dir, s, args.input) for s in srcs}
+    if args.aug_shifts or args.val_shifts:
+        caches["nexar_reasoning_shifted"] = Cache(args.cache_dir, "nexar_reasoning_shifted", args.input)
     reasoning = srcs == ["nexar_reasoning"]
     if reasoning:
         train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)
         val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)}
+        v_texts, v_shifts = args.val_texts or args.aug_texts, args.val_shifts or args.aug_shifts
+        if args.aug_texts or args.aug_shifts or v_texts or v_shifts:    # augmentation: one random (window version, text version) per original window per epoch
+            n0, v0 = len(train), len(val["nexar_reasoning"])
+            if args.aug_texts or args.aug_shifts:
+                sh_tr = load_items("nexar_reasoning_shifted", 2, "train", caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint) if args.aug_shifts else []
+                attach_aug(train, sh_tr, load_texts(args.aug_texts) if args.aug_texts else {}, args.p_teacher)
+            if v_texts or v_shifts:                                   # validation = the deterministic enlarged pairs (the same for the control run)
+                sh_va = load_items("nexar_reasoning_shifted", 2, args.val_split, caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint) if v_shifts else []
+                val["nexar_reasoning"] = val_pairs(val["nexar_reasoning"], sh_va, load_texts(v_texts) if v_texts else {})
+            print(f"[aug] train originals {n0}: {sum(len(i.get('variants', [0])) for i in train)} window versions, "
+                  f"{sum(len(i.get('texts', [])) + 1 for i in train)} text versions; validation {v0} -> {len(val['nexar_reasoning'])} pairs")
         if args.template_cap:
             from collections import Counter
             op = lambda it: " ".join(it["gt"]["explanation"].lower().split()[:9])  # noqa: E731

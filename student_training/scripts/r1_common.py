@@ -85,6 +85,7 @@ def parse_phase2(text: str) -> dict:
 # Run 2 ("verdict_first") puts the verdict line first. The prompt announces the fields in the same order. The decision score is
 # read at the label "Collision:" (see r1_reasoning.py); nothing in the prompt asks for it.
 TAG["nexar_reasoning"] = "[Nexar]"
+TAG["nexar_reasoning_shifted"] = "[Nexar]"
 _FIELDS = {"reason_first": ("Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
                             "Collision: yes or no.\nOutcome: one short sentence."),
            "verdict_first": ("Collision: yes or no.\n"

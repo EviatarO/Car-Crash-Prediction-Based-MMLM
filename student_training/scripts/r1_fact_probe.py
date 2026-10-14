@@ -36,6 +36,31 @@ from r1_fact_eval import FACTS, facts  # noqa: E402
 MANIFEST = ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"
 
 
+def pooled_projector(cache_dir, source, ckpt, ids, rows, out, tag, dev):
+    """Probe the PROJECTOR OUTPUT (what Qwen receives): merger(last-layer tokens) = (512, 2560) -> mean over time, 8x8 grid pooled to 4x4 -> 16 x 2560."""
+    import sys as _sys
+    _sys.path.insert(0, str(HERE.parent / "models"))
+    from r1_bridge import Merger
+    f = Path(out) / f"pooled_proj_{tag}.npy"
+    if f.exists():
+        return np.load(f)
+    m = Merger(1024, 2560).to(dev).eval()
+    m.load_state_dict(torch.load(ckpt, map_location="cpu")["merger"])
+    last = np.load(Path(cache_dir) / f"features_{source}.npy", mmap_mode="r")
+    res = []
+    with torch.no_grad():
+        for k in range(0, len(ids), 8):
+            x = torch.from_numpy(np.stack([np.asarray(last[rows[i]]) for i in ids[k:k + 8]])).float().to(dev)
+            y = m(x).view(-1, 8, 8, 8, 2560).mean(1)                                  # (B, 8, 8, 2560) after the time mean
+            y = y.view(-1, 4, 2, 4, 2, 2560).mean((2, 4)).reshape(y.shape[0], -1)        # (B, 4*4*2560)
+            res.append(y.cpu().numpy().astype(np.float32))
+            if (k // 8 + 1) % 100 == 0:
+                print(f"  [pool proj {tag}] {k + 8}/{len(ids)}", flush=True)
+    arr = np.concatenate(res)
+    np.save(f, arr)
+    return arr
+
+
 def pooled(cache_dir, source, kind, ids, rows, out):
     f = Path(out) / f"pooled_{kind}.npy"
     if f.exists():
@@ -106,6 +131,8 @@ def main():
     ap.add_argument("--source", default="nexar_reasoning")
     ap.add_argument("--inputs", default="last")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--projector-ckpt", default=None, help="probe the output of this projector checkpoint (best.pt with a 'merger' entry) instead of the encoder tokens")
+    ap.add_argument("--proj-tag", default="proj")
     ap.add_argument("--runs", nargs="*", default=[], help="name=predictions.jsonl of the language-model runs, for the side-by-side with their text agreement")
     args = ap.parse_args()
     out = Path(args.out_dir)
@@ -126,8 +153,10 @@ def main():
             nm, pth = spec.split("=", 1)
             lm_agree[nm] = agreement([json.loads(l) for l in open(pth, encoding="utf-8")])["overall"]
     result = {}
-    for kind in args.inputs.split(","):
-        X = torch.from_numpy(pooled(args.cache_dir, args.source, kind, ids, rows, out))
+    kinds = ["proj"] if args.projector_ckpt else args.inputs.split(",")
+    for kind in kinds:
+        X = torch.from_numpy(pooled_projector(args.cache_dir, args.source, args.projector_ckpt, ids, rows, out, args.proj_tag, dev) if kind == "proj"
+                             else pooled(args.cache_dir, args.source, kind, ids, rows, out))
         result[kind] = {}
         for fact in FACTS:
             known = [i for i in ids if lab[i][fact] is not None]

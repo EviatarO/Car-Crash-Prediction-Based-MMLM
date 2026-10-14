@@ -38,7 +38,9 @@ from r1_common import window_indices  # noqa: E402
 
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
             "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
-            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"}
+            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl",
+            "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl",
+            "nexar_reasoning_control": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_control.jsonl"}
 ADAPTER = ROOT / "outputs" / "a1_compress256" / "train" / "epoch_02" / "lora_adapter"
 CFG = HERE.parent / "configs" / "e4_stageA.yaml"
 DADA_URL = "https://huggingface.co/datasets/JeffreyChou/MM-AU/resolve/main/DADA-2000_chunks/DADA2000.part_{}"
@@ -163,7 +165,7 @@ def run_nexar(args, badas):
     print(f"[nexar] {len(rows)} valid windows, {len(todo)} to encode (extras: {args.extras})")
     t0 = time.time()
     for i, r in enumerate(todo):
-        fd = ROOT / "dataset" / "train" / r["frames_dir"]
+        fd = Path(__import__("os").environ.get("R1_TRAIN_DIR") or ROOT / "dataset" / "train") / r["frames_dir"]      # R1_TRAIN_DIR: pod override
         paths = sorted(fd.glob("frame_*.jpg"))
         assert len(paths) == 16, (fd, len(paths))
         frames = [np.array(Image.open(p).convert("RGB")) for p in paths]
@@ -465,7 +467,7 @@ def consolidate(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "dada"])
+    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "nexar_reasoning_shifted", "nexar_reasoning_control", "dada"])
     ap.add_argument("--from-hf", default=None, help="encode the shards of this private HF window repo (chunked, resumable)")
     ap.add_argument("--max-shards", type=int, default=0, help="with --from-hf: encode only the first N shards (smoke runs)")
     ap.add_argument("--push-repo", default=None, help="with --from-hf: upload each encoded chunk here, then delete it locally")

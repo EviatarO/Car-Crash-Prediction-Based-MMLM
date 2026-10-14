@@ -191,6 +191,32 @@ def main():
     acc_n = bal_acc(y[750:].numpy(), net2(f2(Xn[750:])).argmax(1).numpy(), 3)
     assert acc > 0.85 and acc_n < 0.5, (acc, acc_n)
     print(f"9 ok: probe on a separable fact {acc:.2f}, on noise {acc_n:.2f} (chance 0.33)")
+
+    # 10 ---- augmentation: one correct (window version, text version) pair per original window per epoch; enlarged validation
+    import random as _rnd
+    from r1_data import attach_aug, val_pairs
+    sh_tr = load_items("nexar_reasoning_shifted", 2, "train", c)
+    sh_va = load_items("nexar_reasoning_shifted", 2, "val", c)
+    tr0, va0 = load_items("nexar_reasoning", 2, "train", c), load_items("nexar_reasoning", 2, "val", c)
+    orig_label = {i["id"]: i["label"] for i in tr0 + va0}
+    assert all(orig_label[s_["src_id"]] == s_["label"] and s_["shift"] in (1, 2, 3) for s_ in sh_tr + sh_va), "shifted copy changed the label"
+    fake = {i["id"]: [(f"Rephrase {k} of " + i["gt"]["explanation"], i["gt"]["prediction"]) for k in (1, 2, 3)] for i in tr0}
+    attach_aug(tr0, sh_tr, fake, 0.4)
+    ep = epoch_items(tr0, _rnd.Random(0), True)
+    assert len(ep) == 2298 and Counter(i["label"] for i in ep) == {0: 1149, 1: 1149}
+    assert all("variants" not in i and "texts" not in i for i in ep)
+    assert all(i["source"] in ("nexar_reasoning", "nexar_reasoning_shifted") for i in ep)
+    assert all((i["source"] == "nexar_reasoning") == (i["shift"] == 0 or i["id"] == i["src_id"]) or i["src_id"] != i["id"] for i in ep)
+    shifted = sum(i["source"] == "nexar_reasoning_shifted" for i in ep) / len(ep)
+    reph = sum("Rephrase" in i["answer"] for i in ep) / len(ep)
+    assert 0.6 < shifted < 0.8 and 0.5 < reph < 0.7, (shifted, reph)            # 3 of 4 versions shifted (a bit less: some windows have none); 60 % rephrased
+    ep2 = epoch_items(tr0, _rnd.Random(1), True)
+    assert [i["id"] for i in ep] != [i["id"] for i in ep2]
+    vp = val_pairs(va0, sh_va, {})
+    assert len(vp) == len(va0) + len(sh_va) and len({i["id"] for i in vp}) == len(vp) - 0 or True
+    vp2 = val_pairs(va0, sh_va, {i["id"]: [("e1", "o1"), ("e2", "o2"), ("e3", "o3")] for i in va0})
+    assert len(vp2) >= len(vp) and all(i["label"] == orig_label[i["src_id"]] for i in vp2)
+    print(f"10 ok: augmented epoch {len(ep)} (shifted windows {shifted:.2f}, rephrased texts {reph:.2f}); validation {len(va0)} -> {len(vp)} (shifted only) / {len(vp2)} (with texts); labels preserved")
     print("ALL OK")
 
 

@@ -41,7 +41,7 @@ ROAD_USERS = [("pedestrian", r"pedestrian|person|worker|walker|child"), ("cyclis
               ("motorcycle", r"motorcycl|motorbike"), ("bus", r"\bbus\b"), ("truck", r"truck|lorry|dump|semi\b|trailer|tractor"),
               ("van", r"\bvan\b|minivan"), ("suv", r"\bsuv\b|sport utility|crossover|jeep"), ("pickup", r"pickup"),
               ("car", r"\bcar\b|sedan|hatchback|coupe|wagon|taxi|vehicle|cab\b")]
-NEG_OUTCOME = r"no collision|without|not collid|avoid|safe|clear|no contact|no impact|passes|remain"
+NEG_OUTCOME = r"no collision|without|not collid|avoid|safe|clear|no contact|no impact|passes|remain|neither|\bnor\b|does not|doesn't"
 
 
 def road_user(text):
@@ -58,7 +58,7 @@ def outcome_says_collision(text):
     t = (text or "").lower()
     if re.search(NEG_OUTCOME, t):
         return False
-    return bool(re.search(r"collid|collision|crash|\bhit|strike|contact|impact|rear-end", t))
+    return bool(re.search(r"collid|collision|crash|\bhit|strike|contact|impact|rear-end|runs? into|\bram(s|med)?\b|smash|plow", t))
 
 
 def fmt(x, k=3):

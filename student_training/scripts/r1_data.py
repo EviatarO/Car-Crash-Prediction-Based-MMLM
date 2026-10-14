@@ -20,7 +20,8 @@ from r1_common import Q_PHASE1, Q_PHASE2, TAG, q_reason, reasoning_group, reason
 ROOT = HERE.parents[1]
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
             "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
-            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"}
+            "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl",
+            "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl"}
 
 
 class Cache:
@@ -75,10 +76,11 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
         r = json.loads(l)
         if not r["valid"] or r["split"] != split or r["id"] not in cache:
             continue
-        if source == "nexar_reasoning":      # reasoning dataset: the class is the VISIBLE-HAZARD label; the Nexar label is kept for comparison
+        if source.startswith("nexar_reasoning"):      # reasoning dataset (and its frame-shifted copies): the class is the VISIBLE-HAZARD label
             g = r["gt"]
             out.append({"id": r["id"], "source": source, "video_key": r["video_key"], "label": g["label_vis"], "label_nexar": r["label"],
                         "tte": r["tte"], "pre_alert": g["pre_alert"], "group": reasoning_group(r["label"], r["tte"], g["pre_alert"]),
+                        "src_id": r.get("source_id", r["id"]), "shift": r.get("shift", 0), "split": r["split"],
                         "question": q_reason(order) + ("\n" + g["box_hint"] if box_hint else ""), "tag": TAG[source], "order": order, "gt": g,
                         "answer": reasoning_target(g["explanation"], g["prediction"], g["label_vis"], order)})
             continue
@@ -113,6 +115,12 @@ def epoch_items(items, rng: random.Random, balance: bool):
     minority, so all of them are kept - unchanged behaviour). If negatives are the majority (reasoning dataset) the k negatives are
     drawn proportionally per `group` (normal / pre_alert), so the hard negatives keep their share. Phase 1: all."""
     items = list(items)
+    if any("variants" in i for i in items):                # augmentation (plan 2026-10-14): realised AFTER the 50/50 draw
+        return [realize(i, rng) if "variants" in i else i for i in _epoch_base(items, rng, balance)]
+    return _epoch_base(items, rng, balance)
+
+
+def _epoch_base(items, rng, balance):
     if any("keep_p" in i for i in items):                  # option 2: template cap (items with a frequent opening kept with prob cap/count)
         items = [i for i in items if rng.random() < i.get("keep_p", 1.0)]
     if balance:
@@ -123,6 +131,61 @@ def epoch_items(items, rng: random.Random, balance: bool):
             items = _draw(neg, k, rng) + _draw(pos, k, rng)
     rng.shuffle(items)
     return items
+
+
+def load_texts(path):
+    """paraphrases.jsonl (r1_paraphrase_check.py) -> {original window id: [(explanation, outcome) of rephrased v1, v2, v3 ...]} (accepted versions only)"""
+    out = {}
+    for l in open(path, encoding="utf-8"):
+        r = json.loads(l)
+        out.setdefault(r["id"], []).append((r["source"], r["explanation"], r["outcome"]))
+    return {k: [(e, o) for _, e, o in sorted(v)] for k, v in out.items()}
+
+
+def attach_aug(items, shifted_items, texts, p_teacher=0.4):
+    """Give every ORIGINAL training item its alternatives: `variants` = [(source, id), ...] (the original window + its shifted copies that exist in the
+    cache) and `texts` = [(explanation, outcome), ...] of the rephrased versions. realize() draws one window version and one text version."""
+    by_src = {}
+    for s in shifted_items:
+        by_src.setdefault(s["src_id"], []).append(s)
+    for it in items:
+        it["variants"] = [(it["source"], it["id"])] + [(s["source"], s["id"]) for s in sorted(by_src.get(it["id"], []), key=lambda x: x["shift"])]
+        it["texts"] = texts.get(it["id"], []) if texts else []
+        it["p_teacher"] = p_teacher
+    return items
+
+
+def realize(it, rng):
+    """One (window version, text version) pair of an original item. The pair is always correct: every shifted copy shows the same scene (<= 0.1 s apart)
+    and every text version states the same facts. The teacher's own text is drawn with probability p_teacher (style anchor), else a rephrased one."""
+    src, wid = rng.choice(it["variants"])
+    out = dict(it, source=src, id=wid)
+    for k in ("variants", "texts", "p_teacher"):
+        out.pop(k, None)
+    if it["texts"] and rng.random() >= it["p_teacher"]:
+        e, o = rng.choice(it["texts"])
+        out["answer"] = reasoning_target(e, o, it["label"], it["order"])
+    return out
+
+
+def val_pairs(items, shifted_items, texts):
+    """Enlarged validation (deterministic): original window k=0..3 (the original, then its shifts 1..3 that exist) with text version k (the teacher's,
+    then rephrased v1..v3 that exist; else the teacher's). 612 originals -> about 2,448 pairs."""
+    by_src = {}
+    for s in shifted_items:
+        by_src.setdefault(s["src_id"], []).append(s)
+    out = []
+    for it in items:
+        wins = [it] + sorted(by_src.get(it["id"], []), key=lambda x: x["shift"])
+        tx = [None] + (texts.get(it["id"], []) if texts else [])
+        for k in range(max(len(wins), len(tx))):
+            w = wins[k] if k < len(wins) else wins[0]
+            t = tx[k] if k < len(tx) else None
+            c = dict(w, src_id=it["id"])
+            if t is not None:
+                c["answer"] = reasoning_target(t[0], t[1], it["label"], it["order"])
+            out.append(c)
+    return out
 
 
 def _draw(cls_items, k, rng):
