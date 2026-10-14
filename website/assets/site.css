@@ -508,3 +508,22 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 #viewR2 .r2win .r2blk + .r2blk{margin-top:9px;padding-top:8px;border-top:1px dashed #2a3560}
 #viewR2 .r2win .r2lab{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
 #viewR2 .r2win .r2blk.model .r2lab{color:var(--cyan)}
+
+/* ---- dataset.html, "Reasoning dataset - augmented" (assets/aug.js) ---- */
+#viewAug .augver{margin:0 0 8px;line-height:1.45}
+#viewAug .augver.dimrow{opacity:.62}
+#viewAug .augver .chip{margin-right:4px}
+#viewAug .augver .dim{display:block;font-size:12px;color:var(--muted)}
+#viewAug .augver .bad{color:var(--red)}
+#viewAug .cmp-toolbar .sep{display:inline-block;width:10px}
+#viewAug .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewAug table.augtable td{vertical-align:top;text-align:left;font-weight:400}
+#viewAug table.augtable td:first-child{width:170px}
+#viewAug table.augtable td .dim{font-size:11.5px;color:var(--muted)}
+#viewAug table.augtable td.hpdesc{max-width:none;white-space:normal}
+@media (max-width:700px){ #viewAug table.augtable td:first-child{width:120px} #viewAug .augsearch{min-width:0;width:100%} }
+#viewAug .cmp-toolbar{flex-wrap:wrap;gap:6px}
+#viewAug table.augtable{table-layout:fixed;width:100%}
+#viewAug table.augtable td{overflow-wrap:anywhere}
+#viewAug table.augtable{min-width:0}
+@media (max-width:700px){ #viewAug table.augtable td:first-child{width:96px} #viewAug .thumb{width:90px;height:51px} }

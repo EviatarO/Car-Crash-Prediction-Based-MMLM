@@ -38,6 +38,7 @@
     <button class="tab active" data-split="train">Train</button>
     <button class="tab" data-split="test">Test</button>
     <button class="tab" data-split="teacher" title="the 4,203-window teacher reasoning dataset: frames with the red box, E3 / E6 / E7 answers, final target">Teacher reasoning</button>
+    <button class="tab" data-split="aug" title="the enlarged reasoning dataset: the teacher's text + up to 3 judged rephrased versions per window, and the frame-shifted window copies">Reasoning dataset - augmented</button>
   </div>
   <div class="searchwrap">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -53,6 +54,31 @@
     <thead id="thead"></thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+
+<!-- ================= AUGMENTED REASONING DATASET VIEW (aug_data.js, built by build_aug_data.py; rendered by assets/aug.js) ================= -->
+<div id="viewAug" hidden>
+  <section class="block">
+    <div class="kicker">Reasoning dataset · augmented for the longer coarse stage (Phase 1) · 2026-10-15</div>
+    <h2>4,169 windows: the teacher's text + rephrased versions, and shifted window copies</h2>
+    <p class="lede">Each original window keeps the teacher's text (tag <b>teacher</b>). Up to 3 <b>rephrased</b> versions say the same facts in other words
+       (written by Claude agents for the first 1,329 windows and by Gemini 3.8 Flash, text only, for the rest). A version is <b>used</b> only if it passed the
+       automatic check (length, no outcome word, same road-user type and side, outcome polarity, not a near copy) and a strict judge (Claude Sonnet 5.5:
+       nothing changed, added, dropped or intensified). Opus 5.5 re-checked a blind sample of 300 judge decisions. Each window also has up to 3
+       <b>shifted copies</b> that end 1-3 source frames earlier (same scene). In training, one (window version, text version) pair is drawn per window per
+       epoch, with the teacher's text drawn 40 % of the time. Wait a few seconds the first time: the page loads about 7 MB.</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="augSummary"></table></div>
+    <div class="cmp-toolbar" id="augChips"></div>
+    <div class="cmp-toolbar">
+      <input id="augSearch" type="text" placeholder="search id or any text" autocomplete="off" class="augsearch">
+      <label class="dim"><input type="checkbox" id="augShowRej"> show rejected / spare versions</label>
+      <button class="pill clearbtn" id="augClear">Clear filters</button>
+      <span class="rowcount" id="augCount"></span>
+      <button class="pill pushright" id="augPrev">‹ prev</button>
+      <button class="pill" id="augNext">next ›</button>
+    </div>
+    <div class="table-wrap"><table class="mini augtable" id="augTable"><thead><tr><th>window</th><th>texts</th></tr></thead><tbody id="augBody"></tbody></table></div>
+  </section>
 </div>
 
 <!-- ================= TEACHER REASONING DATASET VIEW (4,203 windows; same view code as the pilot table of experiments.html) ================= -->
@@ -143,6 +169,7 @@
 <script src="assets/plexus.js"></script>
 <script src="assets/player.js"></script>
 <script src="assets/pilot.js"></script>
+<script src="assets/aug.js"></script>
 <script>
 "use strict";
 /* ============================================================= state */
@@ -357,6 +384,8 @@ renderHead(); renderBody();
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
   t.classList.add("active");
+  showAug(t.dataset.split === "aug");
+  if (t.dataset.split === "aug"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "teacher"){ showTeacher(true); return; }
   showTeacher(false);
   split = t.dataset.split;
@@ -457,6 +486,30 @@ function showTeacher(on){
     teacherView.show();
   };
   sc.onerror = () => { teacherLoading = false; document.getElementById("tchCount").textContent = "teacher_data.js not found: run website/build_teacher_data.py"; };
+  document.head.appendChild(sc);
+}
+
+/* ============================================================= augmented reasoning dataset tab (aug_data.js ~7 MB, loaded on first open) */
+function hideMainTable(on){
+  document.querySelector(".table-wrap").hidden = on;
+  document.querySelector(".searchwrap").style.display = on ? "none" : "";
+  document.getElementById("clearFilters").style.display = on ? "none" : "";
+  document.getElementById("rowcount").style.display = on ? "none" : "";
+}
+let augView = null, augLoading = false;
+function showAug(on){
+  document.getElementById("viewAug").hidden = !on;
+  if (!on || augView || augLoading) { if (on && augView) augView.show(); return; }
+  augLoading = true;
+  document.getElementById("augCount").textContent = "loading the texts…";
+  const sc = document.createElement("script");
+  sc.src = "aug_data.js";
+  sc.onload = () => {
+    augView = createAugView({data: window.AUG_DATA,
+      esc: s => String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")});
+    augView.show();
+  };
+  sc.onerror = () => { augLoading = false; document.getElementById("augCount").textContent = "aug_data.js not found: run website/build_aug_data.py"; };
   document.head.appendChild(sc);
 }
 </script>
