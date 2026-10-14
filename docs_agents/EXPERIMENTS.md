@@ -125,6 +125,36 @@ Rescue test on 10 videos removed earlier: the E6 chain works when the first anch
 Stage 2: E7-pre 206 · E6 412 · E7 280 · E6 chain 233 (final E6C 258 after the normal-window fix). Cost: E3 ≈ $44, stage 2 ≈ $13, predictions $6.4, total ≈ $63. 35 genuine crash outliers removed.
 Hand review 2026-10-12: 30 windows rewritten (`edits.jsonl`), "check" list 19 → 0. Final export: **4,169 windows / 1,392 videos / label_vis 1,330 positive, 2,839 negative.**
 
+### 2l. Run 1 + follow-ups on the Nexar reasoning dataset (2026-10-12; `outputs/r1_phase2r_2026-10-12/`, `outputs/r1_options_2026-10-12/`; HF `checkpoints/phase2r/`, `options_2026-10-12/`)
+Phase 2 from the old Phase-1 checkpoint (DADA), projector lr 2e-5, LoRA r16 lr 2e-4, eff. batch 16, 50/50 sampler, stop on validation loss rise. Pod RTX PRO 4500, ~3 h + 4.3 h, ~$8. 612 val windows, thresholded numbers at P = 0.5.
+| | Run 1 (ep 5) | Opt 1 (ep 3) | Opt 2 (cap) | Opt 3 (box words) | crash model |
+|---|---|---|---|---|---|
+| val loss | 0.980 | 0.942 | 0.927 | 0.928 | - |
+| BERTScore (floor) | 0.398 (0.346) | 0.374 (0.337) | 0.381 (0.344) | 0.383 (0.339) | - |
+| distinct expl. / top repeat | 259 / 147 | 148 / 104 | 130 / 73 | 148 / 56 | - |
+| road-user match | 0.59 | 0.58 | 0.58 | 0.58 | - |
+| wrong-video gap | +0.066 | +0.047 | +0.041 | +0.029 | - |
+| AUC S_after / S_before | 0.813 / 0.909 | 0.814 / 0.905 | 0.733 / 0.914 | 0.826 / 0.882 | 0.919 |
+S_teacher AUC 1.000 everywhere. Reasoning vs crash model per group (Run 1, McNemar p 0.045): reasoning right where crash wrong: normal 31, pre-alert 34; crash right where reasoning wrong: TTE0.5 23, 1.0 12, 1.5 7.
+Fact agreement vs the teacher (outputs/r1_fact_eval_2026-10-13/summary.md): type / side / motion / gap = 0.56 / 0.49 / 0.37 / 0.54 (Run 1) vs majority baselines 0.54 / 0.39 / 0.34 / 0.55; only option 3 learns side (0.68).
+
+### 2m. Session 1 - fresh Phase 1 on the Nexar texts + richer inputs (2026-10-13/14; `outputs/r1_levers_2026-10-13/`, HF `checkpoints/levers_2026-10-13/`; driver `r1_pod_levers.sh`)
+Each run = new Phase 1 (projector only, random init, <= 4 epochs, lr 1e-3, still improving at epoch 4) then Phase 2 (<= 5 epochs), best = lowest validation loss; pod 100 GB disk, ~10 h, ~$7-8. Inputs: B3 last layer, B4 + crash-head attention per token, B5 + layer-11 tokens, B45 both (fuse layer starts as identity on the last-layer block).
+Extras pass reproduced the crash-model P exactly (max diff 0.0000 on 4,169 windows).
+| | Run 1 | B3 | B4 | B5 | B45 |
+|---|---|---|---|---|---|
+| distinct / top repeat | 259 / 147 | 536 / 6 | 571 / 6 | 566 / 6 | 574 / 4 |
+| BERTScore (floor) | 0.398 (0.346) | 0.418 (0.341) | 0.408 | 0.413 | 0.412 |
+| wrong-video gap | +0.066 | +0.178 | +0.178 | +0.190 | +0.185 |
+| retrieval@10 | 0.40 | 0.52 | 0.49 | 0.51 | 0.56 |
+| facts type / side / motion / gap | .56 / .49 / .37 / .54 | .58 / .73 / .42 / .51 | .59 / .68 / .39 / .51 | .57 / .65 / .44 / .57 | .56 / .70 / .43 / .51 |
+| AUC S_after / S_before | .813 / .909 | .833 / .847 | .779 / .877 | .851 / .858 | .789 / .878 |
+| bal. acc. S_before, threshold from 600 train windows | - | .767 | .813 | .787 | .799 |
+Probe on the encoder tokens (`probe/fact_probe.json`, balanced acc.; chance): type .26 / .15 / .28 (.13), side .72 / .60 / .73 (.33), motion .36 / .29 / .35 (.17), gap .58 / .44 / .59 (.33) for last layer / layer 11 / attention-weighted.
+Teacher type self-agreement across the 3 windows of one tracked object: 0.88 (measurement ceiling for the type fact).
+
+### 2n. Phase 1 enlargement (IN PROGRESS 2026-10-14) - see PROJECT_STATE "Phase 1 enlargement"; nothing trained yet. Local tests only: `r1_reasoning_test.py` (10 tests) and tiny-LM dry runs of Phase 1 with `--aug-texts --aug-shifts` and the control.
+
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.
 - VL-JEPA: frozen V-JEPA2 ViT-L + Llama-3.2-1B layers predicting text embeddings; separate decoder.

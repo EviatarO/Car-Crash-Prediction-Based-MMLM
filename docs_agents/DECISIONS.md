@@ -89,7 +89,27 @@ One line per rejected option so it is not re-proposed. Full reasoning for June�
 - **Hand edits override the teacher** → `edits.jsonl` is applied last and an edited window is never dropped as an outlier; edited crash windows are `label_vis` 1.
 - **Professor-facing documents** → no run names (E3/E6/E7) or file paths.
 
+### Reasoning retrain (user decisions 2026-10-12..14)
+- **Mixing DADA into the new Phase 2 / evaluating on DADA** -> no: Nexar only, Phase-1 start; DADA forgetting check skipped.
+- **Starting Phase 2 from the old Phase-2 checkpoint** -> no: it carries the old template and captions; and the old DADA Phase 1 itself was the bottleneck (fresh Phase 1 on the Nexar texts is the big gain).
+- **Verdict before the reasoning inside the main model** -> no: reasoning would become a justification and S_after = S_before by construction; verdict-first is a separate Run 2 (kept in the plan, NOT run yet - remind the user).
+- **Imitating the teacher's risk_score as the student's score** -> no: verbal self-report from a closed model, clustered and label-informed; the score is read from the token probabilities at "Collision:".
+- **The teacher's long prompt for the student** -> no: a short field-announcing prompt (the format is learned from 3.5 k answers; a long prompt doubles the sequence).
+- **QLoRA / small learning rate / more LoRA checks** -> no: memory is not a constraint (11 GB), 2e-4 is validated, 144 steps per epoch.
+- **Zero-shot Qwen with its own image encoder as an information test** -> dropped: not fine-tuned on Nexar, uninformative; replaced by the trained probe.
+- **Box position as text in the prompt (option 3)** -> no: the model leans on the hint (smallest wrong-video gap), type does not improve.
+- **Object crop / detector at inference** -> not now (user: wrong approach at this stage); an attention-guided crop would add a second vision path - a later design decision.
+- **Four separate fact prompts** -> no (one answer format for every window); a structured fact field at the start of the SAME answer or an auxiliary fact loss are candidates after Phase 1.
+- **Checkpoint chosen by the wrong-video gap** -> rewards the over-fitted epoch; Session 1 / Phase 1 use validation loss (`--select val_loss`); neither rule alone predicts generation quality.
+- **More than 3 rephrasings per text** -> risk of drift and of learning Claude's style; teacher text drawn with p 0.4 each epoch; try 5 only if the 4x set helps.
+- **Rephrasing validated only with the word-list extractor** -> too noisy for motion / gap (e.g. "across the frames"): hard checks on length, outcome words, type / side sets and polarity from the verdict, rest flagged for an Opus reader.
+- **Many parallel Claude subagents for bulk text** -> hit the session limit; use <= 4 at a time or an API.
+
 ## Unresolved (need the user)
+00. **Who finishes the rephrased texts** (~2,840 windows): Gemini 3.8 Flash via OpenRouter text-only (~$2-5, balance ~$7.5, style matches the teacher) vs more Claude agents (limit-bound)? Asked 2026-10-14, no answer yet.
+01. **Continuation after the enlarged Phase 1** (ranked list in the Phase-1 plan section 5): Phase 2 on the new base, direct fact signal (structured fields vs auxiliary loss), Run 2, short reasoning, attention / layer 11 on the new base.
+02. **Test-set teacher reasoning (private 677, E3)** on hold; needs a pod for boxes + a ~$10 OpenRouter top-up.
+03. **Attention-guided object crop** (a second small vision path) for road-user type: allowed only if the user accepts the extra path.
 00. **Student retrain on the new dataset:** mix DADA back in or Nexar only; targets and split by video as in PROJECT_STATE TODO 1. (Teacher prompt question resolved: E3 → E6/E7 flow, box kept, Flex.)
 0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the
    Phase-1 checkpoint with explicit verdict / time-to-impact fields (≈1 h), (b) re-weight DADA no-crash to cut the 83 % false-alarm rate, (c) more / richer Nexar text (BADAS-2.0 recipe with

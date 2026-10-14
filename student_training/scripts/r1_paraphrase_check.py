@@ -33,7 +33,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 from r1_eval_gates import token_f1  # noqa: E402
 from r1_eval_reasoning import outcome_says_collision  # noqa: E402
-from r1_fact_eval import FACTS, facts  # noqa: E402
+from r1_fact_eval import AHEAD_STRONG, FACTS, LEFT, RIGHT, TYPES, facts  # noqa: E402
 
 MAN = ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"
 D = ROOT / "outputs" / "teacher_dataset_2026-10"
@@ -73,7 +73,20 @@ def export(batch):
     print(f"[export] {len(out)} windows -> {len(range(0, len(out), batch))} batches in {BATCHES}")
 
 
-def check_version(orig_e, orig_o, e, o):
+def type_set(t):
+    t = re.sub(r"\bego vehicle\b|\bthe vehicle\b", " ", (t or "").lower())
+    return {n for n, p in TYPES if re.search(p, t)}
+
+
+def side_set(t):
+    t = re.sub(r"\bego vehicle\b|\bthe vehicle\b", " ", (t or "").lower())
+    return {n for n, p in (("left", LEFT), ("right", RIGHT), ("ahead", AHEAD_STRONG)) if re.search(p, t)}
+
+
+NEG = r"\bno\b|\bnot\b|n't|without|avoid|neither|\bnor\b|safely|passes|clears|remains clear|steers clear|misses"
+
+
+def check_version(orig_e, orig_o, e, o, verdict=None):
     """-> (problems that reject, flags for the verifier)"""
     bad, flags = [], []
     n = len(e.split())
@@ -83,16 +96,29 @@ def check_version(orig_e, orig_o, e, o):
         bad.append(f"outcome length {len(o.split())}")
     if re.search(OUTCOME_WORDS, e.lower()):
         bad.append("outcome word in explanation")
+    # type / side compared as SETS of everything mentioned (the order of mentions changes when clauses are reordered):
+    # a road-user class or a left / right that the original does not have = hard reject; all original classes / sides missing = flag.
+    to, tv, so, sv = type_set(orig_e), type_set(e), side_set(orig_e), side_set(e)
+    if tv - to:
+        bad.append(f"type added: {sorted(tv - to)}")
+    elif to and not (to & tv):
+        flags.append(f"type not stated: {sorted(to)}")
+    if (sv & {"left", "right"}) - so:
+        bad.append(f"side added/changed: {sorted((sv & {'left', 'right'}) - so)}")
+    elif so and not (so & sv):
+        flags.append(f"side not stated: {sorted(so)}")
     fo, fv = facts(orig_e), facts(e)
-    for k in FACTS:                                                  # type / side: reliable word lists -> hard reject; motion / gap: noisy -> flag for the verifier
+    for k in ("motion", "gap"):                                      # noisy word lists -> flag for the verifier
         if fo[k] is not None and fv[k] is not None and fv[k] != fo[k]:
-            (bad if k in ("type", "side") else flags).append(f"{k}: {fo[k]} -> {fv[k]}")
+            flags.append(f"{k}: {fo[k]} -> {fv[k]}")
         elif fo[k] is None and fv[k] is not None:
             flags.append(f"{k} added: {fv[k]}")
-        elif fo[k] is not None and fv[k] is None and k in ("type", "side"):
-            flags.append(f"{k} not stated: {fo[k]} -> None")
-    if outcome_says_collision(o) != outcome_says_collision(orig_o):
+    # outcome polarity from the KNOWN verdict (yes = collision stays a collision, no = stays 'no collision'); heuristic synonym lists are unreliable
+    neg = bool(re.search(NEG, o.lower()))
+    if verdict == "yes" and neg:
         bad.append("outcome polarity changed")
+    elif verdict == "no" and not neg:
+        flags.append("outcome polarity unclear")
     if token_f1(e, orig_e) >= 0.8:
         bad.append("near copy")
     new = risky_groups(e + " " + o) - risky_groups(orig_e + " " + orig_o)
@@ -108,7 +134,10 @@ def check():
         for l in open(p, encoding="utf-8"):
             if not l.strip():
                 continue
-            x = json.loads(l)
+            try:
+                x = json.loads(l)
+            except json.JSONDecodeError:                               # a partial / marker line from an interrupted writer
+                continue
             o = orig.get(x["id"])
             if o is None or x["id"] in seen:
                 continue
@@ -116,7 +145,7 @@ def check():
             kept = []
             for k, v in enumerate(x.get("versions", []), 1):
                 e, oc = v.get("explanation", "").strip(), v.get("outcome", "").strip()
-                bad, flags = check_version(o["explanation"], o["outcome"], e, oc)
+                bad, flags = check_version(o["explanation"], o["outcome"], e, oc, o.get("verdict"))
                 if not bad and any(token_f1(e, z["explanation"]) >= 0.85 for z in kept):
                     bad.append("near copy of another version")
                 rec = {"id": x["id"], "version": k, "explanation": e, "outcome": oc}
