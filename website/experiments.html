@@ -36,7 +36,7 @@
     <button class="tab active" data-view="detail">Experiment detail</button>
     <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
     <button class="tab" data-view="pilot">Teacher prompt study</button>
-    <button class="tab" data-view="r2" title="Run 1: Phase-2 fine training on the Nexar reasoning dataset, scored on 612 validation windows">Reasoning model - Run 1</button>
+    <button class="tab" data-view="r2" title="Reasoning model runs: Run 1, three follow-ups and four Session-1 runs, scored on 612 validation windows">Reasoning model - runs</button>
   </div>
   <span class="rowcount" id="viewHint"></span>
 </div>
@@ -189,8 +189,8 @@
 <!-- ================= REASONING MODEL (RUN 1) VIEW ================= -->
 <div id="viewR2" hidden>
   <section class="block">
-    <div class="kicker">Reasoning model · Run 1 and three follow-ups · 2026-10-12</div>
-    <h2>Reasoning model - Run 1 and follow-ups</h2>
+    <div class="kicker">Reasoning model · Run 1, three follow-ups (2026-10-12) and four Session-1 runs (2026-10-13)</div>
+    <h2>Reasoning model - runs</h2>
     <p class="lede">The model is a frozen V-JEPA2 encoder, a trained projector and LoRA on Qwen3-VL-4B. It was trained on <b id="r2NTrain">3,557</b> windows
        and evaluated on <b id="r2NWin">612</b> validation windows (<span id="r2NVid">204</span> videos never trained on). The answer has the format
        <code>Reasoning</code> / <code>Collision</code> / <code>Outcome</code>, and the decision score is read at <code>Collision:</code>.
@@ -200,15 +200,23 @@
 
     <div class="cmp-toolbar" id="r2RunSel" role="group" aria-label="Run selector"></div>
 
-    <h3 class="subh">All four runs side by side</h3>
+    <h3 class="subh">All eight runs side by side</h3>
     <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Compare"></table></div>
     <div class="note" id="r2CompareNote"></div>
+
+    <h3 class="subh">Fact probe</h3>
+    <p class="lede small">Balanced accuracy of a small classifier predicting each fact directly from the pooled tokens; chance in brackets.</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Probe"></table></div>
 
     <h3 class="subh">Selected run</h3>
     <p class="lede small" id="r2RunDesc"></p>
 
     <h3 class="subh">Decision scores</h3>
     <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Decision"></table></div>
+    <div id="r2ThrWrap" hidden>
+      <p class="lede small" id="r2ThrNote"></p>
+      <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Thr"></table></div>
+    </div>
 
     <h3 class="subh">By group: crash model vs the reasoning path</h3>
     <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Groups"></table></div>
@@ -220,6 +228,9 @@
 
     <h3 class="subh">Training curve</h3>
     <p class="lede small" id="r2CurveSrc"></p>
+    <p class="lede small" id="r2Curve1Head" hidden><b>Phase 1</b> (projector only, from random)</p>
+    <div class="table-wrap pilot-runs" id="r2Curve1Wrap" style="overflow-x:auto" hidden><table class="mini" id="r2Curve1"></table></div>
+    <p class="lede small" id="r2Curve2Head" hidden><b>Phase 2</b> (projector + LoRA)</p>
     <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="r2Curve"></table></div>
     <p class="note" id="r2CurveNote"></p>
 

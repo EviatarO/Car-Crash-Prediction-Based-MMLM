@@ -1,5 +1,5 @@
 """
-build_r2_data.py -> r2_data.js   (Experiments page, tab "Reasoning model": Run 1 + the three follow-ups, with a run selector)
+build_r2_data.py -> r2_data.js   (Experiments page, tab "Reasoning model - runs": Run 1, the three follow-ups and the four Session-1 runs, with a run selector)
 
 Results of the reasoning model: Phase-2 fine training (projector + LoRA on Qwen3-VL-4B, frozen V-JEPA2 features) on the Nexar reasoning
 dataset, scored on the 612 validation windows (204 videos never trained on). Everything is read from
@@ -13,6 +13,11 @@ Follow-up runs (outputs/r1_options_2026-10-12/options_2026-10-12), same file for
   opt2_cap     retrain with the template cap, results + train_log.jsonl
   opt3_box     retrain with the position of the attended road user in the prompt, results + train_log.jsonl
 The follow-up metrics.json files carry no "before_phase1" block and no old-Phase-2 score; the "before Phase 2" reference numbers are taken from Run 1.
+Session-1 runs (outputs/r1_levers_2026-10-13/levers_2026-10-13/{B3,B4,B5,B45}): results/ in the same formats, plus p1/train_log.jsonl (Phase 1, projector only)
+and p2/train_log.jsonl (Phase 2); metrics.json carries a "train_threshold" block (threshold for S_before chosen on 600 training windows). They have no
+"before_phase1" block: the "before Phase 2" numbers are taken from the last epoch of their own Phase-1 log (best = lowest validation loss = last epoch).
+Fact agreement (type / side / motion / gap vs the teacher text): outputs/r1_levers_2026-10-13/fact_agreement.json (run1, B3..B45) and
+outputs/r1_fact_eval_2026-10-13/fact_agreement.json (run1, opt1..opt3); fact probe: levers_2026-10-13/probe/fact_probe.json.
 The window grids are the teacher dataset's contact sheets (outputs/teacher_dataset_2026-10/review and grid_large), same REL as build_teacher_data.py.
 
     python build_r2_data.py
@@ -28,10 +33,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 RUN = ROOT / "outputs" / "r1_phase2r_2026-10-12" / "phase2r"
 OPT = ROOT / "outputs" / "r1_options_2026-10-12" / "options_2026-10-12"
+LEV = ROOT / "outputs" / "r1_levers_2026-10-13"
+LEVRUN = LEV / "levers_2026-10-13"
 GRIDS = ROOT / "outputs" / "teacher_dataset_2026-10"
 REL = "../outputs/teacher_dataset_2026-10"
 GENERIC_MIN = 10                      # an explanation shared by >= this many windows counts as "generic"
-# key, selector label, description, results dir, train log (None = Run 1's), epoch of the evaluated checkpoint (None = the epoch of lowest validation loss)
+# key, selector label, description, results dir, train log (None = Run 1's; a (phase 1, phase 2) pair for the Session-1 runs), epoch of the evaluated checkpoint (None = the epoch of lowest validation loss)
 RUNS = [
     ("run1", "Run 1 (epoch 5)", "Run 1: best.pt = epoch 5, chosen by the wrong-video gap", RUN / "results", RUN / "train_log.jsonl", 5),
     ("opt1", "Option 1 (epoch 3)", "Option 1: Run 1's epoch 3, the epoch with the lowest validation loss (same training run, earlier checkpoint)",
@@ -40,7 +47,17 @@ RUNS = [
      OPT / "opt2_cap" / "results", OPT / "opt2_cap" / "train_log.jsonl", None),
     ("opt3", "Option 3 (box position)", "Option 3: retrain with the position of the attended road user given as words in the prompt",
      OPT / "opt3_box" / "results", OPT / "opt3_box" / "train_log.jsonl", None),
+    ("b3", "B3 fresh Phase 1 (last layer)", "B3: a fresh Phase 1 (projector only, from random) on the Nexar reasoning texts instead of DADA, then Phase 2; last-layer tokens only (the control of Session 1)",
+     LEVRUN / "B3" / "results", (LEVRUN / "B3" / "p1" / "train_log.jsonl", LEVRUN / "B3" / "p2" / "train_log.jsonl"), None),
+    ("b4", "B4 + attention", "B4: B3 plus the crash head's attention per token as an extra input",
+     LEVRUN / "B4" / "results", (LEVRUN / "B4" / "p1" / "train_log.jsonl", LEVRUN / "B4" / "p2" / "train_log.jsonl"), None),
+    ("b5", "B5 + layer 11", "B5: B3 plus the layer-11 tokens as an extra input",
+     LEVRUN / "B5" / "results", (LEVRUN / "B5" / "p1" / "train_log.jsonl", LEVRUN / "B5" / "p2" / "train_log.jsonl"), None),
+    ("b45", "B45 + both", "B45: B3 plus both extra inputs (attention and layer-11 tokens)",
+     LEVRUN / "B45" / "results", (LEVRUN / "B45" / "p1" / "train_log.jsonl", LEVRUN / "B45" / "p2" / "train_log.jsonl"), None),
 ]
+FACT_KEYS = ["type", "side", "motion", "gap"]
+FACT_RUN = {"run1": "run1", "opt1": "opt1", "opt2": "opt2", "opt3": "opt3", "b3": "B3", "b4": "B4", "b5": "B5", "b45": "B45"}   # run key -> key in fact_agreement.json
 GROUPS = [["normal", "normal"], ["pre_alert", "pre-alert"], ["tte1.5", "TTE 1.5 s"], ["tte1.0", "TTE 1.0 s"], ["tte0.5", "TTE 0.5 s"]]
 SCORES = [["s_after", "S_after", "after the model's own reasoning"],
           ["s_before", "S_before", "reasoning cut out (decision straight after the frames)"],
@@ -55,14 +72,33 @@ def sigmoid(x):
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def load_run(key, label, desc, res, logp, epoch, run1_m, log1):
+def read_log(path):
+    return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+
+
+def curve_of(log):
+    return [{"epoch": e["epoch"], "train_loss": e["train_loss"], "val_loss": e["val_nexar_reasoning"]["loss_real"],
+             "gap_wrong": e["val_nexar_reasoning"]["gap_wrong"], "gap_wrong_ci": e["val_nexar_reasoning"]["gap_wrong_ci"],
+             "gap_blank": e["val_nexar_reasoning"]["gap_blank"],
+             "auc_before": e["decision"]["before"]["auc"], "auc_teacher": e["decision"]["teacher"]["auc"]} for e in log]
+
+
+def load_run(key, label, desc, res, logp, epoch, run1_m, log1, fact):
     m = json.load(open(res / "metrics.json", encoding="utf-8"))
     tm = json.load(open(res / "text_metrics.json", encoding="utf-8"))
     preds = [json.loads(l) for l in open(res / "predictions.jsonl", encoding="utf-8") if l.strip()]
-    log = [json.loads(l) for l in open(logp, encoding="utf-8") if l.strip()] if logp else log1
+    two = isinstance(logp, tuple)          # Session-1 runs: (Phase 1 log, Phase 2 log)
+    log = read_log(logp[1]) if two else (read_log(logp) if logp else log1)
     mm = m["metrics"]
     assert len(preds) == m["n_windows"] == mm["n"], (key, len(preds), m["n_windows"])
-    bp1 = m.get("before_phase1") or run1_m["before_phase1"]      # follow-ups: the model before Phase 2 is the same one, Run 1 measured it
+    log_p1 = read_log(logp[0]) if two else None
+    if m.get("before_phase1"):
+        bp1 = m["before_phase1"]
+    elif two:      # Session-1 runs: the model before Phase 2 = their own Phase-1 best (lowest validation loss; the last epoch in all four)
+        e = min(log_p1, key=lambda x: x["val_nexar_reasoning"]["loss_real"])["val_nexar_reasoning"]
+        bp1 = dict(e, perplexity_real=math.exp(e["loss_real"]))
+    else:          # Run 1's follow-ups: the model before Phase 2 is the same one, Run 1 measured it
+        bp1 = run1_m["before_phase1"]
 
     # ---- tables (numbers only, the page formats them)
     decision = [{"key": k, "label": lab, "desc": dsc, **{f: mm["decision"][k].get(f) for f in
@@ -89,12 +125,15 @@ def load_run(key, label, desc, res, logp, epoch, run1_m, log1):
         "gap_blank_before": bp1["gap_blank"], "gap_blank_before_ci": bp1["gap_blank_ci"],
         "retrieval_top1": m["retrieval_at_10"]["top1"], "retrieval_chance": m["retrieval_at_10"]["chance"],
     }
-    curve = [{"epoch": e["epoch"], "train_loss": e["train_loss"], "val_loss": e["val_nexar_reasoning"]["loss_real"],
-              "gap_wrong": e["val_nexar_reasoning"]["gap_wrong"], "gap_wrong_ci": e["val_nexar_reasoning"]["gap_wrong_ci"],
-              "gap_blank": e["val_nexar_reasoning"]["gap_blank"],
-              "auc_before": e["decision"]["before"]["auc"], "auc_teacher": e["decision"]["teacher"]["auc"]} for e in log]
+    curve = curve_of(log)
     val_min = min(curve, key=lambda c: c["val_loss"])["epoch"]
     best = epoch if epoch else val_min       # retrains: best.pt = lowest validation loss (options README)
+    curve_p1 = curve_of(log_p1) if two else None
+    best_p1 = min(curve_p1, key=lambda c: c["val_loss"])["epoch"] if two else None
+    tt = m.get("train_threshold")
+    train_thr = None if not tt else {
+        "n_train": tt["n_train_windows"], "p": tt["p_threshold"], "log_odds": tt["log_odds_threshold"], "bacc_train": tt["balanced_acc_on_train_windows"],
+        "acc": tt["val_acc"], "bacc": tt["val_balanced_acc"], "confusion": tt["val_confusion"], "score": tt["score"]}
 
     # ---- per-window rows (the run-specific part only)
     shared = collections.Counter(p["gen_explanation"] for p in preds)
@@ -122,10 +161,13 @@ def load_run(key, label, desc, res, logp, epoch, run1_m, log1):
         "acc_before": dec["s_before"]["acc_at_thr"], "bacc_before": dec["s_before"]["balanced_acc_at_thr"],
         "auc_crash": dec["a1_p"]["auc_vs_label_vis"],
         "saturated_after": sum(abs(p["s_after"]) > SATURATED for p in preds) / len(preds),
+        "bacc_before_train_thr": train_thr["bacc"] if train_thr else None,
+        "fact": {f: fact[FACT_RUN[key]]["overall"][f]["agree"] for f in FACT_KEYS},
     }
     run = {"key": key, "label": label, "desc": desc, "decision": decision, "by_group": by_group,
            "paired": {"mcnemar": paired["mcnemar_at_thr"], "auc_diff": paired["auc_diff"]},
            "text": text, "curve": curve, "curve_own": logp is not None or key == "run1", "best_epoch": best, "val_min_epoch": val_min,
+           "curve_p1": curve_p1, "best_epoch_p1": best_p1, "train_thr": train_thr,
            "rows": rows, "compare": compare,
            "counts": {"disagree": sum(r["disagree"] for r in rows), "reason_wrong": sum(r["reason_wrong"] for r in rows),
                       "generic": sum(r["generic"] for r in rows)}}
@@ -134,10 +176,19 @@ def load_run(key, label, desc, res, logp, epoch, run1_m, log1):
 
 def main():
     run1_m = json.load(open(RUN / "results" / "metrics.json", encoding="utf-8"))
-    log1 = [json.loads(l) for l in open(RUN / "train_log.jsonl", encoding="utf-8") if l.strip()]
+    log1 = read_log(RUN / "train_log.jsonl")
+    fact_a = json.load(open(LEV / "fact_agreement.json", encoding="utf-8"))                                   # run1, B3, B4, B5, B45
+    fact_b = json.load(open(ROOT / "outputs" / "r1_fact_eval_2026-10-13" / "fact_agreement.json", encoding="utf-8"))   # run1, opt1, opt2, opt3
+    assert fact_a["run1"]["overall"] == fact_b["run1"]["overall"]
+    fact = {**fact_b, **fact_a}
+    baseline = {f: fact["run1"]["overall"][f]["majority_baseline"] for f in FACT_KEYS}
+    for r in fact.values():
+        assert all(abs(r["overall"][f]["majority_baseline"] - baseline[f]) < 1e-12 for f in FACT_KEYS)    # same windows, same baseline
+    probe_raw = json.load(open(LEVRUN / "probe" / "fact_probe.json", encoding="utf-8"))["probe"]
+    probe = {k: {f: {"bacc": probe_raw[k][f]["balanced_acc"], "chance": probe_raw[k][f]["chance_balanced"]} for f in FACT_KEYS} for k in ("last", "l11", "attn")}
     runs, base = [], None
     for key, label, desc, res, logp, epoch in RUNS:
-        run, preds = load_run(key, label, desc, res, logp, epoch, run1_m, log1)
+        run, preds = load_run(key, label, desc, res, logp, epoch, run1_m, log1, fact)
         if base is None:
             base = preds
         # all runs score the same 612 windows in the same order, with the same teacher text and crash-model score
@@ -163,6 +214,7 @@ def main():
 
     data = {"n_windows": len(rows), "n_videos": len({p["video_key"] for p in base}), "n_train": N_TRAIN_WINDOWS, "generic_min": GENERIC_MIN,
             "groups": [{"key": g, "label": lab} for g, lab in GROUPS], "rows": rows, "runs": runs,
+            "fact_baseline": baseline, "probe": probe,
             "counts": {"crash_wrong": sum(r["crash_wrong"] for r in rows)}}
     out = HERE / "r2_data.js"
     out.write_text("window.R2_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n", encoding="utf-8")
@@ -170,7 +222,8 @@ def main():
     for r in runs:
         c = r["compare"]
         print(f"  {r['key']}: val loss {c['val_loss']:.4f}, top repeat {c['top_repeat']}, distinct {c['distinct']}, AUC S_after {c['auc_after']:.3f}, "
-              f"S_before {c['auc_before']:.3f}, saturated {c['saturated_after']:.2f}, counts {r['counts']}, best epoch {r['best_epoch']}, val-min epoch {r['val_min_epoch']}")
+              f"S_before {c['auc_before']:.3f}, saturated {c['saturated_after']:.2f}, counts {r['counts']}, best epoch {r['best_epoch']}, val-min epoch {r['val_min_epoch']}"
+              f", fact {({k: round(v, 3) for k, v in c['fact'].items()})}, train-thr bacc {c['bacc_before_train_thr']}")
 
 
 if __name__ == "__main__":

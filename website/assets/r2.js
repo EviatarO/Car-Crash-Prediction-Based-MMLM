@@ -1,4 +1,4 @@
-/* r2.js - the "Reasoning model" view of experiments.html (Run 1 and the three follow-ups).
+/* r2.js - the "Reasoning model - runs" view of experiments.html (Run 1, the three follow-ups and the four Session-1 runs B3/B4/B5/B45).
 
    window.R2_DATA (built by build_r2_data.py) holds the 612 windows once (D.rows: frames, label, crash model, teacher text) and, per run
    (D.runs[i]), its tables and its run-specific window columns (D.runs[i].rows, same order). A run selector switches the run; a comparison
@@ -43,6 +43,21 @@ function createR2View(deps){
       }).join("")}</tbody>`;
   }
 
+  // Session-1 runs: S_before read at a threshold chosen on 600 training windows (metrics.json "train_threshold")
+  function renderThr(){
+    const t = R.train_thr;
+    $("r2ThrWrap").hidden = !t;
+    if (!t) return;
+    $("r2ThrNote").innerHTML = `<b>Decision before reasoning at a train-chosen threshold.</b> S_before is read at P = ${t.p.toFixed(3)} (log-odds ${t.log_odds.toFixed(3)})
+      instead of 0.5; the threshold was picked on ${t.n_train} training windows, so the validation windows did not choose it.`;
+    const c = t.confusion;
+    $("r2Thr").innerHTML = `<thead><tr><th>threshold P</th><th>log-odds</th><th title="windows from the training set used to pick the threshold">chosen on</th>
+      <th>balanced acc there</th><th>validation accuracy</th><th>validation balanced accuracy</th><th>TP</th><th>FN</th><th>FP</th><th>TN</th></tr></thead>
+      <tbody><tr><td class="num">${t.p.toFixed(3)}</td><td class="num">${t.log_odds.toFixed(3)}</td><td class="num">${t.n_train} train windows</td>
+      <td class="num">${pct(t.bacc_train)}</td><td class="num">${pct(t.acc)}</td><td class="num hero-metric">${pct(t.bacc)}</td>
+      <td class="num">${c.TP}</td><td class="num">${c.FN}</td><td class="num">${c.FP}</td><td class="num">${c.TN}</td></tr></tbody>`;
+  }
+
   function renderGroups(){
     const cm = (c, ok) => `<td class="num">${c.TP}</td><td class="num">${c.FN}</td><td class="num">${c.FP}</td><td class="num">${c.TN}</td>`;
     const tot = k => R.by_group.reduce((s, g) => s + g[k], 0);
@@ -84,22 +99,43 @@ function createR2View(deps){
       </tbody>`;
   }
 
-  function renderCurve(){
-    $("r2Curve").innerHTML = `<thead><tr><th>epoch</th><th>train loss</th><th title="loss of the teacher explanation on the 612 validation windows">validation loss</th>
-      <th title="wrong-video gap with 95% CI">wrong-video gap</th><th>S_before AUC</th><th>S_teacher AUC</th></tr></thead><tbody>${R.curve.map(c => {
-        const isBest = c.epoch === R.best_epoch, isMin = c.epoch === R.val_min_epoch;
-        const bestTag = R.key === "run1" ? ' <span class="chip pos" title="best.pt: chosen by the wrong-video gap">best.pt</span>'
-          : R.key === "opt1" ? ' <span class="chip pos" title="the checkpoint evaluated in this run (Option 1)">evaluated here</span>'
-          : ' <span class="chip pos" title="best.pt: the retrains keep the epoch with the lowest validation loss">best.pt</span>';
-        const tags = (isBest ? bestTag : "") + (isMin ? ' <span class="chip neg" title="lowest validation loss">lowest val loss</span>' : "");
-        return `<tr class="${R.key === "opt1" && isBest ? "hl" : ""}"><td>${c.epoch}${tags}</td><td class="num">${f3(c.train_loss)}</td><td class="num${isMin ? " hero-metric" : ""}">${f3(c.val_loss)}</td>
+  // one training-curve table; tag(c) -> chips for the epoch row, hl(c) -> row highlighted
+  function curveTable(id, curve, bestEp, minEp, tag, hl){
+    $(id).innerHTML = `<thead><tr><th>epoch</th><th>train loss</th><th title="loss of the teacher explanation on the 612 validation windows">validation loss</th>
+      <th title="wrong-video gap with 95% CI">wrong-video gap</th><th>S_before AUC</th><th>S_teacher AUC</th></tr></thead><tbody>${curve.map(c => {
+        const isBest = c.epoch === bestEp, isMin = c.epoch === minEp;
+        return `<tr class="${hl && isBest ? "hl" : ""}"><td>${c.epoch}${tag(isBest, isMin)}</td><td class="num">${f3(c.train_loss)}</td><td class="num${isMin ? " hero-metric" : ""}">${f3(c.val_loss)}</td>
           <td class="num${isBest ? " hero-metric" : ""}">${f3(c.gap_wrong)} <span class="dim">${ci(c.gap_wrong_ci)}</span></td>
           <td class="num">${f3(c.auc_before)}</td><td class="num">${f3(c.auc_teacher)}</td></tr>`;
       }).join("")}</tbody>`;
+  }
+
+  function renderCurve(){
+    const two = !!R.curve_p1;            // Session-1 runs: a Phase-1 table and a Phase-2 table
+    ["r2Curve1Head", "r2Curve1Wrap", "r2Curve2Head"].forEach(id => { $(id).hidden = !two; });
+    const bestTag = R.key === "run1" ? ' <span class="chip pos" title="best.pt: chosen by the wrong-video gap">best.pt</span>'
+      : R.key === "opt1" ? ' <span class="chip pos" title="the checkpoint evaluated in this run (Option 1)">evaluated here</span>'
+      : ' <span class="chip pos" title="best.pt: the retrains keep the epoch with the lowest validation loss">best.pt</span>';
+    const minTag = ' <span class="chip neg" title="lowest validation loss">lowest val loss</span>';
+    const tag = two
+      ? ((b, m) => b ? ' <span class="chip pos" title="best.pt: the epoch with the lowest validation loss">best.pt</span>' : "")
+      : ((b, m) => (b ? bestTag : "") + (m ? minTag : ""));
+    if (two) curveTable("r2Curve1", R.curve_p1, R.best_epoch_p1, R.best_epoch_p1, tag, false);
+    curveTable("r2Curve", R.curve, R.best_epoch, R.val_min_epoch, tag, R.key === "opt1");
     const last = R.curve[R.curve.length - 1], r1 = D.runs[0];
-    $("r2CurveSrc").textContent = R.curve_own
+    $("r2CurveSrc").textContent = two
+      ? `This run's own training logs: Phase 1 (${R.curve_p1.length} epochs) and Phase 2 (${R.curve.length} epochs).`
+      : R.curve_own
       ? (R.key === "run1" ? `Run 1's own training log (${R.curve.length} epochs).` : `This run's own training log (${R.curve.length} epochs).`)
       : "Option 1 has no training log of its own: this is Run 1's log, and the row of the evaluated checkpoint (epoch 3) is highlighted.";
+    if (two){
+      const p1 = R.curve_p1, p1f = p1[0], p1b = p1.find(c => c.epoch === R.best_epoch_p1), b2 = R.curve.find(c => c.epoch === R.best_epoch);
+      $("r2CurveNote").innerHTML = `<b>Phase 1</b> best.pt = epoch ${R.best_epoch_p1} of ${p1.length} (validation loss ${f3(p1b.val_loss)}, wrong-video gap ${f3(p1f.gap_wrong)} → ${f3(p1b.gap_wrong)}).
+        <b>Phase 2</b> best.pt = epoch ${R.best_epoch}, the epoch with the lowest validation loss (${f3(b2.val_loss)})` +
+        (last.epoch === R.best_epoch ? "; it is also the last epoch of the log." : `; the last epoch (${last.epoch}) has train loss ${f3(last.train_loss)} and validation loss ${f3(last.val_loss)}.`) +
+        ` S_before AUC = the decision read straight after the frames, measured on the 612 validation windows.`;
+      return;
+    }
     $("r2CurveNote").innerHTML = (R.key === "run1" || R.key === "opt1")
       ? `<b>Run 1: best.pt = epoch ${r1.best_epoch}</b>, chosen by the wrong-video gap (how much the text depends on the frames), while the
       <b>validation loss was lowest at epoch ${r1.val_min_epoch}</b> and the train loss kept falling: from epoch ${r1.val_min_epoch} on the model fits the training text
@@ -200,7 +236,7 @@ function createR2View(deps){
 
   /* ----------------------------------------------------------- comparison table + run selector */
   function renderCompare(){
-    // [header, tooltip, formatter, field for "best of the four", direction]
+    // [header, tooltip, formatter, field for "best of the runs", direction]
     const C = [
       ["val loss", "loss of the teacher explanation on the 612 validation windows (nats per token); lower = fits the teacher text better", c => f3(c.val_loss), "val_loss", "min"],
       ["perplexity", "exp(val loss)", c => f2(c.ppl), "ppl", "min"],
@@ -219,22 +255,43 @@ function createR2View(deps){
       ["bal. acc S_after @0.5", "balanced accuracy of S_after at P = 0.5", c => pct(c.bacc_after), "bacc_after", "max"],
       ["acc S_before @0.5", "accuracy of S_before at P = 0.5", c => pct(c.acc_before), "acc_before", "max"],
       ["bal. acc S_before @0.5", "balanced accuracy of S_before at P = 0.5", c => pct(c.bacc_before), "bacc_before", "max"],
+      ["balanced acc before reasoning (train-chosen threshold)", "balanced accuracy of S_before at a threshold chosen on 600 training windows (Session-1 runs only; blank for the older runs)",
+        c => c.bacc_before_train_thr === null ? "" : pct(c.bacc_before_train_thr), "bacc_before_train_thr", "max"],
       ["crash model AUC", "the frozen crash model on the same windows, for reference (the same in every run)", c => f3(c.auc_crash), null, null],
     ];
-    const rows = D.runs.map(r => r.compare);
+    // fact agreement: share of windows where the explanation names the same type / side / motion / gap as the teacher's (windows where the teacher text states it)
+    const FACTS = [["type", "road-user type"], ["side", "side"], ["motion", "motion"], ["gap", "gap"]];
+    FACTS.forEach(([f, name]) => C.push([`fact: ${f}`, `fact agreement, ${name}: share of windows where the model's explanation states the same ${name} as the teacher's (among windows where the teacher text states it); majority baseline ${f2(D.fact_baseline[f])}`,
+      c => f2(c.fact[f]), `fact_${f}`, "max"]));
+    const rows = D.runs.map(r => Object.assign({}, r.compare, Object.fromEntries(FACTS.map(([f]) => [`fact_${f}`, r.compare.fact[f]]))));
     const best = {};
-    C.forEach(([, , , k, dir]) => { if (k){ const v = rows.map(c => c[k]); best[k] = dir === "max" ? Math.max(...v) : Math.min(...v); } });
+    C.forEach(([, , , k, dir]) => { if (k){ const v = rows.map(c => c[k]).filter(x => x !== null && x !== undefined); best[k] = dir === "max" ? Math.max(...v) : Math.min(...v); } });
+    const base = `<tr class="dimrow"><td title="always answering the most common value of the fact">majority baseline</td>${C.map(([, , , k]) =>
+      `<td class="num">${k && k.startsWith("fact_") ? f2(D.fact_baseline[k.slice(5)]) : ""}</td>`).join("")}</tr>`;
     $("r2Compare").innerHTML = `<thead><tr><th>run</th>${C.map(([h, t]) => `<th title="${esc(t)}">${h}</th>`).join("")}</tr></thead><tbody>${rows.map(c =>
       `<tr data-run="${esc(c.key)}" class="cmprow"><td>${esc(c.label)}</td>${C.map(([, , f, k]) =>
-        `<td class="num${k && c[k] === best[k] ? " hero-metric" : ""}">${f(c)}</td>`).join("")}</tr>`).join("")}</tbody>`;
+        `<td class="num${k && c[k] === best[k] ? " hero-metric" : ""}">${f(c)}</td>`).join("")}</tr>`).join("")}${base}</tbody>`;
     $("r2Compare").querySelectorAll("tr[data-run]").forEach(tr => tr.addEventListener("click", () => selectRun(tr.dataset.run)));
-    const sat = rows.map(c => 100 * c.saturated_after);
-    $("r2CompareNote").innerHTML = `<b>Reading.</b> A lower validation loss did not give better generated text: BERTScore and ROUGE-L did not improve with it.<br>
-      The template cap and the position hint cut the single most repeated sentence (${rows[0].top_repeat} → ${rows[2].top_repeat} / ${rows[3].top_repeat}), but road-user match stayed about
-      ${(100 * rows[0].road_user_match).toFixed(0)}% for every run.<br>
-      S_after is saturated in every run (${Math.round(Math.min(...sat))}–${Math.round(Math.max(...sat))}% of windows have |log-odds| above 4), so its threshold-free ranking is poor, and S_before has the higher AUC in all four.<br>
-      <span class="dim">Bold = best of the four (lowest for loss, perplexity, most repeated; highest for the rest). Thresholded columns are at P = 0.5.
-      Option 1 is the same training run as Run 1 at an earlier epoch. Click a row or a run button to open that run below.</span>`;
+    const by = k => rows.find(c => c.key === k), r1 = by("run1"), b3 = by("b3"), p0 = x => (100 * x).toFixed(0) + "%";
+    $("r2CompareNote").innerHTML = `<b>Reading (Session 1).</b> The fresh Phase 1 on the Nexar reasoning texts (B3 vs Run 1) removed the template collapse
+      (${b3.distinct} vs ${r1.distinct} distinct explanations; most repeated ${b3.top_repeat} vs ${r1.top_repeat}) and made the text depend about 3x more on the video
+      (wrong-video gap ${sgn(b3.gap_wrong)} vs ${sgn(r1.gap_wrong)}); side named correctly ${p0(b3.fact.side)} vs ${p0(r1.fact.side)}.<br>
+      Extra inputs (attention, layer 11, both) add little on top; road-user type stays at the baseline (${f2(D.fact_baseline.type)}) in every run, matching the probe.<br>
+      The decision read before reasoning is still best in Run 1 (AUC ${f3(r1.auc_before)}) of Run 1 and the B runs (Option 2: ${f3(by("opt2").auc_before)}); no run reaches the crash model (AUC ${f3(r1.auc_crash)}).<br>
+      <span class="dim">Bold = best of the eight (lowest for loss, perplexity, most repeated; highest for the rest). Thresholded columns are at P = 0.5 unless stated.
+      Fact columns = share of windows where the explanation names the same type / side / motion / gap as the teacher's; the last row is the majority baseline
+      (type ${f2(D.fact_baseline.type)}, side ${f2(D.fact_baseline.side)}, motion ${f2(D.fact_baseline.motion)}, gap ${f2(D.fact_baseline.gap)}).
+      Option 1 is the same training run as Run 1 at an earlier epoch. Click a row or a run button to open that run below; the table scrolls sideways.</span>`;
+  }
+
+  // fact probe: balanced accuracy of a small classifier on the pooled tokens, chance in brackets
+  function renderProbe(){
+    const P = [["last", "last layer"], ["l11", "layer 11"], ["attn", "attention-weighted"]], F = [["type", "road-user type"], ["side", "side"], ["motion", "motion"], ["gap", "gap"]];
+    $("r2Probe").innerHTML = `<thead><tr><th>fact</th>${P.map(([, h]) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${F.map(([f, name]) => {
+      const best = Math.max(...P.map(([k]) => D.probe[k][f].bacc));
+      return `<tr><td>${name}</td>${P.map(([k]) => { const x = D.probe[k][f];
+        return `<td class="num${x.bacc === best ? " hero-metric" : ""}">${f2(x.bacc)} <span class="dim">(${f2(x.chance)})</span></td>`; }).join("")}</tr>`;
+    }).join("")}</tbody>`;
   }
 
   function selectRun(key){
@@ -245,7 +302,7 @@ function createR2View(deps){
     document.querySelectorAll("#r2Compare tr[data-run]").forEach(tr => tr.classList.toggle("hl", tr.dataset.run === R.key));
     $("r2RunDesc").innerHTML = `<b>${esc(R.label)}.</b> ${esc(R.desc)}. Everything below (decision scores, per group, text, training curve, window table) is this run.`;
     document.querySelectorAll("#r2Flags [data-flag]").forEach(b => { b.textContent = `${b.dataset.base} (${counts()[b.dataset.flag]})`; });
-    renderDecision(); renderGroups(); renderText(); renderCurve();
+    renderDecision(); renderThr(); renderGroups(); renderText(); renderCurve();
     renderBody();
   }
 
@@ -282,7 +339,7 @@ function createR2View(deps){
     $("r2RunSel").innerHTML = '<span class="rowcount">Run:</span> ' + D.runs.map(r =>
       `<button class="pill" data-run="${esc(r.key)}" title="${esc(r.desc)}">${esc(r.label)}</button>`).join(" ");
     $("r2RunSel").querySelectorAll("[data-run]").forEach(b => b.addEventListener("click", () => selectRun(b.dataset.run)));
-    renderCompare(); renderHead();
+    renderCompare(); renderProbe(); renderHead();
     selectRun(state.run);
   }
   return {show(){ if (!built) build(); else renderBody(true); }};
