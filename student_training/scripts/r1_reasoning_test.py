@@ -35,15 +35,19 @@ class AllIn:
 
 def main():
     # 1 ---- round trip + prompt order
+    card = {"road_user": "truck", "side": "ahead", "motion": "braking", "gap": "closing"}
     for o in ORDERS:
-        t = reasoning_target("A truck slows ahead. The gap closes.", "The ego vehicle collides with the truck", 1, o)
+        t = reasoning_target("A truck slows ahead. The gap closes.", "The ego vehicle collides with the truck", 1, o, card)
         p = parse_reasoning(t)
-        assert p == {"explanation": "A truck slows ahead. The gap closes.", "collision": 1, "outcome": "The ego vehicle collides with the truck."}, p
+        assert {k: p[k] for k in ("explanation", "collision", "outcome")} == {"explanation": "A truck slows ahead. The gap closes.", "collision": 1,
+                                                                             "outcome": "The ego vehicle collides with the truck."}, p
+        assert (p["facts"] == card) == (o == "facts_first"), (o, p["facts"])
         q = q_reason(o)
+        assert ("Facts:" in q) == (o == "facts_first")
         pos = [q.index(k) for k in ("Reasoning:", "Collision:", "Outcome:")]
         tpos = [t.index(k) for k in ("Reasoning:", "Collision:", "Outcome:")]
         assert sorted(range(3), key=pos.__getitem__) == sorted(range(3), key=tpos.__getitem__), (o, pos, tpos)
-        assert parse_reasoning(reasoning_target("x y.", "No collision occurs.", 0, o))["collision"] == 0
+        assert parse_reasoning(reasoning_target("x y.", "No collision occurs.", 0, o, card))["collision"] == 0
     print("1 ok: round trip, prompt order == answer order")
 
     c = AllIn()
@@ -217,6 +221,57 @@ def main():
     vp2 = val_pairs(va0, sh_va, {i["id"]: [("e1", "o1"), ("e2", "o2"), ("e3", "o3")] for i in va0})
     assert len(vp2) >= len(vp) and all(i["label"] == orig_label[i["src_id"]] for i in vp2)
     print(f"10 ok: augmented epoch {len(ep)} (shifted windows {shifted:.2f}, rephrased texts {reph:.2f}); validation {len(va0)} -> {len(vp)} (shifted only) / {len(vp2)} (with texts); labels preserved")
+    # 11 ---- facts_first: the Facts line round trip, the prompt order, the scoring prefixes
+    from r1_common import facts_line, parse_facts
+    from r1_reasoning import prefix_for, score_kinds
+    card2 = {"road_user": "suv", "side": "right", "motion": "cutting_in", "gap": "closing"}
+    assert facts_line(card2) == "Facts: road user = suv; side = right; motion = cutting in; gap = closing", facts_line(card2)
+    assert parse_facts(facts_line(card2)) == card2
+    assert parse_facts("Reasoning: no facts here") is None
+    assert parse_facts("Facts: road user = car; side = ahead")["motion"] is None
+    t = reasoning_target("An SUV cuts in.", "The ego vehicle collides with the SUV", 1, "facts_first", card2)
+    assert t.startswith("Facts: road user = suv") and [t.index(k) for k in ("Facts:", "Reasoning:", "Collision:", "Outcome:")] == sorted(t.index(k) for k in ("Facts:", "Reasoning:", "Collision:", "Outcome:"))
+    it = {"order": "facts_first", "facts": card2, "gt": {"explanation": "An SUV cuts in."}}
+    assert prefix_for("before", it) == "Facts:" + chr(10) + "Reasoning:" + chr(10) + "Collision:"
+    assert prefix_for("teacher", it) == facts_line(card2) + chr(10) + "Reasoning: An SUV cuts in." + chr(10) + "Collision:"
+    assert prefix_for("after", it, "Own text.", "Facts: road user = car") == "Facts: road user = car" + chr(10) + "Reasoning: Own text." + chr(10) + "Collision:"
+    assert prefix_for("before", {"order": "reason_first"}) == "Reasoning:" + chr(10) + "Collision:"                  # old orders unchanged
+    assert score_kinds("facts_first") == ("before", "teacher") and score_kinds("verdict_first") == ("first",) and score_kinds("reason_first") == ("before", "teacher")
+    print("11 ok: facts_first round trip, prompt order, scoring prefixes; the other orders unchanged")
+
+    # 12 ---- real fact cards: every window has one, facts_first targets start with the card, a shifted copy uses its source window's card
+    from r1_data import load_cards
+    cards = load_cards(ROOT / "outputs/teacher_dataset_2026-10/fact_cards_teacher.jsonl")
+    trf = load_items("nexar_reasoning", 2, "train", c, order="facts_first", facts=cards)
+    vaf = load_items("nexar_reasoning", 2, "val", c, order="facts_first", facts=cards)
+    assert len(trf) == len(tr) and len(vaf) == len(va)
+    assert all(i["answer"].startswith("Facts: road user = ") and i["facts"] == cards[i["id"]] for i in trf + vaf)
+    from r1_common import FACT_SLOTS
+    assert all(set(card_) == set(FACT_SLOTS) for card_ in cards.values()), "card with missing slots"
+    shf = load_items("nexar_reasoning_shifted", 2, "train", c, order="facts_first", facts=cards)
+    assert shf and all(i["facts"] == cards[i["src_id"]] for i in shf)
+    try:
+        load_items("nexar_reasoning", 2, "val", c, order="facts_first")
+        raise AssertionError("facts_first without cards must fail")
+    except KeyError:
+        pass
+    print(f"12 ok: {len(cards)} fact cards; {len(trf)} train + {len(vaf)} val facts_first targets; shifted copies use their source card")
+
+    # 13 ---- drop_prealert + TTE-balanced positives
+    trd = load_items("nexar_reasoning", 2, "train", c, drop_prealert=True)
+    vad = load_items("nexar_reasoning", 2, "val", c, drop_prealert=True)
+    assert not any(i["pre_alert"] for i in trd + vad) and len(trd) == sum(not i["pre_alert"] for i in tr) and len(vad) == sum(not i["pre_alert"] for i in va)
+    from r1_data import _draw_equal
+    ep = epoch_items(trd, random.Random(0), True, tte_balance=True)
+    cl = Counter(i["label"] for i in ep)
+    pos_groups = Counter(i["group"] for i in ep if i["label"] == 1)
+    assert cl[0] == cl[1] and set(pos_groups) == {"tte0.5", "tte1.0", "tte1.5"} and max(pos_groups.values()) - min(pos_groups.values()) <= 1, (cl, pos_groups)
+    assert Counter(i["label"] for i in epoch_items(trd, random.Random(0), True))[1] == cl[1]                       # same epoch length with and without the balance
+    assert all(g in ("normal",) for g in {i["group"] for i in ep if i["label"] == 0})                              # no pre-alert negatives left
+    toy = [{"label": 1, "group": "tte0.5", "id": a} for a in range(10)] + [{"label": 1, "group": "tte1.5", "id": 100 + a} for a in range(2)] + [{"label": 1, "group": None, "id": 900}]
+    d = _draw_equal(toy, 9, random.Random(0))
+    assert len(d) == 9 + 0 and 900 in [i["id"] for i in d] and Counter(i["group"] for i in d if i["group"])["tte1.5"] == 4, Counter(i["group"] for i in d)    # small group repeated, extra positive kept
+    print(f"13 ok: pre-alert dropped ({len(tr) - len(trd)} train, {len(va) - len(vad)} val windows); positives per epoch {dict(pos_groups)}; small-group repeats and extras handled")
     print("ALL OK")
 
 

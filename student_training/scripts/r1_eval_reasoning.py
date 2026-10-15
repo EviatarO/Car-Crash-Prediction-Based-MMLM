@@ -1,7 +1,8 @@
 """
 r1_eval_reasoning.py - evaluation of the reasoning model on the Nexar reasoning dataset (plan 2026-10-12_Plan-Phase2-Reasoning-Retrain, section 6).
 
-  python r1_eval_reasoning.py --ckpt <phase2r>/best.pt --cache-dir <cache> --out-dir <dir> [--order reason_first|verdict_first]
+  python r1_eval_reasoning.py --ckpt <phase2r>/best.pt --cache-dir <cache> --out-dir <dir> [--order reason_first|verdict_first|facts_first]
+         [--facts-cards fact_cards_teacher.jsonl] [--drop-prealert]   (plan 2026-10-15)
          [--before-ckpt <phase1>/best.pt] [--old-ckpt <old phase2>/best.pt] [--limit N] [--lm tiny --device cpu]   (smoke)
 
 Writes predictions.jsonl (one row per validation window), metrics.json, summary.md.
@@ -30,10 +31,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "models"))
 from r1_bridge import R1Bridge  # noqa: E402
-from r1_common import Q_PHASE2, parse_reasoning  # noqa: E402
-from r1_data import Cache, load_items  # noqa: E402
+from r1_common import FACT_SLOTS, ORDERS, Q_PHASE2, parse_reasoning  # noqa: E402
+from r1_data import Cache, load_cards, load_items  # noqa: E402
 from r1_eval_gates import retrieval_at10, token_f1  # noqa: E402
-from r1_reasoning import auc_ap, logodds, prefix_for  # noqa: E402
+from r1_reasoning import auc_ap, logodds, prefix_for, score_kinds  # noqa: E402
 from r1_train import QWEN_ID, evaluate, load_lm  # noqa: E402
 
 GROUPS = ("normal", "pre_alert", "tte1.5", "tte1.0", "tte0.5")
@@ -174,6 +175,39 @@ def compute_metrics(rows, score_keys):
     return m
 
 
+def missed_crashes(rows):
+    """Plan 2026-10-15 gate number: per crash TTE group, the share of visible-hazard crash windows (label 1) that each path calls 'no':
+    the written verdict (Collision: no), the decision score at 0.5 (s_after or s_first) and the crash model (P < 0.5)."""
+    main = "s_after" if rows and "s_after" in rows[0] else ("s_first" if rows and "s_first" in rows[0] else None)
+    out = {}
+    for g in ("tte0.5", "tte1.0", "tte1.5", "all"):
+        rs = [r for r in rows if r["label"] == 1 and (r["group"] == g or (g == "all" and r["group"].startswith("tte")))]
+        if not rs:
+            continue
+        out[g] = {"n": len(rs),
+                  "written_no": float(np.mean([r["gen_collision"] != 1 for r in rs])),
+                  "score_no": float(np.mean([r[main] < 0 for r in rs])) if main else None,
+                  "crash_model_no": float(np.mean([r["a1_p"] < 0.5 for r in rs]))}
+    return out
+
+
+def facts_line_accuracy(rows):
+    """facts_first: the generated Facts line vs the window's card, per slot (windows whose card slot is not_stated are skipped), with the
+    majority baseline of the same windows; crash windows (TTE groups) and all windows."""
+    out = {}
+    for name, sel in (("all", lambda r: True), ("crash", lambda r: r["group"].startswith("tte"))):
+        rs = [r for r in rows if sel(r) and r.get("teacher_facts")]
+        e = {"n": len(rs), "line_present": float(np.mean([r.get("gen_facts") is not None for r in rs])) if rs else None}
+        for s in FACT_SLOTS:
+            k = [(r["teacher_facts"][s], (r.get("gen_facts") or {}).get(s)) for r in rs if r["teacher_facts"][s] != "not_stated"]
+            if not k:
+                continue
+            maj = Counter(a for a, _ in k).most_common(1)[0]
+            e[s] = {"n": len(k), "acc": float(np.mean([a == b for a, b in k])), "majority": maj[0], "majority_acc": maj[1] / len(k)}
+        out[name] = e
+    return out
+
+
 def text_metrics(rows):
     """Cheap text numbers; BERTScore / ROUGE / BLEU / METEOR are computed on the PC from predictions.jsonl."""
     f1 = [token_f1(r["gen_explanation"] or "", r["teacher_explanation"]) for r in rows]
@@ -195,7 +229,9 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--cache-dir", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--order", default="reason_first", choices=["reason_first", "verdict_first"])
+    ap.add_argument("--order", default="reason_first", choices=list(ORDERS))
+    ap.add_argument("--facts-cards", default=None, help="fact_cards_teacher.jsonl: needed for --order facts_first (also scores the generated Facts line)")
+    ap.add_argument("--drop-prealert", action="store_true", help="score without the pre-alert windows (plan 2026-10-15)")
     ap.add_argument("--split", default="val")
     ap.add_argument("--lm", default=QWEN_ID)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -219,7 +255,8 @@ def main():
     bridge = R1Bridge(qwen, tok, inp=args.input).to(dev)
     caches = {"nexar_reasoning": Cache(args.cache_dir, "nexar_reasoning", args.input)}
     cache = caches["nexar_reasoning"]
-    items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order, box_hint=args.box_hint)
+    cards = load_cards(args.facts_cards) if args.facts_cards else None
+    items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
     if args.limit:
         items = items[:args.limit]
     assert items, "no validation windows in the cache"
@@ -241,8 +278,11 @@ def main():
              "label": it["label"], "label_nexar": it["label_nexar"], "tte": it["tte"], "pre_alert": it["pre_alert"], "group": it["group"],
              "a1_p": cache.p_collision(it["id"]), "teacher_explanation": it["gt"]["explanation"], "teacher_outcome": it["gt"]["prediction"],
              "teacher_risk": it["gt"]["risk"]} for it in items]
+    if cards:
+        for r, it in zip(rows, items):
+            r["teacher_facts"] = it["facts"]
     score_keys = []
-    kinds = ("before", "teacher") if args.order == "reason_first" else ("first",)
+    kinds = score_kinds(args.order)
     for kind in kinds:
         sc = logodds(bridge, items, [prefix_for(kind, it) for it in items], caches, dev)
         for r, s in zip(rows, sc):
@@ -250,7 +290,7 @@ def main():
         score_keys.append(f"s_{kind}")
     if args.train_threshold:
         import random as _r
-        tr_all = load_items("nexar_reasoning", 2, "train", cache, order=args.order, box_hint=args.box_hint)
+        tr_all = load_items("nexar_reasoning", 2, "train", cache, order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
         tr_items = _r.Random(0).sample(tr_all, min(args.train_threshold, len(tr_all)))
         kind0 = kinds[0]
         s_tr = np.array(logodds(bridge, tr_items, [prefix_for(kind0, it) for it in tr_items], caches, dev))
@@ -270,9 +310,12 @@ def main():
     parsed = [parse_reasoning(g) for g in gens]
     for r, g, p in zip(rows, gens, parsed):
         r.update(gen_text=g, gen_explanation=p["explanation"], gen_collision=p["collision"], gen_outcome=p["outcome"])
-    if args.order == "reason_first":
-        expl = [p["explanation"] or g.split("Collision:")[0].replace("Reasoning:", "").strip() for g, p in zip(gens, parsed)]
-        sc = logodds(bridge, items, [prefix_for("after", it, e) for it, e in zip(items, expl)], caches, dev)
+        if args.order == "facts_first":
+            r["gen_facts"] = p["facts"]
+    if args.order in ("reason_first", "facts_first"):
+        expl = [p["explanation"] or g.split("Collision:")[0].split("Reasoning:")[-1].strip() for g, p in zip(gens, parsed)]
+        fl = [(re.search(r"Facts:[^\n]*", g).group(0) if re.search(r"Facts:[^\n]*", g) else None) for g in gens]
+        sc = logodds(bridge, items, [prefix_for("after", it, e, f) for it, e, f in zip(items, expl, fl)], caches, dev)
         for r, s in zip(rows, sc):
             r["s_after"] = s
         score_keys.append("s_after")
@@ -287,7 +330,9 @@ def main():
             r["s_old_phase2"] = s
         score_keys.append("s_old_phase2")
 
-    rep.update(metrics=compute_metrics(rows, score_keys), text=text_metrics(rows))
+    rep.update(metrics=compute_metrics(rows, score_keys), text=text_metrics(rows), missed_crashes=missed_crashes(rows))
+    if args.order == "facts_first":
+        rep["facts_line"] = facts_line_accuracy(rows)
     with open(out / "predictions.jsonl", "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -300,7 +345,10 @@ def main():
     lines += ["", f"loss / perplexity (teacher text): after {rep['after']['loss_real']:.3f} / {rep['after']['perplexity_real']:.2f}"
               + (f" , before (Phase 1) {rep['before_phase1']['loss_real']:.3f} / {rep['before_phase1']['perplexity_real']:.2f}" if 'before_phase1' in rep else ""),
               f"wrong-video gap {rep['after']['gap_wrong']:+.3f} {rep['after']['gap_wrong_ci']}; blank-video gap {rep['after']['gap_blank']:+.3f} {rep['after']['gap_blank_ci']}",
-              f"retrieval@1 of 10: {rep['retrieval_at_10']['top1']:.3f} (chance 0.10)", "", "text: " + json.dumps(rep["text"])]
+              f"retrieval@1 of 10: {rep['retrieval_at_10']['top1']:.3f} (chance 0.10)", "", "text: " + json.dumps(rep["text"]),
+              "", "missed crashes (share of visible-hazard crash windows called 'no'; thresholds 0.5): " + json.dumps(rep["missed_crashes"])]
+    if "facts_line" in rep:
+        lines += ["", "Facts line vs the window's card: " + json.dumps(rep["facts_line"])]
     (out / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
 

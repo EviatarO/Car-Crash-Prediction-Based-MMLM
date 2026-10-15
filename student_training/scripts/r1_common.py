@@ -90,26 +90,55 @@ _FIELDS = {"reason_first": ("Reasoning: how it moves relative to the ego vehicle
                             "Collision: yes or no.\nOutcome: one short sentence."),
            "verdict_first": ("Collision: yes or no.\n"
                              "Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
-                             "Outcome: one short sentence.")}
+                             "Outcome: one short sentence."),
+           # plan 2026-10-15: a closed-list fact card first (r1_fact_cards.py v2: side / gap at the END of the clip, motion = main manoeuvre)
+           "facts_first": ("Facts: road user, side, motion and gap.\n"
+                           "Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
+                           "Collision: yes or no.\nOutcome: one short sentence.")}
 ORDERS = tuple(_FIELDS)
+_NUM = {3: "three", 4: "four"}
+FACT_SLOTS = ("road_user", "side", "motion", "gap")
 
 
 def q_reason(order: str = "reason_first") -> str:
-    return "Look at the road user that matters most for the ego vehicle. Answer in three parts:\n" + _FIELDS[order]
+    return f"Look at the road user that matters most for the ego vehicle. Answer in {_NUM[_FIELDS[order].count(chr(10)) + 1]} parts:\n" + _FIELDS[order]
 
 
-def reasoning_target(expl: str, pred: str, label_vis: int, order: str = "reason_first") -> str:
+def facts_line(card: dict) -> str:
+    """{'road_user': 'car', 'side': 'ahead', 'motion': 'cutting_in', 'gap': 'closing'} -> 'Facts: road user = car; side = ahead; motion = cutting in; gap = closing'"""
+    return "Facts: " + "; ".join(f"{s.replace('_', ' ')} = {card[s].replace('_', ' ')}" for s in FACT_SLOTS)
+
+
+def reasoning_target(expl: str, pred: str, label_vis: int, order: str = "reason_first", facts: dict | None = None) -> str:
     expl, pred = expl.strip(), pred.strip()
     if not pred.endswith((".", "!", "?")):
         pred += "."
     v = f"Collision: {'yes' if label_vis else 'no'}."
     r, o = f"Reasoning: {expl}", f"Outcome: {pred}"
+    if order == "facts_first":
+        assert facts is not None, "facts_first needs the window's fact card"
+        return "\n".join([facts_line(facts), r, v, o])
     return "\n".join([r, v, o] if order == "reason_first" else [v, r, o])
 
 
+def parse_facts(text: str) -> dict | None:
+    """The 'Facts:' line of a generated answer -> {slot: value with underscores} (missing slots -> None); None if there is no Facts line."""
+    m = re.search(r"Facts:\s*([^\n]*)", text or "", re.I)
+    if not m:
+        return None
+    out = {s: None for s in FACT_SLOTS}
+    for part in m.group(1).split(";"):
+        if "=" in part:
+            k, v = (x.strip().lower().rstrip(".") for x in part.split("=", 1))
+            k = k.replace(" ", "_")
+            if k in out:
+                out[k] = v.replace(" ", "_")
+    return out
+
+
 def parse_reasoning(text: str) -> dict:
-    """Parse a generated answer of either order -> {explanation, collision (1/0/None), outcome}."""
-    out = {"explanation": None, "collision": None, "outcome": None}
+    """Parse a generated answer of any order -> {explanation, collision (1/0/None), outcome, facts (dict or None)}."""
+    out = {"explanation": None, "collision": None, "outcome": None, "facts": parse_facts(text)}
     m = re.search(r"Collision:\s*(yes|no)", text, re.I)
     if m:
         out["collision"] = 1 if m.group(1).lower() == "yes" else 0

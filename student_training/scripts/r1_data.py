@@ -15,7 +15,7 @@ import torch
 import sys
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from r1_common import Q_PHASE1, Q_PHASE2, TAG, q_reason, reasoning_group, reasoning_target  # noqa: E402
+from r1_common import FACT_SLOTS, Q_PHASE1, Q_PHASE2, TAG, q_reason, reasoning_group, reasoning_target  # noqa: E402
 
 ROOT = HERE.parents[1]
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
@@ -67,10 +67,18 @@ class Cache:
         return self.rows[wid]["p_collision"]
 
 
-def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first", box_hint=False):
+def load_cards(path):
+    """fact_cards_teacher.jsonl (r1_fact_cards.py) -> {window id: {road_user, side, motion, gap}}"""
+    return {r["id"]: {s: r[s] for s in FACT_SLOTS} for r in map(json.loads, open(path, encoding="utf-8"))}
+
+
+def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first", box_hint=False,
+               facts=None, drop_prealert=False):
     """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
     min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
-    Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set)."""
+    Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set).
+    Reasoning dataset (plan 2026-10-15): facts = {window id: fact card} (needed for order facts_first; a shifted copy uses its source window's card);
+    drop_prealert = leave the pre-alert windows out entirely (their labels / texts are under investigation)."""
     out = []
     for l in open(MANIFEST[source], encoding="utf-8"):
         r = json.loads(l)
@@ -78,11 +86,17 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
             continue
         if source.startswith("nexar_reasoning"):      # reasoning dataset (and its frame-shifted copies): the class is the VISIBLE-HAZARD label
             g = r["gt"]
+            if drop_prealert and g["pre_alert"]:
+                continue
+            src_id = r.get("source_id", r["id"])
+            card = facts.get(src_id) if facts else None
+            if order == "facts_first" and card is None:
+                raise KeyError(f"no fact card for {src_id}")
             out.append({"id": r["id"], "source": source, "video_key": r["video_key"], "label": g["label_vis"], "label_nexar": r["label"],
                         "tte": r["tte"], "pre_alert": g["pre_alert"], "group": reasoning_group(r["label"], r["tte"], g["pre_alert"]),
-                        "src_id": r.get("source_id", r["id"]), "shift": r.get("shift", 0), "split": r["split"],
+                        "src_id": src_id, "shift": r.get("shift", 0), "split": r["split"], "facts": card,
                         "question": q_reason(order) + ("\n" + g["box_hint"] if box_hint else ""), "tag": TAG[source], "order": order, "gt": g,
-                        "answer": reasoning_target(g["explanation"], g["prediction"], g["label_vis"], order)})
+                        "answer": reasoning_target(g["explanation"], g["prediction"], g["label_vis"], order, card)})
             continue
         if nocrash_only:              # phase-1 hallucination check: no-crash windows, no target text (generation only)
             if r["label"] != 0:
@@ -110,17 +124,18 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
     return out
 
 
-def epoch_items(items, rng: random.Random, balance: bool):
+def epoch_items(items, rng: random.Random, balance: bool, tte_balance: bool = False):
     """Phase 2 sampler: 50/50 on `label`. With k = min(#neg, #pos), draw k from BOTH classes (old DADA+Nexar data: negatives are the
     minority, so all of them are kept - unchanged behaviour). If negatives are the majority (reasoning dataset) the k negatives are
-    drawn proportionally per `group` (normal / pre_alert), so the hard negatives keep their share. Phase 1: all."""
+    drawn proportionally per `group` (normal / pre_alert), so the hard negatives keep their share. Phase 1: all.
+    tte_balance (plan 2026-10-15): the k positives are drawn in EQUAL shares per group (tte0.5 / tte1.0 / tte1.5), with repeats inside a small group."""
     items = list(items)
     if any("variants" in i for i in items):                # augmentation (plan 2026-10-14): realised AFTER the 50/50 draw
-        return [realize(i, rng) if "variants" in i else i for i in _epoch_base(items, rng, balance)]
-    return _epoch_base(items, rng, balance)
+        return [realize(i, rng) if "variants" in i else i for i in _epoch_base(items, rng, balance, tte_balance)]
+    return _epoch_base(items, rng, balance, tte_balance)
 
 
-def _epoch_base(items, rng, balance):
+def _epoch_base(items, rng, balance, tte_balance=False):
     if any("keep_p" in i for i in items):                  # option 2: template cap (items with a frequent opening kept with prob cap/count)
         items = [i for i in items if rng.random() < i.get("keep_p", 1.0)]
     if balance:
@@ -128,9 +143,29 @@ def _epoch_base(items, rng, balance):
         pos = [i for i in items if i["label"] == 1]
         if neg and pos:
             k = min(len(neg), len(pos))
-            items = _draw(neg, k, rng) + _draw(pos, k, rng)
+            items = _draw(neg, k, rng) + (_draw_equal(pos, k, rng) if tte_balance else _draw(pos, k, rng))
     rng.shuffle(items)
     return items
+
+
+def _draw_equal(cls_items, k, rng):
+    """k items of one class in EQUAL shares per `group` (remainder to the first groups): a group larger than its share is sampled without
+    repeats, a smaller one is taken whole and topped up with random repeats of its own items."""
+    groups, out = {}, []
+    for it in cls_items:
+        if str(it.get("group", "")).startswith("tte"):
+            groups.setdefault(it["group"], []).append(it)
+        else:                                               # positives outside the TTE groups (pre-alert raised to 1) are kept once, not balanced
+            out.append(it)
+    if not groups:
+        return _draw(cls_items, k, rng)
+    keys = sorted(groups)
+    k = max(0, k - len(out))
+    share = [k // len(keys) + (1 if j < k % len(keys) else 0) for j in range(len(keys))]
+    for g, n in zip(keys, share):
+        v = groups[g]
+        out += rng.sample(v, n) if n <= len(v) else v + [rng.choice(v) for _ in range(n - len(v))]
+    return out
 
 
 def load_texts(path):
@@ -164,7 +199,7 @@ def realize(it, rng):
         out.pop(k, None)
     if it["texts"] and rng.random() >= it["p_teacher"]:
         e, o = rng.choice(it["texts"])
-        out["answer"] = reasoning_target(e, o, it["label"], it["order"])
+        out["answer"] = reasoning_target(e, o, it["label"], it["order"], it.get("facts"))     # same fact card for every version of the window
     return out
 
 
@@ -183,7 +218,7 @@ def val_pairs(items, shifted_items, texts):
             t = tx[k] if k < len(tx) else None
             c = dict(w, src_id=it["id"])
             if t is not None:
-                c["answer"] = reasoning_target(t[0], t[1], it["label"], it["order"])
+                c["answer"] = reasoning_target(t[0], t[1], it["label"], it["order"], it.get("facts"))
             out.append(c)
     return out
 

@@ -5,10 +5,12 @@ and for a model's generated text (-> fact grading: card(model) vs card(teacher),
 
   road_user : car (sedan, hatchback, coupe, wagon, taxi ...) | suv | pickup | van | truck (incl. trailer, bus-size lorries) | bus | motorcycle |
               cyclist (bicycle, scooter rider) | pedestrian | object (sign, cone, barrier, debris, pole, animal) | not_stated
-  side      : ahead (same lane / directly in the ego path) | left | right | behind | not_stated
-  motion    : of that road user, not of the ego vehicle: steady | braking (slows, decelerates) | stopped (stationary, parked) | turning |
-              crossing (moves across the ego path) | cutting_in (merges / swerves into the ego lane) | reversing | not_stated
-  gap       : distance ego <-> that road user over the clip: closing | widening | stable | not_stated
+  side      : AT THE END of the clip: ahead (same lane / directly in the ego path) | left | right | behind | not_stated
+  motion    : MAIN manoeuvre of that road user DURING the clip, not of the ego vehicle: steady | braking (slows, decelerates) | stopped (stationary,
+              parked) | turning | crossing (moves across the ego path) | cutting_in (merges / swerves into the ego lane) | reversing | not_stated
+              (a manoeuvre wins over braking, braking over stopped / steady)
+  gap       : trend of the distance ego <-> that road user over the LAST part of the clip: closing | widening | stable | not_stated
+  (v2, 2026-10-15: slots tied to a fixed moment because the scene is dynamic; v1 cards kept as *_v1.jsonl)
 
     python r1_fact_cards.py --source teacher                      # 4,169 teacher texts -> outputs/teacher_dataset_2026-10/fact_cards_teacher.jsonl
     python r1_fact_cards.py --source rephrased --n 500            # random rephrased versions -> fact_cards_rephrased.jsonl (consistency check)
@@ -45,13 +47,21 @@ road_user: car | suv | pickup | van | truck | bus | motorcycle | cyclist | pedes
   car includes sedan, hatchback, coupe, wagon, taxi, "vehicle" of unstated kind -> car only if the text says car/sedan/etc.; a vehicle of unstated kind -> not_stated.
   suv includes sport utility vehicle, crossover. truck includes lorry, semi, trailer, tractor-trailer, box truck, dump truck. cyclist includes bicycle or scooter rider.
   object = a sign, cone, barrier, pole, debris, animal or other non-vehicle.
-side (where the main road user is relative to the ego vehicle): ahead | left | right | behind | not_stated
+The scene moves, so each slot refers to a FIXED moment:
+- side and gap describe the END of the clip (the last frames, the moment a warning would be given);
+- motion describes the MAIN manoeuvre of the road user DURING the clip (this keeps where it came from).
+Example: a car on the right overtakes, moves into the ego lane and speeds away -> side = ahead (in the ego lane at the end), motion = cutting_in, gap = widening.
+The same car moving into the ego lane and then braking -> side = ahead, motion = cutting_in, gap = closing.
+
+side (where the main road user is relative to the ego vehicle AT THE END of the clip): ahead | left | right | behind | not_stated
   ahead = in the ego lane / directly in the ego path / directly in front. left / right = to that side (adjacent lane, shoulder, curb, cross street from that side).
-motion (of the main road user, NOT of the ego vehicle): steady | braking | stopped | turning | crossing | cutting_in | reversing | not_stated
+motion (MAIN manoeuvre of the main road user during the clip, NOT of the ego vehicle): steady | braking | stopped | turning | crossing | cutting_in | reversing | not_stated
   steady = moves along normally; braking = slows / decelerates; stopped = stationary / parked / waiting; turning = turns; crossing = moves across the ego path;
-  cutting_in = merges, swerves or pulls into the ego lane / path; reversing = backs up. If two apply, pick the one the text stresses most.
-gap (distance between the ego vehicle and the main road user over the clip): closing | widening | stable | not_stated
+  cutting_in = merges, swerves or pulls into the ego lane / path; reversing = backs up.
+  Priority when several apply: cutting_in / crossing / turning / reversing (a manoeuvre) over braking over stopped / steady.
+gap (trend of the distance between the ego vehicle and the main road user over the LAST part of the clip): closing | widening | stable | not_stated
   closing = the distance shrinks / is reduced / they approach; widening = grows / pulls away; stable = stays the same / steady spacing / clear separation maintained.
+  If the distance first shrinks and then grows (e.g. it is overtaken and pulls away), use the trend at the end.
 
 Reply with ONLY JSON lines, one per item, same order, no markdown:
 {"id": "<id>", "road_user": "...", "side": "...", "motion": "...", "gap": "..."}"""

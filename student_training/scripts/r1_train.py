@@ -34,7 +34,8 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "models"))
 from r1_bridge import R1Bridge  # noqa: E402
-from r1_data import Cache, attach_aug, epoch_items, feats_for, load_items, load_texts, make_batch, other_index, val_pairs  # noqa: E402
+from r1_common import ORDERS  # noqa: E402
+from r1_data import Cache, attach_aug, epoch_items, feats_for, load_cards, load_items, load_texts, make_batch, other_index, val_pairs  # noqa: E402
 
 QWEN_ID = "Qwen/Qwen3-VL-4B-Instruct"
 TOK_DIR = ROOT / "dataset" / "public_samples" / "qwen3vl_cfg"
@@ -119,8 +120,11 @@ def main():
                     help="also stop when the monitored validation loss (own video) rose this many epochs in a row (0 = off)")
     ap.add_argument("--sources", default="dada,nexar",
                     help="training/validation sources; 'nexar_reasoning' = Nexar reasoning dataset only (plan 2026-10-12), then --phase 2")
-    ap.add_argument("--order", default="reason_first", choices=["reason_first", "verdict_first"],
-                    help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first")
+    ap.add_argument("--order", default="reason_first", choices=list(ORDERS),
+                    help="nexar_reasoning answer order: Run 1 reason_first, Run 2 verdict_first, facts_first (plan 2026-10-15: closed-list Facts line first)")
+    ap.add_argument("--facts-cards", default=None, help="fact_cards_teacher.jsonl (r1_fact_cards.py): needed for --order facts_first")
+    ap.add_argument("--drop-prealert", action="store_true", help="leave the pre-alert windows out of training and validation (plan 2026-10-15)")
+    ap.add_argument("--balance-tte", action="store_true", help="positives drawn in equal shares per TTE group each epoch (plan 2026-10-15)")
     ap.add_argument("--input", default="last", choices=["last", "last+attn", "l11+last", "l11+last+attn"],
                     help="merger input (plan 2026-10-13): last-layer tokens (original), + crash-head attention channel, + layer-11 tokens")
     ap.add_argument("--aug-texts", default=None, help="paraphrases.jsonl: rephrased text versions of the training windows (plan 2026-10-14)")
@@ -158,18 +162,21 @@ def main():
     if args.aug_shifts or args.val_shifts:
         caches["nexar_reasoning_shifted"] = Cache(args.cache_dir, "nexar_reasoning_shifted", args.input)
     reasoning = srcs == ["nexar_reasoning"]
+    cards = load_cards(args.facts_cards) if args.facts_cards else None
+    if args.order == "facts_first" and cards is None:
+        raise SystemExit("--order facts_first needs --facts-cards")
     if reasoning:
-        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)
-        val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint)}
+        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
+        val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)}
         v_texts = None if args.val_texts == "none" else (args.val_texts or args.aug_texts)   # "none": validate on the teacher's texts only
         v_shifts = args.val_shifts or args.aug_shifts
         if args.aug_texts or args.aug_shifts or v_texts or v_shifts:    # augmentation: one random (window version, text version) per original window per epoch
             n0, v0 = len(train), len(val["nexar_reasoning"])
             if args.aug_texts or args.aug_shifts:
-                sh_tr = load_items("nexar_reasoning_shifted", 2, "train", caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint) if args.aug_shifts else []
+                sh_tr = load_items("nexar_reasoning_shifted", 2, "train", caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert) if args.aug_shifts else []
                 attach_aug(train, sh_tr, load_texts(args.aug_texts) if args.aug_texts else {}, args.p_teacher)
             if v_texts or v_shifts:                                   # validation = the deterministic enlarged pairs (the same for the control run)
-                sh_va = load_items("nexar_reasoning_shifted", 2, args.val_split, caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint) if v_shifts else []
+                sh_va = load_items("nexar_reasoning_shifted", 2, args.val_split, caches["nexar_reasoning_shifted"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert) if v_shifts else []
                 val["nexar_reasoning"] = val_pairs(val["nexar_reasoning"], sh_va, load_texts(v_texts) if v_texts else {})
             print(f"[aug] train originals {n0}: {sum(len(i.get('variants', [0])) for i in train)} window versions, "
                   f"{sum(len(i.get('texts', [])) + 1 for i in train)} text versions; validation {v0} -> {len(val['nexar_reasoning'])} pairs")
@@ -209,7 +216,7 @@ def main():
           + (f" + LoRA {sum(p.numel() for p in lora)/1e6:.1f}M" if lora else ""))
 
     accum = max(1, args.eff_bs // args.micro_bs)
-    spe = math.ceil(len(epoch_items(train, random.Random(0), args.phase == 2 or reasoning)) / args.eff_bs)
+    spe = math.ceil(len(epoch_items(train, random.Random(0), args.phase == 2 or reasoning, args.balance_tte)) / args.eff_bs)
     total, warm = spe * args.epochs, max(1, int(0.03 * spe * args.epochs))
     print(f"[sched] {spe} optimizer steps/epoch x {args.epochs} epochs = {total} (warmup {warm}); eff batch {args.eff_bs} = {accum} x {args.micro_bs}")
 
@@ -217,7 +224,7 @@ def main():
     best, bad, step, t0 = -1e9, 0, 0, time.time()
     prev_vl, rises = None, 0
     for ep in range(1, args.epochs + 1):
-        items = epoch_items(train, rng, balance=args.phase == 2 or reasoning)
+        items = epoch_items(train, rng, balance=args.phase == 2 or reasoning, tte_balance=args.balance_tte)
         bridge.train()
         run, n_run = 0.0, 0
         for s in range(0, len(items), args.eff_bs):

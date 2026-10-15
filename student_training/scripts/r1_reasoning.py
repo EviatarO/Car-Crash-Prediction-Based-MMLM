@@ -20,16 +20,23 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from r1_common import facts_line
 from r1_data import feats_for
 
 
-def prefix_for(kind: str, it: dict, expl: str | None = None) -> str:
+def prefix_for(kind: str, it: dict, expl: str | None = None, facts: str | None = None) -> str:
+    """facts_first (plan 2026-10-15): before = 'Facts:\\nReasoning:\\nCollision:' (both cut out), teacher = the window's card + the teacher text,
+    after = the model's own Facts line (`facts`, the generated line) + its own reasoning."""
     if kind == "first":
         return "Collision:"
+    ff = it.get("order") == "facts_first"
     if kind == "before":
-        return "Reasoning:\nCollision:"
+        return "Facts:\nReasoning:\nCollision:" if ff else "Reasoning:\nCollision:"
     text = it["gt"]["explanation"] if kind == "teacher" else (expl or "")
-    return f"Reasoning: {text.strip()}\nCollision:"
+    if not ff:
+        return f"Reasoning: {text.strip()}\nCollision:"
+    head = facts_line(it["facts"]) if kind == "teacher" else (facts or "Facts:")
+    return f"{head.strip()}\nReasoning: {text.strip()}\nCollision:"
 
 
 @torch.no_grad()
@@ -53,7 +60,7 @@ def logodds(bridge, items, prefixes, caches, dev, bs=8):
 
 
 def score_kinds(order: str):
-    return ("before", "teacher") if order == "reason_first" else ("first",)
+    return ("first",) if order == "verdict_first" else ("before", "teacher")
 
 
 def auc_ap(y, s):
