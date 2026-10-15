@@ -35,6 +35,7 @@ RUN = ROOT / "outputs" / "r1_phase2r_2026-10-12" / "phase2r"
 OPT = ROOT / "outputs" / "r1_options_2026-10-12" / "options_2026-10-12"
 LEV = ROOT / "outputs" / "r1_levers_2026-10-13"
 LEVRUN = LEV / "levers_2026-10-13"
+P1A = ROOT / "outputs" / "r1_phase1aug_2026-10-14" / "phase1aug_2026-10-14"
 GRIDS = ROOT / "outputs" / "teacher_dataset_2026-10"
 REL = "../outputs/teacher_dataset_2026-10"
 GENERIC_MIN = 10                      # an explanation shared by >= this many windows counts as "generic"
@@ -55,9 +56,15 @@ RUNS = [
      LEVRUN / "B5" / "results", (LEVRUN / "B5" / "p1" / "train_log.jsonl", LEVRUN / "B5" / "p2" / "train_log.jsonl"), None),
     ("b45", "B45 + both", "B45: B3 plus both extra inputs (attention and layer-11 tokens)",
      LEVRUN / "B45" / "results", (LEVRUN / "B45" / "p1" / "train_log.jsonl", LEVRUN / "B45" / "p2" / "train_log.jsonl"), None),
+    ("p1long", "P1long (Phase 1 only)", "P1long: Phase 1 only (projector, frozen language model, no LoRA), up to 15 epochs, original windows + teacher texts: the control of the enlargement. Its training curve was validated on 2,413 pairs (the 612 windows plus shifted copies), the results table on the 612 windows",
+     P1A / "P1long" / "results", P1A / "P1long" / "train_log.jsonl", "p1only"),
+    ("p1shift", "P1shift (Phase 1 only)", "P1shift: Phase 1 only, as P1long plus frame-shifted copies of the windows (no rephrased texts)",
+     P1A / "P1shift" / "results", P1A / "P1shift" / "train_log.jsonl", "p1only"),
+    ("p1aug", "P1aug (Phase 1 only)", "P1aug: Phase 1 only, as P1long plus frame-shifted copies and the judged rephrased texts (the teacher's text drawn 40 % of the time): the best Phase-1 model so far",
+     P1A / "P1aug" / "results", P1A / "P1aug" / "train_log.jsonl", "p1only"),
 ]
 FACT_KEYS = ["type", "side", "motion", "gap"]
-FACT_RUN = {"run1": "run1", "opt1": "opt1", "opt2": "opt2", "opt3": "opt3", "b3": "B3", "b4": "B4", "b5": "B5", "b45": "B45"}   # run key -> key in fact_agreement.json
+FACT_RUN = {"run1": "run1", "opt1": "opt1", "opt2": "opt2", "opt3": "opt3", "b3": "B3", "b4": "B4", "b5": "B5", "b45": "B45", "p1long": "P1long", "p1shift": "P1shift", "p1aug": "P1aug"}   # run key -> key in fact_agreement.json
 GROUPS = [["normal", "normal"], ["pre_alert", "pre-alert"], ["tte1.5", "TTE 1.5 s"], ["tte1.0", "TTE 1.0 s"], ["tte0.5", "TTE 0.5 s"]]
 SCORES = [["s_after", "S_after", "after the model's own reasoning"],
           ["s_before", "S_before", "reasoning cut out (decision straight after the frames)"],
@@ -92,7 +99,10 @@ def load_run(key, label, desc, res, logp, epoch, run1_m, log1, fact):
     mm = m["metrics"]
     assert len(preds) == m["n_windows"] == mm["n"], (key, len(preds), m["n_windows"])
     log_p1 = read_log(logp[0]) if two else None
-    if m.get("before_phase1"):
+    if epoch == "p1only":          # Phase-1-only runs (no Phase 2): the evaluated model is the Phase-1 best, so "before" = "after"
+        bp1 = dict(m["after"], perplexity_real=m["after"]["perplexity_real"])
+        epoch = None
+    elif m.get("before_phase1"):
         bp1 = m["before_phase1"]
     elif two:      # Session-1 runs: the model before Phase 2 = their own Phase-1 best (lowest validation loss; the last epoch in all four)
         e = min(log_p1, key=lambda x: x["val_nexar_reasoning"]["loss_real"])["val_nexar_reasoning"]
@@ -180,7 +190,8 @@ def main():
     fact_a = json.load(open(LEV / "fact_agreement.json", encoding="utf-8"))                                   # run1, B3, B4, B5, B45
     fact_b = json.load(open(ROOT / "outputs" / "r1_fact_eval_2026-10-13" / "fact_agreement.json", encoding="utf-8"))   # run1, opt1, opt2, opt3
     assert fact_a["run1"]["overall"] == fact_b["run1"]["overall"]
-    fact = {**fact_b, **fact_a}
+    fact_c = json.load(open(ROOT / "outputs" / "r1_phase1aug_2026-10-14" / "fact_agreement.json", encoding="utf-8"))               # P1long, P1shift, P1aug, B3_p1
+    fact = {**fact_b, **fact_a, **fact_c}
     baseline = {f: fact["run1"]["overall"][f]["majority_baseline"] for f in FACT_KEYS}
     for r in fact.values():
         assert all(abs(r["overall"][f]["majority_baseline"] - baseline[f]) < 1e-12 for f in FACT_KEYS)    # same windows, same baseline
