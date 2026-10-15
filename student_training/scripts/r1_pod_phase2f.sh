@@ -2,9 +2,9 @@
 # Phase 2 with three answer formats (plan 2026-10-15_Plan-Phase2-Three-Formats). Unattended; stops the pod ONLY after every result file is verified
 # byte-identical on HF. Needs ~40 GB free container disk (the 18 GB features cache + checkpoints), no network volume.
 #   0  pull the features cache and the P1aug checkpoint from HF; smoke tests of the real model (4 steps, 8 generated answers)
-#   1  Phase-1 continuation from P1aug, 3 epochs, in parallel (pre-alert windows dropped, positives balanced over the TTE groups):
+#   1  Phase-1 continuation from P1aug, <= 4 epochs, in parallel (pre-alert windows dropped, positives balanced over the TTE groups):
 #        P1fixR (answer: Reasoning -> Collision -> Outcome) and P1fixF (Facts -> Reasoning -> Collision -> Outcome); each is evaluated (Phase-1 gate numbers)
-#   2  Phase 2 (projector + LoRA, <= 4 epochs): P2R reason-first and P2V verdict-first (Run 2) from P1fixR in parallel, then P2F facts-first from P1fixF
+#   2  Phase 2 (projector + LoRA, <= 6 epochs): P2R reason-first and P2V verdict-first (Run 2) from P1fixR in parallel, then P2F facts-first from P1fixF
 #   3  push best.pt / train_log / eval results / logs to HF checkpoints/phase2f_2026-10-15/, verify sizes, stop the pod
 # Everything is validated on the same windows (524 val windows without pre-alert, the teacher's text). A failed run does not stop the others;
 # the pod is left running only if a smoke test or the HF verification fails.
@@ -30,8 +30,8 @@ FREE_GB=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
 [ -f $CACHE/index_nexar_reasoning.jsonl ] || [ "${FREE_GB:-0}" -ge 40 ] || fail "container disk has only ${FREE_GB} GB free (need >= 40)"
 
 DATA="--sources nexar_reasoning --cache-dir $CACHE --facts-cards $CARDS --drop-prealert --balance-tte --aug-texts $PARA --val-texts none --p-teacher 0.4 --select val_loss --eff-bs 16 --micro-bs 4 --grad-ckpt"
-P1="$PY -u r1_train.py --phase 1 --init random --init-from $OUT/P1aug/best.pt --epochs 3 --patience 1 --lr-merger 3e-4 $DATA"
-P2="$PY -u r1_train.py --phase 2 --epochs 4 --patience 1 --lr-merger 2e-5 --lr-lora 2e-4 $DATA"
+P1="$PY -u r1_train.py --phase 1 --init random --init-from $OUT/P1aug/best.pt --epochs 4 --patience 1 --lr-merger 3e-4 $DATA"
+P2="$PY -u r1_train.py --phase 2 --epochs 6 --patience 1 --lr-merger 2e-5 --lr-lora 2e-4 $DATA"
 EV="$PY -u r1_eval_reasoning.py --facts-cards $CARDS --drop-prealert --cache-dir $CACHE --max-ret 100 --n-blank 5 --train-threshold 600"
 
 # 0 ---- features cache + P1aug from HF
