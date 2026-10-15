@@ -124,6 +124,8 @@ def boot_auc_diff(rows, key_a, key_b, label="label", n=2000, seed=0):
             continue
         diffs.append(roc_auc_score(y[idx], a[idx]) - roc_auc_score(y[idx], b[idx]))
     d0 = roc_auc_score(y, a) - roc_auc_score(y, b)
+    if not diffs:                                      # tiny samples (smoke tests): every resample had a single class
+        return {"diff": float(d0), "ci95": [None, None]}
     return {"diff": float(d0), "ci95": [float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))]}
 
 

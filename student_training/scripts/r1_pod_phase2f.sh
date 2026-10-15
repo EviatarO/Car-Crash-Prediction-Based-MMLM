@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 2 with three answer formats (plan 2026-10-15_Plan-Phase2-Three-Formats). Unattended; stops the pod ONLY after every result file is verified
 # byte-identical on HF. Needs ~40 GB free container disk (the 18 GB features cache + checkpoints), no network volume.
-#   0  pull the features cache and the P1aug checkpoint from HF; smoke tests of the real model (4 steps, 8 generated answers)
+#   0  pull the features cache and the P1aug checkpoint from HF; smoke tests of the real model (4 steps, 60 generated answers)
 #   1  Phase-1 continuation from P1aug, <= 4 epochs, in parallel (pre-alert windows dropped, positives balanced over the TTE groups):
 #        P1fixR (answer: Reasoning -> Collision -> Outcome) and P1fixF (Facts -> Reasoning -> Collision -> Outcome); each is evaluated (Phase-1 gate numbers)
 #   2  Phase 2 (projector + LoRA, <= 6 epochs): P2R reason-first and P2V verdict-first (Run 2) from P1fixR in parallel, then P2F facts-first from P1fixF
@@ -40,10 +40,10 @@ mkdir -p $OUT/P1aug
 [ -f $OUT/P1aug/best.pt ] || $PY -c "from huggingface_hub import hf_hub_download as d; import shutil; shutil.copy(d('$R_CKPT','phase1aug_2026-10-14/P1aug/best.pt',local_dir='$OUT/_hf'),'$OUT/P1aug/best.pt')" || fail get_p1aug
 say "cache + P1aug ready; disk: $(df -h /root | tail -1 | tr -s ' ' | cut -d' ' -f3,4)"
 
-say "smoke tests (real model: 4 training steps per format, 8 generated answers)"
+say "smoke tests (real model: 4 training steps per format, 60 generated answers)"
 $P2 --order facts_first --init-from $OUT/P1aug/best.pt --max-steps 4 --epochs 1 --out-dir $OUT/smoke_F > $OUT/logs/smoke_F.log 2>&1 || fail smoke_train_F
 $P2 --order verdict_first --init-from $OUT/P1aug/best.pt --max-steps 4 --epochs 1 --out-dir $OUT/smoke_V > $OUT/logs/smoke_V.log 2>&1 || fail smoke_train_V
-$EV --ckpt $OUT/smoke_F/best.pt --order facts_first --limit 8 --max-new 120 --max-ret 4 --n-blank 1 --train-threshold 0 --out-dir $OUT/smoke_F/eval > $OUT/logs/smoke_eval_F.log 2>&1 || fail smoke_eval_F
+$EV --ckpt $OUT/smoke_F/best.pt --order facts_first --limit 60 --max-new 120 --max-ret 4 --n-blank 1 --train-threshold 0 --out-dir $OUT/smoke_F/eval > $OUT/logs/smoke_eval_F.log 2>&1 || fail smoke_eval_F
 say "smoke tests passed"
 
 # 1 ---- Phase-1 continuation (gate numbers: missed crashes per TTE vs P1aug's 14 / 25 / 39 %)
