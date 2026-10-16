@@ -21,7 +21,7 @@ ST=$OUT/logs/p1aug.status; echo "start $(date -u)" > $ST
 say() { echo "[p1aug] $* $(date -u)" | tee -a $ST; }
 fail() { say "FAILED: $* - pod left running"; exit 1; }
 FREE_GB=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
-[ "${FREE_GB:-0}" -ge 140 ] || fail "container disk has only ${FREE_GB} GB free (need >= 140)"
+[ -f $OUT/cache/index_nexar_reasoning_shifted.jsonl ] || [ "${FREE_GB:-0}" -ge 140 ] || fail "container disk has only ${FREE_GB} GB free (need >= 140)"   # only before the caches exist
 export CACHE=$OUT/cache NEXAR_VIDEOS=/root/nexar/train R1_TRAIN_DIR=/root/frames
 mkdir -p $CACHE $NEXAR_VIDEOS $R1_TRAIN_DIR
 W=$RR/outputs/teacher_dataset_2026-10; PARA=$W/paraphrases_judged.jsonl     # copied from the PC later; training waits for it + $W/AUDIT_OK
