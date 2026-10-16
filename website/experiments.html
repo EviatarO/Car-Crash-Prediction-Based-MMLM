@@ -37,6 +37,7 @@
     <button class="tab" data-view="compare">Cross-Experiment Comparison</button>
     <button class="tab" data-view="pilot">Teacher prompt study</button>
     <button class="tab" data-view="r2" title="Reasoning model runs: Run 1, three follow-ups and four Session-1 runs, scored on 612 validation windows">Reasoning model - runs</button>
+    <button class="tab" data-view="p2f" title="Night run 2026-10-15/16: fine stage in three answer formats (reason-first, verdict-first, facts-first), 524 validation windows">Reasoning model - 3 formats</button>
   </div>
   <span class="rowcount" id="viewHint"></span>
 </div>
@@ -186,6 +187,43 @@
   </section>
 </div>
 
+<!-- ================= REASONING MODEL: 3 FORMATS (night run 2026-10-15/16; p2f_data.js by build_p2f_data.py, rendered by assets/p2f.js) ================= -->
+<div id="viewP2F" hidden>
+  <section class="block">
+    <div class="kicker">Reasoning model · fine stage in three answer formats · night run 2026-10-15/16</div>
+    <h2>Reason-first vs verdict-first vs facts-first</h2>
+    <p class="lede">Three fine-stage runs (projector + LoRA on Qwen3-VL-4B, frozen V-JEPA2 features) that differ only in the order of the answer:
+      <b>P2R</b> Reasoning &rarr; Collision &rarr; Outcome, <b>P2V</b> Collision &rarr; Reasoning &rarr; Outcome, <b>P2F</b> Facts &rarr; Reasoning &rarr; Collision &rarr; Outcome.
+      Scored on 524 validation windows (videos never trained on; pre-alert windows removed) next to the frozen crash model. P(yes) is the language model&rsquo;s
+      probability of &ldquo;yes&rdquo; at the word &ldquo;Collision:&rdquo;; every thresholded number is at P = 0.5. Facts are read by the same Gemini fact reader from the
+      teacher&rsquo;s text and from each run&rsquo;s reasoning (road user / side at the end / main motion / gap at the end).</p>
+    <h3 class="subh">Decision (at P = 0.5; normal windows are the negatives)</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fDecision"></table></div>
+    <h3 class="subh">Missed crashes at an equal false-alarm rate</h3>
+    <p class="lede small">The threshold of each model is set so that it flags the same share of normal windows (set on these windows: for comparison, not for deployment).</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fEqual"></table></div>
+    <h3 class="subh">Where the language model is right and the crash model wrong (and the reverse)</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fRescue"></table></div>
+    <h3 class="subh">Verdict vs reasoning: does the reasoning describe a closing gap?</h3>
+    <p class="lede small">Counts of (label · written verdict · reasoning gap). Bold = the cells counted as misaligned. A closing gap in normal driving is often real (traffic ahead), so &ldquo;normal · no · closing&rdquo; is not counted.</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fVR"></table></div>
+    <h3 class="subh">Facts in the reasoning vs the teacher&rsquo;s card</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fFacts"></table></div>
+    <h3 class="subh">Text quality</h3>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="p2fText"></table></div>
+    <h3 class="subh">Every validation window</h3>
+    <div class="cmp-toolbar p2fbar">
+      <select id="p2fGroup"></select><select id="p2fLabel"></select><select id="p2fRun"></select><select id="p2fFlag"></select>
+      <label class="dim"><input type="checkbox" id="p2fCrashWrong"> crash model wrong</label>
+      <label class="dim"><input type="checkbox" id="p2fDisagree"> runs disagree</label>
+      <input id="p2fSearch" type="text" placeholder="search id or any text" autocomplete="off" class="augsearch">
+    </div>
+    <div class="cmp-toolbar p2fbar"><span class="dim">sort:</span> <span id="p2fHead"></span>
+      <span class="rowcount" id="p2fCount"></span><button class="pill pushright" id="p2fPrev">&lsaquo; prev</button><button class="pill" id="p2fNext">next &rsaquo;</button></div>
+    <div class="table-wrap"><table class="mini p2ftable"><thead><tr><th>window</th><th>teacher and the three runs</th></tr></thead><tbody id="p2fBody"></tbody></table></div>
+  </section>
+</div>
+
 <!-- ================= REASONING MODEL (RUN 1) VIEW ================= -->
 <div id="viewR2" hidden>
   <section class="block">
@@ -332,6 +370,7 @@
 <script src="assets/player.js"></script>
 <script src="assets/pilot.js"></script>
 <script src="assets/r2.js"></script>
+<script src="assets/p2f.js"></script>
 <script>
 "use strict";
 const EX   = window.EXPERIMENTS_DATA;
@@ -380,7 +419,7 @@ const f4 = v => (v === null || v === undefined) ? "–" : Number(v).toFixed(4);
 function currentRoute(){
   const h = (location.hash || "").replace(/^#/, "");
   const [view, arg] = h.split("/");
-  return {view: ["compare", "pilot", "r2"].includes(view) ? view : "detail", arg: arg || null};
+  return {view: ["compare", "pilot", "r2", "p2f"].includes(view) ? view : "detail", arg: arg || null};
 }
 function applyRoute(){
   const {view, arg} = currentRoute();
@@ -388,17 +427,31 @@ function applyRoute(){
   document.getElementById("viewCompare").hidden = view !== "compare";
   document.getElementById("viewPilot").hidden = view !== "pilot";
   document.getElementById("viewR2").hidden = view !== "r2";
+  document.getElementById("viewP2F").hidden = view !== "p2f";
   document.querySelectorAll(".tab[data-view]").forEach(t =>
     t.classList.toggle("active", t.dataset.view === view));
   document.getElementById("viewHint").textContent = view === "detail"
     ? "one arm, in full" : view === "pilot" ? "teacher prompt study E1 – E4 (and pilot R1 – R3), side by side"
-    : view === "r2" ? "reasoning model, 612 validation windows" : "up to 3 arms, side by side";
+    : view === "r2" ? "reasoning model, 612 validation windows" : view === "p2f" ? "3 answer formats, 524 validation windows" : "up to 3 arms, side by side";
   if (view === "pilot") pilotView.show();
   if (view === "r2") showR2();
+  if (view === "p2f") showP2F();
   if (view === "detail"){
     if (arg && ARM_BY_KEY[arg]) lastArm = arg;
     renderDetail(arg && ARM_BY_KEY[arg] ? arg : null);
   }
+}
+/* Reasoning model, 3 formats: p2f_data.js (~1.1 MB, build_p2f_data.py), loaded the first time the tab is opened. */
+let p2fView = null, p2fLoading = false;
+function showP2F(){
+  if (p2fView){ p2fView.show(); return; }
+  if (p2fLoading) return;
+  p2fLoading = true;
+  const sc = document.createElement("script");
+  sc.src = "p2f_data.js?t=" + Date.now();
+  sc.onload = () => { p2fView = createP2FView({data: window.P2F_DATA, esc}); p2fView.show(); };
+  sc.onerror = () => { p2fLoading = false; document.getElementById("p2fCount").textContent = "p2f_data.js not found: run website/build_p2f_data.py"; };
+  document.head.appendChild(sc);
 }
 /* Reasoning model (Run 1 + follow-ups): r2_data.js (about 1.3 MB, built by build_r2_data.py) is loaded the first time the tab is opened. */
 let r2View = null, r2Loading = false;
