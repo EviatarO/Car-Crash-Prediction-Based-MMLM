@@ -563,3 +563,8 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 #viewTestRef .trnote{width:100%;background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:6px;font:12px var(--mono);margin-top:6px}
 #viewTestRef .trflag{background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:6px;padding:4px;font:12px var(--mono);width:100%}
 @media (max-width:700px){ #viewTestRef table.trtable td:first-child{width:96px} #viewTestRef table.trtable td:last-child{width:110px} #viewTestRef .thumb{width:90px;height:51px} #viewTestRef .augsearch{min-width:0;width:100%} }
+
+#viewTestRef table.trcm, #viewTestRef #trSummary{table-layout:auto;width:100%;min-width:0}
+#viewTestRef table.mini th{white-space:normal;font-size:11px;padding:7px 6px}
+#viewTestRef table.mini td{font-size:13px;padding:6px}
+#viewTestRef .table-wrap{overflow-x:visible}

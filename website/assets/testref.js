@@ -29,6 +29,9 @@ function createTestRefView(deps){
     if (state.flag === "blind_wrong" && !r.blind_wrong) return false;
     if (state.flag === "second" && !r.second) return false;
     if (state.flag === "no_blind" && r.blind) return false;
+    if (state.flag === "p2v_wrong" && !(r.models && r.models.P2V && (r.models.P2V.v === "yes") !== !!r.label)) return false;
+    if (state.flag === "p2r_wrong" && !(r.models && r.models.P2R && (r.models.P2R.v === "yes") !== !!r.label)) return false;
+    if (state.flag === "cm_wrong" && !(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label)) return false;
     if (state.hv && !(r.second && r.second.hv === state.hv)) return false;
     if (state.src && !srcOf(r).startsWith(state.src)) return false;
     if (state.review === "flagged" && !flagged(r)) return false;
@@ -49,6 +52,22 @@ function createTestRefView(deps){
       <tr><td>final reference texts</td><td class="num">${Object.keys(S.final || {}).length ? Object.entries(S.final).map(([k, v]) => `${k} ${v}`).join(" · ") : "not merged yet"}</td></tr></tbody>`;
   }
 
+  const pc = v => (v === null || v === undefined) ? "–" : (100 * v).toFixed(0) + "%";
+  function modelBlock(k, name, r){
+    const m = r.models && r.models[k];
+    if (!m) return "";
+    const ok = (m.v === "yes") === !!r.label;
+    return `<div class="trans ${ok ? "" : "wrongcell"}"><b>${esc(name)}</b> ${chip(m.v, m.v === "yes" ? "pos" : "neg")} <span class="dim">P(yes) ${pc(m.p)}</span>${ok ? "" : " " + chip("wrong", "neg")}
+      <div class="ptext">${esc(m.expl || "")}</div><div class="ptext dim">→ ${esc(m.out || "")}</div></div>`;
+  }
+  function renderCM(){
+    const cm = D.summary.cm || [];
+    if (!cm.length) { $("trCM").innerHTML = ""; return; }
+    const tl = t => t === "all" ? "all" : "TTE " + Number(t).toFixed(1) + " s";
+    $("trCM").innerHTML = `<thead><tr><th>model</th><th>group</th><th title="crash windows called yes / no">TP / FN</th><th title="normal windows of the same TTE called yes / no">FP / TN</th>
+      <th>recall</th><th>specificity</th><th>precision</th></tr></thead><tbody>${cm.map(c => `<tr class="${c.tte === "all" ? "dimrow" : ""}"><td>${esc(c.label)}</td><td>${tl(c.tte)}</td>
+      <td class="num">${c.TP} / ${c.FN}</td><td class="num">${c.FP} / ${c.TN}</td><td class="num">${f2(c.recall)}</td><td class="num">${f2(c.specificity)}</td><td class="num">${f2(c.precision)}</td></tr>`).join("")}</tbody>`;
+  }
   const chip = (t, cls) => `<span class="chip ${cls}">${esc(t)}</span>`;
   function ansBlock(title, a, label){
     if (!a) return "";
@@ -69,9 +88,9 @@ function createTestRefView(deps){
       const c = r.card ? `<div class="dim">card: ${esc(r.card.road_user)} · ${esc(r.card.side)} · ${esc(r.card.motion)} · ${esc(r.card.gap)}</div>` : "";
       return `<tr><td><div class="thumb" data-id="${esc(r.key)}" title="enlarge">${r.grid ? `<img loading="lazy" src="${esc(r.grid)}" alt="">` : ""}</div>
         <div class="dim">${esc(r.key)}</div><div class="dim">${esc(GL[r.group] || r.group)} · <b>${r.label ? "crash" : "normal"}</b></div>
-        <div class="dim">crash model P ${f2(r.a1_p)}${r.box_flag ? " · box " + esc(r.box_flag) : ""}</div></td>
+        <div class="dim ${(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label) ? "bad" : ""}">crash model P ${f2(r.a1_p)}${(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label) ? " (wrong)" : ""}${r.box_flag ? " · box " + esc(r.box_flag) : ""}</div></td>
         <td class="hpdesc">${ansBlock("Pass 1 (blind)", r.blind, r.label)}${ansBlock("Pass 2 (second look)", r.second, r.label)}
-          ${r.final ? `<div class="trans final"><b>Reference</b> ${chip(r.final.source, "pos")} ${r.final.hv ? chip("hazard " + r.final.hv, r.final.hv === "no" ? "neg" : "pos") : ""}
+          ${modelBlock("P2V", "P2V verdict-first (student)", r)}${modelBlock("P2R", "P2R reason-first (student)", r)}${r.final ? `<div class="trans final"><b>Reference</b> ${chip(r.final.source, "pos")} ${r.final.hv ? chip("hazard " + r.final.hv, r.final.hv === "no" ? "neg" : "pos") : ""}
             <div class="ptext">${esc(r.final.expl)}</div><div class="ptext dim">→ ${esc(r.final.pred)}</div></div>` : ""}${c}</td>
         <td><select class="trflag" data-k="${esc(r.key)}"><option value="">review…</option>${["ok", "wrong text", "hazard not visible", "label problem", "fix needed"]
           .map(o => `<option${n.flag === o ? " selected" : ""}>${o}</option>`).join("")}</select>
@@ -99,14 +118,14 @@ function createTestRefView(deps){
 
   function build(){
     built = true;
-    renderSummary();
+    renderSummary(); renderCM();
     const sel = (id, opts, key) => {
       $(id).innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
       $(id).addEventListener("change", e => { state[key] = e.target.value; state.page = 0; renderBody(); });
     };
     sel("trGroup", [["", "all groups"], ["normal", "normal"], ["tte0.5", "TTE 0.5 s"], ["tte1", "TTE 1.0 s"], ["tte1.5", "TTE 1.5 s"]], "group");
     sel("trLabel", [["", "crash + normal"], ["1", "crash windows"], ["0", "normal windows"]], "label");
-    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"]], "flag");
+    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"]], "flag");
     sel("trHv", [["", "any hazard visibility"], ["yes", "hazard visible: yes"], ["partly", "partly"], ["no", "not visible"]], "hv");
     sel("trSrc", [["", "any reference source"], ["blind", "blind"], ["second_look", "second look"], ["edited", "edited"]], "src");
     sel("trReview", [["", "review: all"], ["flagged", "reviewed"], ["unreviewed", "not reviewed"]], "review");

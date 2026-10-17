@@ -68,7 +68,9 @@
        <b>visible</b> in the 16 frames (&ldquo;not visible&rdquo; windows are honest descriptions of a scene that does not yet show the danger). The <b>reference</b> is the blind answer where it agrees
        with the label, otherwise the second look. These texts are used only to grade the models on the test set. Use the review column (saved in this browser; Export / Import) to flag texts that
        do not match the frames, then send me the exported file.</p>
-    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="trSummary"></table></div>
+    <div class="table-wrap pilot-runs"><table class="mini" id="trSummary"></table></div>
+    <h3 class="subh">Decision of the models on the private test set (P = 0.5; per TTE the crash windows of that TTE vs the normal windows of the same TTE)</h3>
+    <div class="table-wrap pilot-runs"><table class="mini trcm" id="trCM"></table></div>
     <div class="cmp-toolbar trbar">
       <select id="trGroup"></select><select id="trLabel"></select><select id="trFlag"></select><select id="trHv"></select><select id="trSrc"></select><select id="trReview"></select>
       <input id="trSearch" type="text" placeholder="search id or any text" autocomplete="off" class="augsearch">
