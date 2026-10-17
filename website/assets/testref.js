@@ -1,8 +1,8 @@
 /* testref.js - the "Teacher reasoning - test (private)" view of dataset.html (plan 2026-10-17, step 7).
 
    window.TEST_TEACHER_DATA (build_test_teacher_data.py): summary + one row per private-test window (677) with the boxed sheet, label, TTE, the crash model's P, the
-   blind first look, the label-informed second look (with hazard_visible), the merged final reference and its fact card.
-   Filters: TTE group, label, blind verdict wrong, has second look, hazard visible, source of the final text, review flag, search. Sort by clicking a header chip.
+   pass 1 (the teacher's first look), the label-informed pass 2 (with hazard_visible), the merged final reference and its fact card.
+   Filters: TTE group, label, pass-1 verdict wrong, has second look, hazard visible, source of the final text, review flag, search. Sort by clicking a header chip.
    A notes column (saved in this browser, Export / Import) for the review of step 8. 30 rows per page. The enlarge overlay (#gridOverlay) is the page's shared one.
 
    createTestRefView({data, esc}) -> {show()} */
@@ -47,8 +47,8 @@ function createTestRefView(deps){
     $("trSummary").innerHTML = `<thead><tr><th>what</th><th>count</th></tr></thead><tbody>
       <tr><td>private test windows</td><td class="num">${S.n} (${S.n_crash} crash · ${S.n_normal} normal)</td></tr>
       <tr><td>windows by group</td><td class="num">${Object.entries(g).map(([k, v]) => `${GL[k] || k}: ${v}`).join(" · ")}</td></tr>
-      <tr><td>pass 1 (blind first look)</td><td class="num">${S.blind} answers; wrong verdict (needs pass 2) on ${S.blind_wrong}</td></tr>
-      <tr><td>pass 2 (second look)</td><td class="num">${S.second} answers${S.second ? "; hazard visible: " + Object.entries(S.hv).map(([k, v]) => `${k} ${v}`).join(" · ") : ""}</td></tr>
+      <tr><td>pass 1 (teacher, first look)</td><td class="num">${S.blind} answers; wrong verdict (needs pass 2) on ${S.blind_wrong}</td></tr>
+      <tr><td>pass 2 (teacher, second look)</td><td class="num">${S.second} answers${S.second ? "; hazard visible: " + Object.entries(S.hv).map(([k, v]) => `${k} ${v}`).join(" · ") : ""}</td></tr>
       <tr><td>final reference texts</td><td class="num">${Object.keys(S.final || {}).length ? Object.entries(S.final).map(([k, v]) => `${k} ${v}`).join(" · ") : "not merged yet"}</td></tr></tbody>`;
   }
 
@@ -89,8 +89,8 @@ function createTestRefView(deps){
       return `<tr><td><div class="thumb" data-id="${esc(r.key)}" title="enlarge">${r.grid ? `<img loading="lazy" src="${esc(r.grid)}" alt="">` : ""}</div>
         <div class="dim">${esc(r.key)}</div><div class="dim">${esc(GL[r.group] || r.group)} · <b>${r.label ? "crash" : "normal"}</b></div>
         <div class="dim ${(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label) ? "bad" : ""}">crash model P ${f2(r.a1_p)}${(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label) ? " (wrong)" : ""}${r.box_flag ? " · box " + esc(r.box_flag) : ""}</div></td>
-        <td class="hpdesc">${ansBlock("Pass 1 (blind)", r.blind, r.label)}${ansBlock("Pass 2 (second look)", r.second, r.label)}
-          ${modelBlock("P2V", "P2V verdict-first (student)", r)}${modelBlock("P2R", "P2R reason-first (student)", r)}${r.final ? `<div class="trans final"><b>Reference</b> ${chip(r.final.source, "pos")} ${r.final.hv ? chip("hazard " + r.final.hv, r.final.hv === "no" ? "neg" : "pos") : ""}
+        <td class="hpdesc">${ansBlock("Pass 1 (teacher)", r.blind, r.label)}${ansBlock("Pass 2 (teacher, second look)", r.second, r.label)}
+          ${modelBlock("P2V", "P2V verdict-first (student)", r)}${modelBlock("P2R", "P2R reason-first (student)", r)}${r.final ? `<div class="trans final"><b>Reference</b> ${chip(({blind: "pass 1 (teacher)", second_look: "pass 2 (teacher)"})[r.final.source] || r.final.source, "pos")} ${r.final.hv ? chip("hazard " + r.final.hv, r.final.hv === "no" ? "neg" : "pos") : ""}
             <div class="ptext">${esc(r.final.expl)}</div><div class="ptext dim">→ ${esc(r.final.pred)}</div></div>` : ""}${c}</td>
         <td><select class="trflag" data-k="${esc(r.key)}"><option value="">review…</option>${["ok", "wrong text", "hazard not visible", "label problem", "fix needed"]
           .map(o => `<option${n.flag === o ? " selected" : ""}>${o}</option>`).join("")}</select>
@@ -127,10 +127,10 @@ function createTestRefView(deps){
     sel("trLabel", [["", "crash + normal"], ["1", "crash windows"], ["0", "normal windows"]], "label");
     sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"]], "flag");
     sel("trHv", [["", "any hazard visibility"], ["yes", "hazard visible: yes"], ["partly", "partly"], ["no", "not visible"]], "hv");
-    sel("trSrc", [["", "any reference source"], ["blind", "blind"], ["second_look", "second look"], ["edited", "edited"]], "src");
+    sel("trSrc", [["", "any reference source"], ["blind", "pass 1 (teacher)"], ["second_look", "pass 2 (teacher)"], ["edited", "edited"]], "src");
     sel("trReview", [["", "review: all"], ["flagged", "reviewed"], ["unreviewed", "not reviewed"]], "review");
     $("trSearch").addEventListener("input", e => { state.q = e.target.value.trim(); state.page = 0; renderBody(); });
-    $("trHead").innerHTML = [["key", "window"], ["tte", "TTE"], ["label", "label"], ["a1", "crash model P"], ["blind", "blind risk"], ["second", "second-look risk"]]
+    $("trHead").innerHTML = [["key", "window"], ["tte", "TTE"], ["label", "label"], ["a1", "crash model P"], ["blind", "pass 1 risk"], ["second", "pass 2 risk"]]
       .map(([k, l]) => `<button class="pill" data-sort="${k}" data-label="${esc(l)}">${esc(l)}</button>`).join(" ");
     $("trHead").querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
       state.sort = {key: b.dataset.sort, dir: state.sort.key === b.dataset.sort ? -state.sort.dir : 1}; state.page = 0; renderBody();
@@ -148,6 +148,10 @@ function createTestRefView(deps){
       fr.onload = () => { try { const inc = JSON.parse(fr.result); let n = 0; for (const k in inc) if (!NOTES[k]) { NOTES[k] = inc[k]; n++; } save(); renderBody(); alert(`Imported ${n} new note(s).`); } catch (er) { alert("Not a valid notes file."); } };
       fr.readAsText(f);
     });
+    const close = () => $("gridOverlay").classList.remove("open");
+    $("gClose").addEventListener("click", close);
+    $("gridOverlay").addEventListener("click", e => { if (e.target === $("gridOverlay")) close(); });
+    document.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
     renderBody();
   }
   return {show(){ if (!built) build(); }};

@@ -568,3 +568,9 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 #viewTestRef table.mini th{white-space:normal;font-size:11px;padding:7px 6px}
 #viewTestRef table.mini td{font-size:13px;padding:6px}
 #viewTestRef .table-wrap{overflow-x:visible}
+
+/* dropdowns: the closed box is transparent with light text, so the OPEN list must be dark too (it was white on white) */
+#viewTestRef select, #viewP2F select{color-scheme:dark;background-color:#121831}
+#viewTestRef select option, #viewP2F select option{background-color:#121831;color:#e6ebf5}
+#viewTestRef .trnote{color-scheme:dark;background-color:#121831}
+#viewTestRef .trbar select, #viewP2F .p2fbar select, #viewTestRef .trflag{background:#121831 !important;color:#e6ebf5 !important;color-scheme:dark}

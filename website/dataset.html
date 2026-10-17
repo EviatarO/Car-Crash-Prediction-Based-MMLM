@@ -39,7 +39,7 @@
     <button class="tab" data-split="test">Test</button>
     <button class="tab" data-split="teacher" title="the 4,203-window teacher reasoning dataset: frames with the red box, E3 / E6 / E7 answers, final target">Teacher reasoning</button>
     <button class="tab" data-split="aug" title="the enlarged reasoning dataset: the teacher's text + up to 3 judged rephrased versions per window, and the frame-shifted window copies">Reasoning dataset - augmented</button>
-    <button class="tab" data-split="testref" title="the Nexar PRIVATE test windows with the teacher reference reasoning: blind first look, label-informed second look, review notes">Teacher reasoning - test (private)</button>
+    <button class="tab" data-split="testref" title="the Nexar PRIVATE test windows with the teacher reference reasoning: pass 1 (first look), pass 2 (second look), review notes">Teacher reasoning - test (private)</button>
   </div>
   <div class="searchwrap">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -63,10 +63,10 @@
     <div class="kicker">Reference reasoning for the official test set · plan 2026-10-17</div>
     <h2>Private test windows with the teacher&rsquo;s reasoning</h2>
     <p class="lede">One window per Nexar private-test video, ending at its time-to-event (TTE 0.5 / 1.0 / 1.5 s; normal clips end at a fake event). The thin red box marks the
-       road user the crash model attends to. The <b>blind first look</b> is the same teacher prompt as for the training data (the teacher does not know the label).
-       Where its verdict disagrees with the Nexar label, a <b>second look</b> is made on the same frames with the true outcome given in text: it must say whether the hazard is
-       <b>visible</b> in the 16 frames (&ldquo;not visible&rdquo; windows are honest descriptions of a scene that does not yet show the danger). The <b>reference</b> is the blind answer where it agrees
-       with the label, otherwise the second look. These texts are used only to grade the models on the test set. Use the review column (saved in this browser; Export / Import) to flag texts that
+       road user the crash model attends to. <b>Pass 1</b> is the teacher&rsquo;s first look, with the same prompt as for the training data (the teacher does not know the label).
+       Where its verdict disagrees with the Nexar label, a <b>pass 2</b> (second look) can be made on the same frames with the true outcome given in text: it must say whether the hazard is
+       <b>visible</b> in the 16 frames (&ldquo;not visible&rdquo; windows are honest descriptions of a scene that does not yet show the danger). The <b>reference</b> is the pass-1 answer where it agrees
+       with the label, otherwise the pass-2 answer. These texts are used only to grade the models on the test set. Use the review column (saved in this browser; Export / Import) to flag texts that
        do not match the frames, then send me the exported file.</p>
     <div class="table-wrap pilot-runs"><table class="mini" id="trSummary"></table></div>
     <h3 class="subh">Decision of the models on the private test set (P = 0.5; per TTE the crash windows of that TTE vs the normal windows of the same TTE)</h3>
