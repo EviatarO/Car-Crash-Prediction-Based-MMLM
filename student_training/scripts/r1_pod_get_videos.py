@@ -25,11 +25,12 @@ def main():
     ap.add_argument("--windows", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--prefix", default="train/", help="repo folder: train/ (default) or test-private/ (the private test videos, plan 2026-10-17)")
     ap.add_argument("--check", action="store_true", help="only verify access and the file list (downloads one small file)")
     args = ap.parse_args()
     need = sorted({json.loads(l)["video_id"] for l in open(args.windows, encoding="utf-8")})
     sib = {f.rfilename: f.size for f in HfApi().dataset_info(REPO, files_metadata=True).siblings}
-    where = {k.split("/")[-1][:-4]: k for k in sib if k.startswith("train/") and k.endswith(".mp4")}
+    where = {k.split("/")[-1][:-4]: k for k in sib if k.startswith(args.prefix) and k.endswith(".mp4")}
     missing = [v for v in need if v not in where]
     print(f"[videos] need {len(need)}, in the repo {len(where)} train videos, not found: {missing[:5]}", flush=True)
     assert not missing

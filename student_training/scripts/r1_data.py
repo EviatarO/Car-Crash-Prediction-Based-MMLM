@@ -21,7 +21,8 @@ ROOT = HERE.parents[1]
 MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.jsonl",
             "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
             "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl",
-            "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl"}
+            "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl",
+            "nexar_reasoning_test": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test.jsonl"}
 
 
 class Cache:

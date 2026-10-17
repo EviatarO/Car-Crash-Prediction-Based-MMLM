@@ -272,6 +272,15 @@ def main():
     d = _draw_equal(toy, 9, random.Random(0))
     assert len(d) == 9 + 0 and 900 in [i["id"] for i in d] and Counter(i["group"] for i in d if i["group"])["tte1.5"] == 4, Counter(i["group"] for i in d)    # small group repeated, extra positive kept
     print(f"13 ok: pre-alert dropped ({len(tr) - len(trd)} train, {len(va) - len(vad)} val windows); positives per epoch {dict(pos_groups)}; small-group repeats and extras handled")
+    # 14 ---- private test windows (plan 2026-10-17): one window per video, Nexar label = visible-hazard label, no pre-alert, groups by TTE
+    tt = load_items("nexar_reasoning_test", 2, "test", c)
+    assert len(tt) == 677 and len({i["video_key"] for i in tt}) == 677
+    assert all(i["split"] == "test" and not i["pre_alert"] and i["label"] == i["label_nexar"] for i in tt)
+    assert Counter(i["group"] for i in tt) == {"normal": 339, "tte0.5": 142, "tte1.0": 117, "tte1.5": 79}, Counter(i["group"] for i in tt)
+    assert sum(i["label"] for i in tt) == 338
+    assert not {i["video_key"] for i in tt} & {i["video_key"] for i in tr + va}, "test videos overlap train / val"
+    assert all(i["answer"].startswith("Reasoning:") and parse_reasoning(i["answer"])["collision"] == i["label"] for i in tt)
+    print("14 ok: 677 private test windows (338 crash / 339 normal), groups " + str(dict(Counter(i["group"] for i in tt))) + "; no video shared with train / val")
     print("ALL OK")
 
 

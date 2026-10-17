@@ -40,7 +40,8 @@ MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.json
             "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
             "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl",
             "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl",
-            "nexar_reasoning_control": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_control.jsonl"}
+            "nexar_reasoning_control": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_control.jsonl",
+            "nexar_reasoning_test": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test.jsonl"}
 ADAPTER = ROOT / "outputs" / "a1_compress256" / "train" / "epoch_02" / "lora_adapter"
 CFG = HERE.parent / "configs" / "e4_stageA.yaml"
 DADA_URL = "https://huggingface.co/datasets/JeffreyChou/MM-AU/resolve/main/DADA-2000_chunks/DADA2000.part_{}"
@@ -467,7 +468,7 @@ def consolidate(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "nexar_reasoning_shifted", "nexar_reasoning_control", "dada"])
+    ap.add_argument("--source", required=True, choices=["nexar", "nexar_reasoning", "nexar_reasoning_shifted", "nexar_reasoning_control", "nexar_reasoning_test", "dada"])
     ap.add_argument("--from-hf", default=None, help="encode the shards of this private HF window repo (chunked, resumable)")
     ap.add_argument("--max-shards", type=int, default=0, help="with --from-hf: encode only the first N shards (smoke runs)")
     ap.add_argument("--push-repo", default=None, help="with --from-hf: upload each encoded chunk here, then delete it locally")

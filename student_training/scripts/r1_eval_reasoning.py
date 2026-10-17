@@ -235,6 +235,11 @@ def main():
     ap.add_argument("--facts-cards", default=None, help="fact_cards_teacher.jsonl: needed for --order facts_first (also scores the generated Facts line)")
     ap.add_argument("--drop-prealert", action="store_true", help="score without the pre-alert windows (plan 2026-10-15)")
     ap.add_argument("--split", default="val")
+    ap.add_argument("--source", default="nexar_reasoning", choices=["nexar_reasoning", "nexar_reasoning_test"],
+                    help="windows to score (cache name = source); nexar_reasoning_test = the private test windows (plan 2026-10-17)")
+    ap.add_argument("--no-ref", action="store_true",
+                    help="the windows have no reference text yet (test): skip loss / perplexity / gaps / retrieval / blank-video / text metrics; the decision scores, "
+                         "missed crashes and the generated answers are still written")
     ap.add_argument("--lm", default=QWEN_ID)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--lora-r", type=int, default=16)
@@ -255,26 +260,30 @@ def main():
     torch.manual_seed(0)
     qwen, tok = load_lm(args.lm, dev)
     bridge = R1Bridge(qwen, tok, inp=args.input).to(dev)
-    caches = {"nexar_reasoning": Cache(args.cache_dir, "nexar_reasoning", args.input)}
-    cache = caches["nexar_reasoning"]
+    caches = {"nexar_reasoning": Cache(args.cache_dir, args.source, args.input), args.source: Cache(args.cache_dir, args.source, args.input)}
+    cache = caches[args.source]
     cards = load_cards(args.facts_cards) if args.facts_cards else None
-    items = load_items("nexar_reasoning", 2, args.split, cache, order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
+    items = load_items(args.source, 2, "test" if args.source == "nexar_reasoning_test" else args.split, cache, order=args.order, box_hint=args.box_hint, facts=cards,
+                       drop_prealert=args.drop_prealert)
     if args.limit:
         items = items[:args.limit]
     assert items, "no validation windows in the cache"
     print(f"[eval] {len(items)} windows (order {args.order})", flush=True)
     rep = {"order": args.order, "ckpt": args.ckpt, "n_windows": len(items)}
 
-    if args.before_ckpt:                                              # (1) Phase-1 model, no LoRA yet
+    if args.before_ckpt and not args.no_ref:                          # (1) Phase-1 model, no LoRA yet
         load_ckpt(bridge, args.before_ckpt, args.lora_r)
         rep["before_phase1"] = loss_summary(bridge, items, caches, dev)
         print("[before]", json.dumps(rep["before_phase1"]), flush=True)
 
     load_ckpt(bridge, args.ckpt, args.lora_r)                         # (2) the trained model
-    rep["after"] = loss_summary(bridge, items, caches, dev)
-    sub = items[:args.max_ret] if args.max_ret else items
-    rep["retrieval_at_10"] = retrieval_at10(bridge, sub, caches, dev)
-    print("[after]", json.dumps(rep["after"]), json.dumps(rep["retrieval_at_10"]), flush=True)
+    if args.no_ref:
+        rep["after"], rep["retrieval_at_10"] = None, None
+    else:
+        rep["after"] = loss_summary(bridge, items, caches, dev)
+        sub = items[:args.max_ret] if args.max_ret else items
+        rep["retrieval_at_10"] = retrieval_at10(bridge, sub, caches, dev)
+        print("[after]", json.dumps(rep["after"]), json.dumps(rep["retrieval_at_10"]), flush=True)
 
     rows = [{"id": it["id"], "video_key": it["video_key"], "frames_dir": it["gt"].get("frames_dir") or it["id"].replace("nexar_", "", 1),
              "label": it["label"], "label_nexar": it["label_nexar"], "tte": it["tte"], "pre_alert": it["pre_alert"], "group": it["group"],
@@ -284,7 +293,7 @@ def main():
         for r, it in zip(rows, items):
             r["teacher_facts"] = it["facts"]
     score_keys = []
-    kinds = score_kinds(args.order)
+    kinds = tuple(k for k in score_kinds(args.order) if not (args.no_ref and k == "teacher"))     # no teacher text on the test windows
     for kind in kinds:
         sc = logodds(bridge, items, [prefix_for(kind, it) for it in items], caches, dev)
         for r, s in zip(rows, sc):
@@ -321,7 +330,7 @@ def main():
         for r, s in zip(rows, sc):
             r["s_after"] = s
         score_keys.append("s_after")
-    nb = min(args.n_blank, len(items))
+    nb = 0 if args.no_ref else min(args.n_blank, len(items))
     rep["blank_generations"] = [{"id": it["id"], "text": g} for it, g in zip(items[:nb], generate_all(bridge, items[:nb], caches, dev, "blank", args.max_new))]
 
     if args.old_ckpt:                                                 # (3) old Phase-2 model on the same windows with its own question
@@ -332,7 +341,7 @@ def main():
             r["s_old_phase2"] = s
         score_keys.append("s_old_phase2")
 
-    rep.update(metrics=compute_metrics(rows, score_keys), text=text_metrics(rows), missed_crashes=missed_crashes(rows))
+    rep.update(metrics=compute_metrics(rows, score_keys), text=None if args.no_ref else text_metrics(rows), missed_crashes=missed_crashes(rows))
     if args.order == "facts_first":
         rep["facts_line"] = facts_line_accuracy(rows)
     with open(out / "predictions.jsonl", "w", encoding="utf-8") as f:
@@ -344,6 +353,12 @@ def main():
              "| score | AUC vs label_vis | AUC (no pre-alert) vs Nexar label | acc @ thr | balanced acc @ thr |", "|---|---|---|---|---|"]
     for k, v in d.items():
         lines.append(f"| {k} | {fmt(v['auc_vs_label_vis'])} | {fmt(v['auc_no_prealert_vs_nexar_label'])} | {v['acc_at_thr']:.3f} ({v['threshold']}) | {v['balanced_acc_at_thr']:.3f} |")
+    if args.no_ref:
+        lines += ["", "(no reference text: loss, gaps, retrieval and text metrics skipped)", "",
+                  "missed crashes (share of visible-hazard crash windows called 'no'; thresholds 0.5): " + json.dumps(rep["missed_crashes"])]
+        (out / "summary.md").write_text(chr(10).join(lines), encoding="utf-8")
+        print(chr(10).join(lines))
+        return
     lines += ["", f"loss / perplexity (teacher text): after {rep['after']['loss_real']:.3f} / {rep['after']['perplexity_real']:.2f}"
               + (f" , before (Phase 1) {rep['before_phase1']['loss_real']:.3f} / {rep['before_phase1']['perplexity_real']:.2f}" if 'before_phase1' in rep else ""),
               f"wrong-video gap {rep['after']['gap_wrong']:+.3f} {rep['after']['gap_wrong_ci']}; blank-video gap {rep['after']['gap_blank']:+.3f} {rep['after']['gap_blank_ci']}",
