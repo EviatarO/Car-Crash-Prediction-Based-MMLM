@@ -39,6 +39,7 @@
     <button class="tab" data-split="test">Test</button>
     <button class="tab" data-split="teacher" title="the 4,203-window teacher reasoning dataset: frames with the red box, E3 / E6 / E7 answers, final target">Teacher reasoning</button>
     <button class="tab" data-split="aug" title="the enlarged reasoning dataset: the teacher's text + up to 3 judged rephrased versions per window, and the frame-shifted window copies">Reasoning dataset - augmented</button>
+    <button class="tab" data-split="testref" title="the Nexar PRIVATE test windows with the teacher reference reasoning: blind first look, label-informed second look, review notes">Teacher reasoning - test (private)</button>
   </div>
   <div class="searchwrap">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -54,6 +55,29 @@
     <thead id="thead"></thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+
+<!-- ================= TEACHER REASONING - TEST (private) (test_teacher_data.js by build_test_teacher_data.py, rendered by assets/testref.js) ================= -->
+<div id="viewTestRef" hidden>
+  <section class="block">
+    <div class="kicker">Reference reasoning for the official test set · plan 2026-10-17</div>
+    <h2>Private test windows with the teacher&rsquo;s reasoning</h2>
+    <p class="lede">One window per Nexar private-test video, ending at its time-to-event (TTE 0.5 / 1.0 / 1.5 s; normal clips end at a fake event). The thin red box marks the
+       road user the crash model attends to. The <b>blind first look</b> is the same teacher prompt as for the training data (the teacher does not know the label).
+       Where its verdict disagrees with the Nexar label, a <b>second look</b> is made on the same frames with the true outcome given in text: it must say whether the hazard is
+       <b>visible</b> in the 16 frames (&ldquo;not visible&rdquo; windows are honest descriptions of a scene that does not yet show the danger). The <b>reference</b> is the blind answer where it agrees
+       with the label, otherwise the second look. These texts are used only to grade the models on the test set. Use the review column (saved in this browser; Export / Import) to flag texts that
+       do not match the frames, then send me the exported file.</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="trSummary"></table></div>
+    <div class="cmp-toolbar trbar">
+      <select id="trGroup"></select><select id="trLabel"></select><select id="trFlag"></select><select id="trHv"></select><select id="trSrc"></select><select id="trReview"></select>
+      <input id="trSearch" type="text" placeholder="search id or any text" autocomplete="off" class="augsearch">
+    </div>
+    <div class="cmp-toolbar trbar"><span class="dim">sort:</span> <span id="trHead"></span><span class="rowcount" id="trCount"></span>
+      <button class="pill pushright" id="trPrev">&lsaquo; prev</button><button class="pill" id="trNext">next &rsaquo;</button>
+      <button class="pill" id="trExport">Export notes</button><button class="pill" id="trImport">Import notes</button><input type="file" id="trFile" accept="application/json" hidden></div>
+    <div class="table-wrap"><table class="mini trtable"><thead><tr><th>window</th><th>teacher answers</th><th>review</th></tr></thead><tbody id="trBody"></tbody></table></div>
+  </section>
 </div>
 
 <!-- ================= AUGMENTED REASONING DATASET VIEW (aug_data.js, built by build_aug_data.py; rendered by assets/aug.js) ================= -->
@@ -170,6 +194,7 @@
 <script src="assets/player.js"></script>
 <script src="assets/pilot.js"></script>
 <script src="assets/aug.js"></script>
+<script src="assets/testref.js"></script>
 <script>
 "use strict";
 /* ============================================================= state */
@@ -385,6 +410,8 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
   t.classList.add("active");
   showAug(t.dataset.split === "aug");
+  showTestRef(t.dataset.split === "testref");
+  if (t.dataset.split === "testref"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "aug"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "teacher"){ showTeacher(true); return; }
   showTeacher(false);
@@ -510,6 +537,24 @@ function showAug(on){
     augView.show();
   };
   sc.onerror = () => { augLoading = false; document.getElementById("augCount").textContent = "aug_data.js not found: run website/build_aug_data.py"; };
+  document.head.appendChild(sc);
+}
+
+/* ============================================================= private-test teacher reasoning tab (test_teacher_data.js, loaded on first open) */
+let testRefView = null, testRefLoading = false;
+function showTestRef(on){
+  document.getElementById("viewTestRef").hidden = !on;
+  if (!on || testRefView || testRefLoading) { if (on && testRefView) testRefView.show(); return; }
+  testRefLoading = true;
+  document.getElementById("trCount").textContent = "loading the texts…";
+  const sc = document.createElement("script");
+  sc.src = "test_teacher_data.js?t=" + Date.now();
+  sc.onload = () => {
+    testRefView = createTestRefView({data: window.TEST_TEACHER_DATA,
+      esc: s => String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")});
+    testRefView.show();
+  };
+  sc.onerror = () => { testRefLoading = false; document.getElementById("trCount").textContent = "test_teacher_data.js not found: run website/build_test_teacher_data.py"; };
   document.head.appendChild(sc);
 }
 </script>

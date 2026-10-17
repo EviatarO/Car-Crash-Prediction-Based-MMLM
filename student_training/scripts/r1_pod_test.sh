@@ -31,6 +31,9 @@ FREE_GB=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
 [ "$(ls -d $FRAMES/*_hires 2>/dev/null | wc -l)" -eq 677 ] || fail "expected 677 frame folders in $FRAMES, found $(ls -d $FRAMES/*_hires 2>/dev/null | wc -l)"
 
 # 0 ---- videos
+say "tracking dependencies (YOLOPv2 code is in /root/r1/third_party; trackers / supervision / matplotlib are not in the standard setup)"
+$PY -c "import trackers, supervision, matplotlib, scipy" 2>/dev/null || /root/venv/bin/pip install -q scipy supervision trackers matplotlib albumentations >> $WORK/logs/pip.log 2>&1
+[ -f $RR/third_party/yolopv2_ref/weights/yolopv2.pt ] || fail "third_party/yolopv2_ref/weights/yolopv2.pt missing (copy third_party to /root/r1)"
 say "download the 677 private test videos"
 $PY -u r1_pod_get_videos.py --windows $W --out $VIDEOS --prefix test-private/ --threads 16 > $WORK/logs/videos.log 2>&1 || fail videos
 [ "$(ls $VIDEOS/*.mp4 | wc -l)" -ge 677 ] || fail "videos: $(ls $VIDEOS/*.mp4 | wc -l) of 677"
