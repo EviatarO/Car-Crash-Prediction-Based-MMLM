@@ -44,8 +44,8 @@ function createTestRefView(deps){
     $("trSummary").innerHTML = `<thead><tr><th>what</th><th>count</th></tr></thead><tbody>
       <tr><td>private test windows</td><td class="num">${S.n} (${S.n_crash} crash · ${S.n_normal} normal)</td></tr>
       <tr><td>windows by group</td><td class="num">${Object.entries(g).map(([k, v]) => `${GL[k] || k}: ${v}`).join(" · ")}</td></tr>
-      <tr><td>blind first look (E3)</td><td class="num">${S.blind} answers; verdict ≠ label on ${S.blind_wrong}</td></tr>
-      <tr><td>label-informed second look</td><td class="num">${S.second} answers${S.second ? "; hazard visible: " + Object.entries(S.hv).map(([k, v]) => `${k} ${v}`).join(" · ") : ""}</td></tr>
+      <tr><td>pass 1 (blind first look)</td><td class="num">${S.blind} answers; wrong verdict (needs pass 2) on ${S.blind_wrong}</td></tr>
+      <tr><td>pass 2 (second look)</td><td class="num">${S.second} answers${S.second ? "; hazard visible: " + Object.entries(S.hv).map(([k, v]) => `${k} ${v}`).join(" · ") : ""}</td></tr>
       <tr><td>final reference texts</td><td class="num">${Object.keys(S.final || {}).length ? Object.entries(S.final).map(([k, v]) => `${k} ${v}`).join(" · ") : "not merged yet"}</td></tr></tbody>`;
   }
 
@@ -53,7 +53,8 @@ function createTestRefView(deps){
   function ansBlock(title, a, label){
     if (!a) return "";
     const ok = (a.v === "yes") === !!label;
-    return `<div class="trans ${ok ? "" : "wrongcell"}"><b>${esc(title)}</b> ${chip(a.v, a.v === "yes" ? "pos" : "neg")} <span class="dim">risk ${a.risk === null || a.risk === undefined ? "–" : a.risk}</span>
+    const p2 = (!ok && title.startsWith("Pass 1")) ? chip("pass 1 wrong → needs pass 2", "neg") : "";
+    return `<div class="trans ${ok ? "" : "wrongcell"}"><b>${esc(title)}</b> ${chip(a.v, a.v === "yes" ? "pos" : "neg")} <span class="dim">risk ${a.risk === null || a.risk === undefined ? "–" : a.risk}</span> ${p2}
       ${a.hv ? chip("hazard visible: " + a.hv + (a.first ? " (from frame " + a.first + ")" : ""), a.hv === "no" ? "neg" : "pos") : ""}
       ${a.agent ? `<div class="dim">involved: ${esc(a.agent)}</div>` : ""}<div class="ptext">${esc(a.expl || "")}</div><div class="ptext dim">→ ${esc(a.pred || "")}</div>
       ${(a.problems && a.problems.length) ? `<div class="dim bad">flags: ${esc(a.problems.join("; "))}</div>` : ""}</div>`;
@@ -69,7 +70,7 @@ function createTestRefView(deps){
       return `<tr><td><div class="thumb" data-id="${esc(r.key)}" title="enlarge">${r.grid ? `<img loading="lazy" src="${esc(r.grid)}" alt="">` : ""}</div>
         <div class="dim">${esc(r.key)}</div><div class="dim">${esc(GL[r.group] || r.group)} · <b>${r.label ? "crash" : "normal"}</b></div>
         <div class="dim">crash model P ${f2(r.a1_p)}${r.box_flag ? " · box " + esc(r.box_flag) : ""}</div></td>
-        <td class="hpdesc">${ansBlock("Blind first look", r.blind, r.label)}${ansBlock("Second look (told the outcome)", r.second, r.label)}
+        <td class="hpdesc">${ansBlock("Pass 1 (blind)", r.blind, r.label)}${ansBlock("Pass 2 (second look)", r.second, r.label)}
           ${r.final ? `<div class="trans final"><b>Reference</b> ${chip(r.final.source, "pos")} ${r.final.hv ? chip("hazard " + r.final.hv, r.final.hv === "no" ? "neg" : "pos") : ""}
             <div class="ptext">${esc(r.final.expl)}</div><div class="ptext dim">→ ${esc(r.final.pred)}</div></div>` : ""}${c}</td>
         <td><select class="trflag" data-k="${esc(r.key)}"><option value="">review…</option>${["ok", "wrong text", "hazard not visible", "label problem", "fix needed"]
@@ -105,7 +106,7 @@ function createTestRefView(deps){
     };
     sel("trGroup", [["", "all groups"], ["normal", "normal"], ["tte0.5", "TTE 0.5 s"], ["tte1", "TTE 1.0 s"], ["tte1.5", "TTE 1.5 s"]], "group");
     sel("trLabel", [["", "crash + normal"], ["1", "crash windows"], ["0", "normal windows"]], "label");
-    sel("trFlag", [["", "all windows"], ["blind_wrong", "blind verdict ≠ label"], ["second", "has a second look"], ["no_blind", "no blind answer yet"]], "flag");
+    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"]], "flag");
     sel("trHv", [["", "any hazard visibility"], ["yes", "hazard visible: yes"], ["partly", "partly"], ["no", "not visible"]], "hv");
     sel("trSrc", [["", "any reference source"], ["blind", "blind"], ["second_look", "second look"], ["edited", "edited"]], "src");
     sel("trReview", [["", "review: all"], ["flagged", "reviewed"], ["unreviewed", "not reviewed"]], "review");
