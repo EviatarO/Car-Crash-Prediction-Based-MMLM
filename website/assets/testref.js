@@ -31,6 +31,14 @@ function createTestRefView(deps){
     if (state.flag === "no_blind" && r.blind) return false;
     if (state.flag === "p2v_wrong" && !(r.models && r.models.P2V && (r.models.P2V.v === "yes") !== !!r.label)) return false;
     if (state.flag === "p2r_wrong" && !(r.models && r.models.P2R && (r.models.P2R.v === "yes") !== !!r.label)) return false;
+    if (state.flag.startsWith("t_")) {
+      const mv = k => (r.models && r.models[k]) ? ((r.models[k].v === "yes") === !!r.label) : null;          // true = the model's verdict is right
+      const pass1Wrong = !!r.blind_wrong, pass1Right = !!r.blind && !r.blind_wrong, v = mv("P2V"), rr = mv("P2R");
+      const ok = {t_wrong_v: pass1Wrong && v === true, t_wrong_r: pass1Wrong && rr === true, t_wrong_both_right: pass1Wrong && v === true && rr === true,
+                  t_wrong_either_right: pass1Wrong && (v === true || rr === true), t_wrong_both_wrong: pass1Wrong && v === false && rr === false,
+                  t_right_both_wrong: pass1Right && v === false && rr === false, t_right_either_wrong: pass1Right && (v === false || rr === false)}[state.flag];
+      if (!ok) return false;
+    }
     if (state.flag === "cm_wrong" && !(r.a1_p !== null && (r.a1_p >= 0.5) !== !!r.label)) return false;
     if (state.hv && !(r.second && r.second.hv === state.hv)) return false;
     if (state.src && !srcOf(r).startsWith(state.src)) return false;
@@ -125,9 +133,15 @@ function createTestRefView(deps){
     };
     sel("trGroup", [["", "all groups"], ["normal", "normal"], ["tte0.5", "TTE 0.5 s"], ["tte1", "TTE 1.0 s"], ["tte1.5", "TTE 1.5 s"]], "group");
     sel("trLabel", [["", "crash + normal"], ["1", "crash windows"], ["0", "normal windows"]], "label");
-    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"]], "flag");
+    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"],
+      ["t_wrong_v", "teacher wrong, P2V right"], ["t_wrong_r", "teacher wrong, P2R right"], ["t_wrong_both_right", "teacher wrong, BOTH models right"],
+      ["t_wrong_either_right", "teacher wrong, at least one model right"], ["t_wrong_both_wrong", "teacher wrong, BOTH models wrong"],
+      ["t_right_both_wrong", "teacher right, BOTH models wrong"], ["t_right_either_wrong", "teacher right, at least one model wrong"]], "flag");
     sel("trHv", [["", "any hazard visibility"], ["yes", "hazard visible: yes"], ["partly", "partly"], ["no", "not visible"]], "hv");
     sel("trSrc", [["", "any reference source"], ["blind", "pass 1 (teacher)"], ["second_look", "pass 2 (teacher)"], ["edited", "edited"]], "src");
+    const hasSecond = D.rows.some(r => r.second), hasFinal = D.rows.some(r => r.final);
+    if (!hasSecond) { $("trHv").disabled = true; $("trHv").innerHTML = "<option>hazard visibility: pass 2 not run yet</option>"; $("trHv").title = "needs a pass-2 answer (pass 1 has no hazard_visible field)"; }
+    if (!hasFinal) { $("trSrc").disabled = true; $("trSrc").innerHTML = "<option>reference source: not merged yet</option>"; $("trSrc").title = "needs the final reference set (after pass 2)"; }
     sel("trReview", [["", "review: all"], ["flagged", "reviewed"], ["unreviewed", "not reviewed"]], "review");
     $("trSearch").addEventListener("input", e => { state.q = e.target.value.trim(); state.page = 0; renderBody(); });
     $("trHead").innerHTML = [["key", "window"], ["tte", "TTE"], ["label", "label"], ["a1", "crash model P"], ["blind", "pass 1 risk"], ["second", "pass 2 risk"]]
