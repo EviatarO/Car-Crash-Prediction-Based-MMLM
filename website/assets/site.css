@@ -574,3 +574,22 @@ table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
 #viewTestRef select option, #viewP2F select option{background-color:#121831;color:#e6ebf5}
 #viewTestRef .trnote{color-scheme:dark;background-color:#121831}
 #viewTestRef .trbar select, #viewP2F .p2fbar select, #viewTestRef .trflag{background:#121831 !important;color:#e6ebf5 !important;color-scheme:dark}
+
+/* the new-windows rewordings tab: the same layout as #viewAug (fixed width, wrapped text, no horizontal scroll) */
+#viewAugX .augver{margin:0 0 8px;line-height:1.45}
+#viewAugX .augver.dimrow{opacity:.62}
+#viewAugX .augver .chip{margin-right:4px}
+#viewAugX .augver .dim{display:block;font-size:12px;color:var(--muted)}
+#viewAugX .augver .bad{color:var(--red)}
+#viewAugX .cmp-toolbar .sep{display:inline-block;width:10px}
+#viewAugX .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewAugX table.augtable td{vertical-align:top;text-align:left;font-weight:400}
+#viewAugX table.augtable td:first-child{width:170px}
+#viewAugX table.augtable td .dim{font-size:11.5px;color:var(--muted)}
+#viewAugX table.augtable td.hpdesc{max-width:none;white-space:normal}
+@media (max-width:700px){ #viewAugX table.augtable td:first-child{width:120px} #viewAugX .augsearch{min-width:0;width:100%} }
+#viewAugX .cmp-toolbar{flex-wrap:wrap;gap:6px}
+#viewAugX table.augtable{table-layout:fixed;width:100%}
+#viewAugX table.augtable td{overflow-wrap:anywhere}
+#viewAugX table.augtable{min-width:0}
+@media (max-width:700px){ #viewAugX table.augtable td:first-child{width:96px} #viewAugX .thumb{width:90px;height:51px} }

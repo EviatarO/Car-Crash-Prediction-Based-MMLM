@@ -38,7 +38,9 @@
     <button class="tab active" data-split="train">Train</button>
     <button class="tab" data-split="test">Test</button>
     <button class="tab" data-split="teacher" title="the 4,203-window teacher reasoning dataset: frames with the red box, E3 / E6 / E7 answers, final target">Teacher reasoning</button>
+    <button class="tab" data-split="teacherx" title="the 870 new crash windows at TTE 0.75 / 1.25 s (plan 2026-10-19): frames with the red box, E3 / E6 / E6C answers, final target">Teacher reasoning - new windows (0.75 / 1.25 s)</button>
     <button class="tab" data-split="aug" title="the enlarged reasoning dataset: the teacher's text + up to 3 judged rephrased versions per window, and the frame-shifted window copies">Reasoning dataset - augmented</button>
+    <button class="tab" data-split="augx" title="the rephrased versions of the 860 new crash windows (TTE 0.75 / 1.25 s): accepted, rejected by the judge or the automatic check, removed after the audit">Reasoning dataset - new windows (augmented)</button>
     <button class="tab" data-split="testref" title="the Nexar PRIVATE test windows with the teacher reference reasoning: pass 1 (first look), pass 2 (second look), review notes">Teacher reasoning - test (private)</button>
   </div>
   <div class="searchwrap">
@@ -107,6 +109,29 @@
   </section>
 </div>
 
+<!-- ================= NEW-WINDOWS REWORDINGS VIEW (aug_extra_data.js, built by build_aug_extra_data.py; rendered by assets/aug.js) ================= -->
+<div id="viewAugX" hidden>
+  <section class="block">
+    <div class="kicker">Reasoning dataset · new windows · rephrased versions · 2026-10-19</div>
+    <h2>860 new crash windows (TTE 0.75 / 1.25 s): the teacher's text and every rephrased version</h2>
+    <p class="lede">Each window keeps the teacher's text (tag <b>teacher</b>). Gemini 3.8 Flash wrote 3 rephrased versions per window (plus a rewrite round when fewer than 3 were accepted). A version is
+       <b>used</b> only if it passed the automatic check and the strict Sonnet 5.5 judge. <b>Rejected versions are here too</b>: tick &ldquo;show rejected / spare versions&rdquo; or pick a status chip
+       (rejected by the judge / by the automatic check / removed after the audit) to read them with the reason. Opus 5.5 re-checked a blind sample of 300 versions (chip &ldquo;in the Opus audit&rdquo;).
+       Click a frame sheet to enlarge it.</p>
+    <div class="table-wrap pilot-runs" style="overflow-x:auto"><table class="mini" id="augxSummary"></table></div>
+    <div class="cmp-toolbar" id="augxChips"></div>
+    <div class="cmp-toolbar">
+      <input id="augxSearch" type="text" placeholder="search id or any text" autocomplete="off" class="augsearch">
+      <label class="dim"><input type="checkbox" id="augxShowRej"> show rejected / spare versions</label>
+      <button class="pill clearbtn" id="augxClear">Clear filters</button>
+      <span class="rowcount" id="augxCount"></span>
+      <button class="pill pushright" id="augxPrev">‹ prev</button>
+      <button class="pill" id="augxNext">next ›</button>
+    </div>
+    <div class="table-wrap"><table class="mini augtable" id="augxTable"><thead><tr><th>window</th><th>texts</th></tr></thead><tbody id="augxBody"></tbody></table></div>
+  </section>
+</div>
+
 <!-- ================= TEACHER REASONING DATASET VIEW (4,203 windows; same view code as the pilot table of experiments.html) ================= -->
 <div id="viewTeacher" hidden>
   <section class="block">
@@ -138,6 +163,40 @@
       </table>
     </div>
     <div class="cmp-toolbar" id="tchPager2"></div>
+  </section>
+</div>
+
+<!-- ================= TEACHER REASONING - NEW WINDOWS (870 windows at TTE 0.75 / 1.25 s, plan 2026-10-19; teacher_extra_data.js by build_teacher_data.py --folder outputs/teacher_extra_2026-10) ================= -->
+<div id="viewTeacherX" hidden>
+  <section class="block">
+    <div class="kicker">Teacher reasoning dataset · new windows · 2026-10-19</div>
+    <h2>870 new crash windows at TTE 0.75 / 1.25 s with the teacher's reasoning</h2>
+    <p class="lede">The windows added for the retraining (plan 2026-10-19): crash windows that end 0.75 s or 1.25 s before the collision, cut with the same visibility rule
+       as the original dataset. Each row is one 16-frame window with the road user the frozen crash model attends to boxed in red (the same road user as the video&rsquo;s 0.5 s window where it is
+       visible). <b>E3</b> is the teacher&rsquo;s blind first answer; where it did not say &ldquo;collision&rdquo;, <b>E6</b> is the second look anchored on a correct window of the same video and
+       <b>E6C</b> the chain that starts from a hindsight answer (E7) on the video&rsquo;s 0.5 s window; <b>FINAL</b> is the answer kept in the dataset. Click a frame sheet or ＋ to enlarge.
+       Comments are saved in this browser under their own key (Export notes, then send me the file).</p>
+    <div class="table-wrap pilot-runs"><table class="mini" id="tcxRuns"></table></div>
+    <p class="note" id="tcxPaired"></p>
+    <p class="note" id="tcxNote"></p>
+    <p class="note"><a id="tcxRouteLink" href="#" target="_blank" rel="noopener"><img id="tcxRoute" alt="routing of the teacher prompts" style="max-width:100%;height:auto;border:1px solid #2a3560;border-radius:8px;background:#fff"></a></p>
+    <div class="cmp-toolbar" id="tcxChips"></div>
+    <div class="cmp-toolbar">
+      <button class="pill clearbtn" id="tcxClear">Clear filters</button>
+      <span class="rowcount" id="tcxCount"></span>
+      <span class="rowcount notecount" id="tcxNoteCount"></span>
+      <button class="pill pushright" id="tcxExport">Export notes</button>
+      <button class="pill" id="tcxImport">Import notes</button>
+      <input type="file" id="tcxFile" accept="application/json" hidden>
+    </div>
+    <div class="cmp-toolbar" id="tcxPager"></div>
+    <div class="table-wrap cmp-scroll pilot-scroll">
+      <table class="cmp-table pilot-table">
+        <thead id="tcxHead"></thead>
+        <tbody id="tcxBody"></tbody>
+      </table>
+    </div>
+    <div class="cmp-toolbar" id="tcxPager2"></div>
   </section>
 </div>
 
@@ -412,7 +471,11 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
   t.classList.add("active");
   showAug(t.dataset.split === "aug");
+  showAugX(t.dataset.split === "augx");
+  if (t.dataset.split === "augx"){ showTeacher(false); hideMainTable(true); return; }
   showTestRef(t.dataset.split === "testref");
+  showTeacherX(t.dataset.split === "teacherx");
+  if (t.dataset.split === "teacherx"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "testref"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "aug"){ showTeacher(false); hideMainTable(true); return; }
   if (t.dataset.split === "teacher"){ showTeacher(true); return; }
@@ -518,6 +581,27 @@ function showTeacher(on){
   document.head.appendChild(sc);
 }
 
+/* ============================================================= teacher reasoning - new windows (teacher_extra_data.js ~1 MB, loaded on first open; same view code, id prefix "tcx") */
+let teacherXView = null, teacherXLoading = false;
+function showTeacherX(on){
+  document.getElementById("viewTeacherX").hidden = !on;
+  if (!on || teacherXView || teacherXLoading) { if (on && teacherXView) teacherXView.show(); return; }
+  teacherXLoading = true;
+  document.getElementById("tcxCount").textContent = "loading the answers…";
+  const sc = document.createElement("script");
+  sc.src = "teacher_extra_data.js?t=" + Date.now();
+  sc.onload = () => {
+    teacherXView = createPilotView({
+      prefix: "tcx", pageSize: 50, data: window.TEACHER_EXTRA_DATA,
+      esc: s => String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+      notes: () => NOTES, saveNotes: () => saveNotes(), exportNotes: () => exportNotes(), importNotes: f => importNotes(f),
+    });
+    teacherXView.show();
+  };
+  sc.onerror = () => { teacherXLoading = false; document.getElementById("tcxCount").textContent = "teacher_extra_data.js not found: run website/build_teacher_data.py --folder outputs/teacher_extra_2026-10 ..."; };
+  document.head.appendChild(sc);
+}
+
 /* ============================================================= augmented reasoning dataset tab (aug_data.js ~7 MB, loaded on first open) */
 function hideMainTable(on){
   document.querySelector(".table-wrap").hidden = on;
@@ -539,6 +623,23 @@ function showAug(on){
     augView.show();
   };
   sc.onerror = () => { augLoading = false; document.getElementById("augCount").textContent = "aug_data.js not found: run website/build_aug_data.py"; };
+  document.head.appendChild(sc);
+}
+
+let augXView = null, augXLoading = false;
+function showAugX(on){
+  document.getElementById("viewAugX").hidden = !on;
+  if (!on || augXView || augXLoading) { if (on && augXView) augXView.show(); return; }
+  augXLoading = true;
+  document.getElementById("augxCount").textContent = "loading the texts…";
+  const sc = document.createElement("script");
+  sc.src = "aug_extra_data.js?t=" + Date.now();
+  sc.onload = () => {
+    augXView = createAugView({data: window.AUG_EXTRA_DATA, prefix: "augx", groups: ["tte0.75", "tte1.25"], writers: [["first round", "first round"], ["rewrite round", "rewrite round"]],
+      esc: s => String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")});
+    augXView.show();
+  };
+  sc.onerror = () => { augXLoading = false; document.getElementById("augxCount").textContent = "aug_extra_data.js not found: run website/build_aug_extra_data.py"; };
   document.head.appendChild(sc);
 }
 

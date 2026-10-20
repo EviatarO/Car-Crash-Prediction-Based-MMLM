@@ -63,7 +63,8 @@ def main():
                                              "problems": a.get("problems") or []},
                "second": None if not ps else {"v": ps["collision"], "risk": ps.get("risk_score"), "hv": ps.get("hazard_visible"), "first": ps.get("first_visible_frame"),
                                               "agent": ps.get("involved_agent"), "cues": ps.get("early_cues"), "expl": ps.get("explanation"), "pred": ps.get("prediction"),
-                                              "problems": s.get("problems") or []},
+                                              "problems": s.get("problems") or [], "fc": ps.get("fact_check"), "scan": ps.get("scan_all_road_users"),
+                                              "box_ok": ps.get("box_ok"), "asks": s.get("asks")},
                "final": None if not f else {"source": f["source"], "v": f["verdict"], "expl": f["explanation"], "pred": f["prediction"], "hv": f.get("hazard_visible"),
                                             "edited": bool(f.get("edited"))},
                "card": cards.get(fd), "models": models.get(fd)}

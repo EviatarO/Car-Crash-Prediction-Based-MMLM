@@ -91,3 +91,6 @@ website/r2_data.js
 website/p2f_data.js
 website/aug_data.js
 website/test_teacher_data.js
+
+website/aug_extra_data.js
+website/teacher_extra_data.js

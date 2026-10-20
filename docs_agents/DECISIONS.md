@@ -105,10 +105,26 @@ One line per rejected option so it is not re-proposed. Full reasoning for Juneâ€
 - **Rephrasing validated only with the word-list extractor** -> too noisy for motion / gap (e.g. "across the frames"): hard checks on length, outcome words, type / side sets and polarity from the verdict, rest flagged for an Opus reader.
 - **Many parallel Claude subagents for bulk text** -> hit the session limit; use <= 4 at a time or an API.
 
+### Formats, evaluation, extra windows, pods (user decisions 2026-10-15..20)
+- **Rephrasing writer** -> Gemini 3.8 Flash via OpenRouter (text-only) replaced Claude subagents (session limit); Sonnet 5.5 judge + Opus blind audit; gate <= 1 % major errors among judge-accepted.
+- **Reasoning before the verdict as the headline format** -> verdict-first (P2V) is the headline: reasoning-first makes the verdict a justification (S_after saturated, ranking worse).
+- **Chain A (the wider recipe grid) and multi-seed grids for every arm** -> not run: "we care only about P2V"; only chain B, 1 seed, early stop on P2V-v2 only.
+- **Judging the new data by train/val per-TTE AP** -> not comparable (crash TTE k vs all normals ~1:10 vs test 1:1); use per-TTE AUC; Kaggle mAP only on test.
+- **Choosing a P2V checkpoint / threshold on test** -> never; threshold from validation (free, open item). Train-sample threshold P = 0.56 is stricter and lowers recall (earlier opposite claim withdrawn).
+- **Training on, or selecting with, the test teacher texts** -> never; final evaluation only. Pass-2 test reasoning only after the user's review of the 20-window pilot.
+- **Windows with a contradicting teacher verdict** (user spotted 00200, 00232 and others, 10 in total) -> removed; `check`-status windows removed in `r1_extra_merge.py`.
+- **Network volume for pods** -> not used (63 GB $4.41/mo, pins the datacenter, double cost with the 80 GB container disk); safety against pod loss = background HF sync + restore. The user decides any volume deletion in the console.
+- **Pod scheduling tricks / Windows power settings** -> never modify power settings; keep-awake tool lasts ~5 min.
+- **Retraining P1aug per seed** (3.5 h, needs the deleted frame-shifted features) -> seeds vary only P1fixR + P2V; stated as a limit.
+- **Lower learning rates to delay over-fitting** -> tried in chain B, did not help.
+
 ## Unresolved (need the user)
-00. **Who finishes the rephrased texts** (~2,840 windows): Gemini 3.8 Flash via OpenRouter text-only (~$2-5, balance ~$7.5, style matches the teacher) vs more Claude agents (limit-bound)? Asked 2026-10-14, no answer yet.
-01. **Continuation after the enlarged Phase 1** (ranked list in the Phase-1 plan section 5): Phase 2 on the new base, direct fact signal (structured fields vs auxiliary loss), Run 2, short reasoning, attention / layer 11 on the new base.
-02. **Test-set teacher reasoning (private 677, E3)** on hold; needs a pod for boxes + a ~$10 OpenRouter top-up.
+000. **Rewordings: style vs diversity.** A lot of rewordings are rejected by the judge; the user suspects slang / colloquial style rather than added information. Should training text be one uniform format, or does diversity help? Needs the rejection-reason breakdown first, then possibly relaxed rules or the spare (4th+) versions, tested by a training run. Pending answer.
+001. **Seeds plan:** 4 new seeds (recommended) or 2; reuse the current pod or a new one. Asked 2026-10-20.
+002. **After chain B + seeds:** ensemble of P2V seeds as the final model, a regularised Phase 2 (best epoch is always the first), or the write-up; fusion with the crash model; threshold on validation.
+003. **Pass 2 of the test teacher reasoning** after the user's review of the 20-window pilot.
+01. **Continuation list** (Phase-1 plan section 5): direct fact signal (structured fields vs auxiliary loss), short reasoning, attention / layer 11 on the new base; ViT-L LoRA fine-tune of the encoder; motion/gap loss.
+02. (superseded by 003) test-set teacher reasoning on hold.
 03. **Attention-guided object crop** (a second small vision path) for road-user type: allowed only if the user accepts the extra path.
 00. **Student retrain on the new dataset:** mix DADA back in or Nexar only; targets and split by video as in PROJECT_STATE TODO 1. (Teacher prompt question resolved: E3 â†’ E6/E7 flow, box kept, Flex.)
 0. **Next experiment after the Phase-2 result** (user reads `outputs/r1_week1/pod_phase2_2026-10-06/review/phase2_validation_outputs.md` first): (a) Nexar-focused Phase 2 from the

@@ -28,6 +28,8 @@ function createTestRefView(deps){
     if (state.label !== "" && String(r.label) !== state.label) return false;
     if (state.flag === "blind_wrong" && !r.blind_wrong) return false;
     if (state.flag === "second" && !r.second) return false;
+    if (state.flag === "p2_fixed" && !(r.second && (r.second.v === "yes") === !!r.label)) return false;
+    if (state.flag === "p2_still" && !(r.second && (r.second.v === "yes") !== !!r.label)) return false;
     if (state.flag === "no_blind" && r.blind) return false;
     if (state.flag === "p2v_wrong" && !(r.models && r.models.P2V && (r.models.P2V.v === "yes") !== !!r.label)) return false;
     if (state.flag === "p2r_wrong" && !(r.models && r.models.P2R && (r.models.P2R.v === "yes") !== !!r.label)) return false;
@@ -83,7 +85,11 @@ function createTestRefView(deps){
     const p2 = (!ok && title.startsWith("Pass 1")) ? chip("pass 1 wrong → needs pass 2", "neg") : "";
     return `<div class="trans ${ok ? "" : "wrongcell"}"><b>${esc(title)}</b> ${chip(a.v, a.v === "yes" ? "pos" : "neg")} <span class="dim">risk ${a.risk === null || a.risk === undefined ? "–" : a.risk}</span> ${p2}
       ${a.hv ? chip("hazard visible: " + a.hv + (a.first ? " (from frame " + a.first + ")" : ""), a.hv === "no" ? "neg" : "pos") : ""}
+      ${a.box_ok === false ? chip("box on the wrong road user", "neg") : ""}
       ${a.agent ? `<div class="dim">involved: ${esc(a.agent)}</div>` : ""}<div class="ptext">${esc(a.expl || "")}</div><div class="ptext dim">→ ${esc(a.pred || "")}</div>
+      ${a.fc && typeof a.fc === "object" ? `<div class="dim">fact check vs pass 1: ${["road_user", "side", "motion", "gap"].map(k => { const f = a.fc[k] || {};
+          return f.changed ? `<b>${k}</b>: ${esc(f.draft || "")} → <b>${esc(f.final || "")}</b> (frames ${esc(f.frames || "?")})` : `${k} kept`; }).join(" · ")}</div>` : ""}
+      ${a.scan ? `<details class="dim"><summary>road users seen in frames 12-16</summary>${esc(typeof a.scan === "string" ? a.scan : JSON.stringify(a.scan))}</details>` : ""}
       ${(a.problems && a.problems.length) ? `<div class="dim bad">flags: ${esc(a.problems.join("; "))}</div>` : ""}</div>`;
   }
   function renderBody(){
@@ -133,7 +139,7 @@ function createTestRefView(deps){
     };
     sel("trGroup", [["", "all groups"], ["normal", "normal"], ["tte0.5", "TTE 0.5 s"], ["tte1", "TTE 1.0 s"], ["tte1.5", "TTE 1.5 s"]], "group");
     sel("trLabel", [["", "crash + normal"], ["1", "crash windows"], ["0", "normal windows"]], "label");
-    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"],
+    sel("trFlag", [["", "all windows"], ["blind_wrong", "pass 1 wrong (needs pass 2)"], ["second", "has a pass 2"], ["p2_fixed", "pass 2 agrees with the label"], ["p2_still", "pass 2 still disagrees (hazard not visible / label?)"],["no_blind", "no pass-1 answer yet"], ["p2v_wrong", "P2V verdict wrong"], ["p2r_wrong", "P2R verdict wrong"], ["cm_wrong", "crash model wrong"],
       ["t_wrong_v", "teacher wrong, P2V right"], ["t_wrong_r", "teacher wrong, P2R right"], ["t_wrong_both_right", "teacher wrong, BOTH models right"],
       ["t_wrong_either_right", "teacher wrong, at least one model right"], ["t_wrong_both_wrong", "teacher wrong, BOTH models wrong"],
       ["t_right_both_wrong", "teacher right, BOTH models wrong"], ["t_right_either_wrong", "teacher right, at least one model wrong"]], "flag");

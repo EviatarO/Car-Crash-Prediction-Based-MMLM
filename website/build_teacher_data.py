@@ -41,8 +41,22 @@ PATHS = [["E3", "E3 kept"], ["E6", "E6 anchored"], ["E6C", "E6 chain (E6C)"], ["
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-large-grids", action="store_true")
+    # plan 2026-10-19: the same tab for another teacher folder (the extra TTE windows); defaults = the original dataset, unchanged
+    ap.add_argument("--folder", default=None, help="teacher output folder (default outputs/teacher_dataset_2026-10)")
+    ap.add_argument("--horizons", default=None, help="only the windows with these horizons, e.g. 0.75,1.25")
+    ap.add_argument("--js", default="teacher_data.js")
+    ap.add_argument("--var", default="TEACHER_DATA")
+    ap.add_argument("--dataset-key", default="teacher_dataset_2026-10", help="key of the review notes in the browser (separate keys keep the notes apart)")
+    ap.add_argument("--no-dataset-files", action="store_true", help="do not write check_windows.txt / removed_windows.json / dataset_final.jsonl into the folder")
     args = ap.parse_args()
+    global FULL, REL
+    if args.folder:
+        FULL = Path(args.folder).resolve()
+        REL = "../" + FULL.relative_to(ROOT).as_posix()
     wins = [json.loads(l) for l in open(FULL / "windows.jsonl", encoding="utf-8")]
+    if args.horizons:
+        keep_h = {float(x) for x in args.horizons.split(",")}
+        wins = [w for w in wins if float(w["horizon"]) in keep_h]
     boxes = {json.loads(l)["frames_dir"]: json.loads(l) for l in open(FULL / "boxes.jsonl", encoding="utf-8")}
     sr = bp.set_runs(FULL)
     flow = sr["flow"]
@@ -123,14 +137,14 @@ def main():
                       "tp_ci": study.wilson(tp, len(pos)), "tn_ci": study.wilson(tn, len(neg)), "risk_auc": round(auc, 3) if auc is not None else None, "run": s}
     n_all = len(rows)
     chk = [r for r in rows if str(r["status"]).startswith("check")]
-    with open(FULL / "check_windows.txt", "w", encoding="utf-8") as fc:      # the windows to review by eye
+    with open(FULL / "check_windows.txt" if not args.no_dataset_files else __import__("os").devnull, "w", encoding="utf-8") as fc:      # the windows to review by eye
         fc.write("window | target label_vis | final yes/no | risk | routing | explanation" + chr(10))
         for r in chk:
             x = r["runs"]["FINAL"]
             x = r["runs"]["E3"] if x and x.get("ref") else x
             fc.write(f"{r['key']} | {r['label_vis']} | {x['verdict']} | {x['risk']} | {r['path']} | {x['explanation']}" + chr(10))
-    (FULL / "removed_windows.json").write_text(json.dumps({"reason": "outliers: crash windows whose hazard is not visible even with hindsight; removed from the dataset", "windows": removed}, indent=1), encoding="utf-8")
-    with open(FULL / "dataset_final.jsonl", "w", encoding="utf-8") as fo:      # the dataset: window, labels, final explanation + prediction
+    (Path(__import__("os").devnull) if args.no_dataset_files else FULL / "removed_windows.json").write_text(json.dumps({"reason": "outliers: crash windows whose hazard is not visible even with hindsight; removed from the dataset", "windows": removed}, indent=1), encoding="utf-8")
+    with open(FULL / "dataset_final.jsonl" if not args.no_dataset_files else __import__("os").devnull, "w", encoding="utf-8") as fo:      # the dataset: window, labels, final explanation + prediction
         for r in rows:
             x = r["runs"]["FINAL"]
             x = r["runs"]["E3"] if x and x.get("ref") else x
@@ -147,14 +161,19 @@ def main():
             f"E3 answers with a soft flag (colour / time / length word): {flagged_soft}. The routing is the flowchart of the Experiments page → Teacher prompt study. "
             f"The GT column shows the Nexar label and the visible-hazard label the student is trained on (pre-alert windows read 1 → 0). "
             f"FINAL answers on windows E3 got wrong are label-informed by design: read them for whether the text matches the frames, not as accuracy.")
-    data = {"set": "full", "dataset_key": "teacher_dataset_2026-10", "runs": RUNS, "rows": rows, "summary": summary, "default_on": ["E3", "E6", "E7", "FINAL"],
-            "hv_key": "teacher_dataset_hitter_visible_2026-10", "hide_cols": ["set"], "fails_default": False, "path_opts": PATHS, "status_opts": [["check", "check (verdict differs from the target)"]], "paired_note": "",
+    if args.horizons:
+        note = (f"<b>{n_all:,} new crash windows</b> at TTE {args.horizons.replace(',', ' / ')} s from {len({r['video_id'] for r in rows}):,} Nexar training videos (plan 2026-10-19), "
+                f"same visibility rule, red boxes, teacher (Gemini 3.8 Flash, boxed frames) and routing as the original dataset. Final answers by path: E3 kept {cnt('E3'):,} · "
+                f"E6 anchored on a correct window of the same video {cnt('E6'):,} · E6 chain {cnt('E6C')} (after the hindsight start); {len(removed)} windows flagged 'hazard not visible' were removed. "
+                f"FINAL answers on windows E3 got wrong are label-informed by design: read them for whether the text matches the frames.")
+    data = {"set": "full", "dataset_key": args.dataset_key, "runs": RUNS, "rows": rows, "summary": summary, "default_on": ["E3", "E6", "E7", "FINAL"],
+            "hv_key": "teacher_dataset_hitter_visible_2026-10" if args.dataset_key == "teacher_dataset_2026-10" else args.dataset_key + "_hitter_visible", "hide_cols": ["set"], "fails_default": False, "path_opts": PATHS, "status_opts": [["check", "check (verdict differs from the target)"]], "paired_note": "",
             "note_html": note, "routing_fig": "../reports/figures/teacher_prompt_routing_2026-10-10.png"}
     keys = [r["key"] for r in rows]
     assert len(keys) == len(set(keys)) == n_all
-    (HERE / "teacher_data.js").write_text("window.TEACHER_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n", encoding="utf-8")
-    size = (HERE / "teacher_data.js").stat().st_size / 1e6
-    print(f"teacher_data.js: {n_all} rows, {size:.1f} MB, paths {dict(paths)}, grids {sum(bool(r['grid']) for r in rows)}, large {sum(bool(r['grid_large']) for r in rows)}")
+    (HERE / args.js).write_text(f"window.{args.var} = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n", encoding="utf-8")
+    size = (HERE / args.js).stat().st_size / 1e6
+    print(f"{args.js}: {n_all} rows, {size:.1f} MB, paths {dict(paths)}, grids {sum(bool(r['grid']) for r in rows)}, large {sum(bool(r['grid_large']) for r in rows)}")
 
 
 def path_of(flow, x):

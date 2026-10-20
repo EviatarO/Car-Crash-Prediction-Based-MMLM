@@ -8,6 +8,9 @@
    the tbody is rebuilt on every sort/filter, and typing a note deliberately does not re-render.
 
    createPilotView({data, esc, notes, saveNotes, exportNotes, importNotes}) -> {show()} */
+// TTE with one decimal (0.5, 1.0, 1.5) or two where needed (0.75, 1.25: the extra windows of plan 2026-10-19)
+function fmtTte(v){ return Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? v.toFixed(1) : v.toFixed(2); }
+
 function createPilotView(deps){
   const D = deps.data, esc = deps.esc, KEY = D.dataset_key;
   const ALL_RUNS = Object.keys(D.runs);
@@ -52,9 +55,9 @@ function createPilotView(deps){
     const cols = [
       {key: "grid", label: "Frames 4×4 (red box)", type: "none"},
       {key: "video_id", label: "Video ID", type: "num", get: r => parseInt(r.video_id, 10), cell: r => esc(r.video_id)},
-      {key: "tte", label: "TTE", type: "select", get: r => r.tte.toFixed(1),
+      {key: "tte", label: "TTE", type: "select", get: r => fmtTte(r.tte),
        opts: [["", "All"], ["0.5", "0.5 s"], ["1.0", "1.0 s"], ["1.5", "1.5 s"]],
-       cell: r => r.label === 1 ? `${r.tte.toFixed(1)} s` : `<span class="dim" title="normal clip: window ends ${r.tte.toFixed(1)} s before a fake event at the video midpoint">mid ${r.tte.toFixed(1)} s</span>`},
+       cell: r => r.label === 1 ? `${fmtTte(r.tte)} s` : `<span class="dim" title="normal clip: window ends ${fmtTte(r.tte)} s before a fake event at the video midpoint">mid ${fmtTte(r.tte)} s</span>`},
       {key: "set", label: "Set", type: "select",
        title: "pilot = the 51-window prompt study; rescue = E6 rescue test on crash windows the visibility rule removes (window ends before time_of_alert + 0.27 s)",
        get: r => r.set === "rescue" ? (r.valid ? "rescue_kept" : "rescue_removed") : "pilot",
@@ -277,7 +280,7 @@ function createPilotView(deps){
     if (!r || !(r.grid_large || r.grid)) return;
     $("gImg").src = r.grid_large || r.grid;
     $("gTitle").textContent = `#${r.video_id} · ${r.key}`;
-    $("gMeta").textContent = `GT ${r.pre_alert ? "1 → " + r.label_vis + " (pre-alert)" : r.label === 1 ? "1 (crash)" : "0 (normal)"} · ${r.label === 1 ? "TTE" : "mid"} ${r.tte.toFixed(1)} s · ` +
+    $("gMeta").textContent = `GT ${r.pre_alert ? "1 → " + r.label_vis + " (pre-alert)" : r.label === 1 ? "1 (crash)" : "0 (normal)"} · ${r.label === 1 ? "TTE" : "mid"} ${fmtTte(r.tte)} s · ` +
       RUNS.map(run => `${run} ${(r.runs[run] && r.runs[run].verdict) || "–"}`).join(" · ");
     $("gridOverlay").classList.add("open");
   }

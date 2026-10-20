@@ -153,7 +153,35 @@ Extras pass reproduced the crash-model P exactly (max diff 0.0000 on 4,169 windo
 Probe on the encoder tokens (`probe/fact_probe.json`, balanced acc.; chance): type .26 / .15 / .28 (.13), side .72 / .60 / .73 (.33), motion .36 / .29 / .35 (.17), gap .58 / .44 / .59 (.33) for last layer / layer 11 / attention-weighted.
 Teacher type self-agreement across the 3 windows of one tracked object: 0.88 (measurement ceiling for the type fact).
 
-### 2n. Phase 1 enlargement (IN PROGRESS 2026-10-14) - see PROJECT_STATE "Phase 1 enlargement"; nothing trained yet. Local tests only: `r1_reasoning_test.py` (10 tests) and tiny-LM dry runs of Phase 1 with `--aug-texts --aug-shifts` and the control.
+### 2n. Phase 1 enlargement (2026-10-14..15; `outputs/r1_phase1aug_2026-10-14/`, HF `checkpoints/phase1aug_2026-10-14/`)
+4x texts (3 rephrasings per window; Gemini 3.8 Flash writer + checks) and shifted windows; trained P1aug (checkpoint `P1aug/best.pt`, the fixed starting point of every later P2V). Superseded in detail by §2o; the 12,286 shifted-window copies' features were deleted (50 GB) and are not available.
+
+### 2o. Phase 2 in three answer formats (2026-10-15..16; plans `2026-10-15_Plan-Phase2-Three-Formats.md`, `2026-10-16_Plan-Night-Run-Phase2-Three-Formats.md`; `outputs/r1_phase2f_2026-10-15/`)
+Formats: reason_first (P2R), **verdict_first (P2V)**, facts_first. Recipe (P2V): from P1aug -> P1fixR (projector, `--init random --init-from P1aug/best.pt`, 4 ep, lr-merger 3e-4, patience 1) -> P2V (6 ep, patience 1, lr-merger 2e-5, lr-LoRA 2e-4, `--select val_loss`, `--drop-prealert --balance-tte --p-teacher 0.4 --val-texts none`, eff-bs 16, micro-bs 4, grad-ckpt); data = original 4,169-window manifest. Writing the reasoning before the verdict hurts ranking (S_after saturated); verdict-first gives the best decision score. Epoch 1 is always the best P2V epoch.
+
+### 2p. P2V vs the crash model and BADAS on the test sets (2026-10-17..18; `outputs/r1_test_eval_2026-10-17/`, `r1_test_eval_public_2026-10-18/`, report `outputs/r1_p2v_report_2026-10-18/{report.md,metrics.json,figures,summary.md,RUNBOOK.md}`)
+P2V = seed 0 of the 2026-10-15 run, decision score at "Collision:". Pooled test (private 677 + public 667 = 1,344), crash model = A1-compress256:
+| | AP | AUC | Kaggle mAP |
+|---|---|---|---|
+| P2V (seed 0) | 0.926 | 0.928 | 0.928 |
+| crash model | 0.911 | 0.913 | 0.916 |
+| delta AP (paired bootstrap) | +0.015 [+0.005, +0.025] | | |
+Per-TTE AP (pooled test) 0.5 / 1.0 / 1.5 s: P2V 0.948 / 0.936 / 0.900; BADAS-2.0 (paper) 0.943 / 0.957 / 0.921. Kaggle mAP = mean of per-TTE APs (test pairs crash TTE k with normals of the same horizon 1:1). On validation P2V does NOT beat the crash model (AUC 0.953 vs 0.957); train AUC 0.989 (over-fit). Threshold-dependent tables in the report are at P = 0.5 and at the train-sample threshold (P = 0.56 is stricter and lowers recall: an earlier claim that it would raise recall was wrong). Crash-model seed noise was about +-0.016 AP, so one P2V seed cannot be separated from luck -> seeds plan. `r1_test_refs_join.py`: 431 private windows with an agreed teacher reference; `r1_overlap_check.py`: no near-duplicates train/test. Text metrics (`r1_text_eval.py`) in the report.
+
+### 2q. Extra TTE windows 0.75 / 1.25 s (2026-10-19; `outputs/teacher_extra_2026-10/`, plans `2026-10-19_Plan-Extra-TTE-Windows-Retrain{,-rev2}.md`)
+874 windows cut (`r1_extra_windows.py`), teacher flow E3 -> E6 / E7 / E6C (siblings anchored), outcome sentences; flagged / check windows and 10 windows whose final verdict contradicted the label removed; 860 final (743 train: 460 at 0.75 s + 283 at 1.25 s; 117 val: 74 + 43). Rewordings: Gemini 3/window + one rewrite round -> automatic check -> Sonnet 5.5 judge -> Opus blind audit of 300 (250 accepted + 50 rejected). Gate: <= 1 % major errors among judge-accepted (met); minor-nuance 18.8 % (vs 7.2 % on the original data; wording of severity differs, not like-for-like); 13 versions with a contact word ("bumpers meet") removed (rule 8). Version counts: see PROJECT_STATE. Gemini cost within the $40 OpenRouter balance (Flex, parallel).
+
+### 2r. Chain B = new data + gentler recipe, 1 seed (2026-10-19..20; plan rev 2; driver `r1_pod_chains.sh`; pod RTX PRO 4500 80 GB; HF `checkpoints/chains_2026-10-19/`)
+Chain B only (chain A deliberately not run). Stages: P1aug-v2 12 fixed epochs (lr-merger 5e-4; training windows 4,300, 14,261 text versions) -> P1fixR-v2 4 fixed epochs (lr-merger 1.5e-4) -> P2V-v2 <= 6 epochs, patience 3 (merger 1e-5, LoRA 1e-4; 3,778 windows, 12,448 versions); top-3 epochs by val AUC (`r1_chain_select.py`); scoring evals val full / private / public; text evals + BERTScore for the best epoch. Total 7.7 h.
+- Loss minima: P1aug-v2 val loss min at epoch 6 (1.103) then over-fits; P1fixR-v2 best epoch 1; P2V-v2 early-stopped after epoch 4. Lower learning rates did NOT delay over-fitting.
+- Epoch 1 (the only epoch analysed so far): pooled-test AP 0.9204 / Kaggle mAP 0.9177; val core (524) AUC 0.942, val full (641, with new 0.75 / 1.25 s groups) AUC 0.938 -> below today's P2V; decision rule "chain B replaces P2V only with +0.016 AP and >= on val and both test halves" NOT met. Epochs 2-3 + text evals: on HF, analysis pending.
+- Files on HF: `B/{P1aug,P1fixR,P2V}/{best.pt,train_log.jsonl}`, `B/top3.txt`, `eval/{B_ep01..03,P2V_old}/{val,private,public}/{metrics.json,predictions.jsonl,summary.md}`, `eval/B_best/{train600,val_text}/...`.
+
+### 2s. Test-set teacher reasoning (2026-10-17..)
+Private 677: pass 1 = E3 blind teacher (plan `2026-10-17_Plan-Test-Private-Addendum-Pass1-Only.md`); pass 2 anchored (`PROMPT_TEACHER_TEST_P2.py`) piloted on 20 windows, awaiting the user's review. Texts are for final evaluation only.
+
+### 2t. Seeds of today's P2V (PLANNED, `2026-10-20_Plan-Seeds-Of-Todays-P2V.md`)
+Seeds 1-4 of the P1fixR + P2V recipe from the same P1aug checkpoint; decision rules fixed in advance: R1 gain real only if mean pooled AP gain >= +0.010 AND >= 4/5 seeds above the crash model; R2 rank/z-score of seed 0; R3 ensemble of log-odds helps if >= +0.008 AP over the best single seed and the mean; chain B shown beside the spread. ~1 h/seed, 4 seeds as two parallel streams ~3 h (~$2-2.7). Not started.
 
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.
