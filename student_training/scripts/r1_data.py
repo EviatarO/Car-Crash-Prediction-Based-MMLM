@@ -22,11 +22,18 @@ MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.json
             "dada": ROOT / "dataset" / "manifests" / "r1_mmau_dada_windows.jsonl",
             "nexar_reasoning": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl",
             "nexar_reasoning_shifted": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_shifted.jsonl",
-            "nexar_reasoning_test": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test.jsonl"}
+            "nexar_reasoning_test": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test.jsonl",
+            "nexar_reasoning_test_public": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test_public.jsonl"}
+# plan 2026-10-19: the extra TTE windows. R1_REASONING_MANIFEST swaps the manifest of the source "nexar_reasoning" (the union manifest r1_nexar_reasoning_v2.jsonl for the
+# new chains, the extra-only one when only the new windows are encoded); unset = the original manifest, so every old command behaves as before.
+if __import__("os").environ.get("R1_REASONING_MANIFEST"):
+    MANIFEST["nexar_reasoning"] = Path(__import__("os").environ["R1_REASONING_MANIFEST"])
 
 
 class Cache:
     """Cached tokens for one source: features_<source>.npy (N,2048,1024) fp16 memmap + index_<source>.jsonl.
+    cache_dir may be several directories separated by commas (plan 2026-10-19: the original cache + the cache of the extra windows); an id is looked up in the
+    first directory that has it.
     inp (plan 2026-10-13) selects what get() returns, concatenated on the channel axis:
       last          (B,2048,1024)  last-layer tokens (the original input)
       last+attn     (B,2048,1025)  + the crash head's attention per token (attn_<source>.npy), scaled to mean 1 per window, log1p
@@ -34,32 +41,34 @@ class Cache:
       l11+last+attn (B,2048,2049)"""
 
     def __init__(self, cache_dir, source, inp="last"):
-        d = Path(cache_dir)
         self.source, self.inp = source, inp
         self.rows = {}
-        self.mm = self.mm_l11 = self.mm_attn = None
-        ix = d / f"index_{source}.jsonl"
-        if ix.exists():
+        self.maps = []                                   # one (mm, mm_l11, mm_attn) per directory
+        for d in (Path(x) for x in str(cache_dir).split(",") if x.strip()):
+            ix = d / f"index_{source}.jsonl"
+            if not ix.exists():
+                continue
+            k = len(self.maps)
             for l in open(ix, encoding="utf-8"):
                 r = json.loads(l)
-                self.rows[r["id"]] = r
-            self.mm = np.load(d / f"features_{source}.npy", mmap_mode="r")
-            if inp.startswith("l11"):
-                self.mm_l11 = np.load(d / f"features_{source}_l11.npy", mmap_mode="r")
-            if inp.endswith("attn"):
-                self.mm_attn = np.load(d / f"attn_{source}.npy", mmap_mode="r")
+                if r["id"] not in self.rows:
+                    self.rows[r["id"]] = dict(r, part=k)
+            self.maps.append((np.load(d / f"features_{source}.npy", mmap_mode="r"),
+                              np.load(d / f"features_{source}_l11.npy", mmap_mode="r") if inp.startswith("l11") else None,
+                              np.load(d / f"attn_{source}.npy", mmap_mode="r") if inp.endswith("attn") else None))
+        self.mm = self.maps[0][0] if self.maps else None
 
     def __contains__(self, wid):
         return wid in self.rows
 
     def get(self, ids):
-        srcs = [self.rows[i]["row"] for i in ids]
+        rows = [self.rows[i] for i in ids]
         parts = []
-        if self.mm_l11 is not None:
-            parts.append(torch.from_numpy(np.stack([np.asarray(self.mm_l11[r]) for r in srcs])).float())
-        parts.append(torch.from_numpy(np.stack([np.asarray(self.mm[r]) for r in srcs])).float())
-        if self.mm_attn is not None:
-            a = torch.from_numpy(np.stack([np.asarray(self.mm_attn[r]) for r in srcs])).float()      # (B, 2048) attention received per token
+        if self.maps and self.maps[0][1] is not None:
+            parts.append(torch.from_numpy(np.stack([np.asarray(self.maps[r["part"]][1][r["row"]]) for r in rows])).float())
+        parts.append(torch.from_numpy(np.stack([np.asarray(self.maps[r["part"]][0][r["row"]]) for r in rows])).float())
+        if self.maps and self.maps[0][2] is not None:
+            a = torch.from_numpy(np.stack([np.asarray(self.maps[r["part"]][2][r["row"]]) for r in rows])).float()      # (B, 2048) attention received per token
             a = torch.log1p(a / a.mean(1, keepdim=True).clamp_min(1e-12))
             parts.append(a.unsqueeze(-1))
         return parts[0] if len(parts) == 1 else torch.cat(parts, -1)
@@ -74,7 +83,7 @@ def load_cards(path):
 
 
 def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocrash_only=False, order="reason_first", box_hint=False,
-               facts=None, drop_prealert=False):
+               facts=None, drop_prealert=False, drop_extra_train=False):
     """phase 1: DADA valid crash windows, Q_PHASE1 -> phase1 target. phase 2: valid crash + no-crash, Q_PHASE2.
     min_p / max_p: keep only windows whose cached A1 crash score is >= min_p / < max_p (option b, 2026-10-06:
     Phase 1 trains on DADA crash windows the frozen encoder itself flags; the rest is a separate evaluation set).
@@ -84,6 +93,8 @@ def load_items(source, phase, split, cache: Cache, min_p=None, max_p=None, nocra
     for l in open(MANIFEST[source], encoding="utf-8"):
         r = json.loads(l)
         if not r["valid"] or r["split"] != split or r["id"] not in cache:
+            continue
+        if drop_extra_train and r.get("extra") and r["split"] == "train":        # chain A of plan 2026-10-19: the extra TTE windows are validated on, never trained on
             continue
         if source.startswith("nexar_reasoning"):      # reasoning dataset (and its frame-shifted copies): the class is the VISIBLE-HAZARD label
             g = r["gt"]

@@ -104,7 +104,12 @@ def main():
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--process-horizons", default=None,
+                    help="plan 2026-10-19: comma-separated horizons (e.g. 0.75,1.25) whose windows are routed; the other windows of the list are FIXED: they can be anchors "
+                         "and the chain start, but are never re-routed, re-run or written to flow_final.jsonl (their existing answers stay as they are)")
     args = ap.parse_args()
+    process = None if not args.process_horizons else {float(x) for x in args.process_horizons.split(",")}
+    todo_ok = lambda w: process is None or float(w["horizon"]) in process          # noqa: E731
     wins = [w for w in map(json.loads, open(OUT / "windows.jsonl", encoding="utf-8")) if args.set == "ALL" or w["set"] == args.set]
     boxes = {json.loads(l)["frames_dir"]: json.loads(l) for l in open(OUT / "boxes.jsonl", encoding="utf-8")}
     e3 = load_run_file(args.stage1)
@@ -123,6 +128,8 @@ def main():
         valid_ok = [s for s in vw if not pre_alert(s) and right(e3[s["frames_dir"]], tgt[s["frames_dir"]])]
         for w in vw:
             fd = w["frames_dir"]
+            if not todo_ok(w):                                                # a fixed window: anchor / chain start only
+                continue
             if right(e3[fd], tgt[fd]):
                 keep.append(w)
             elif pre_alert(w):                                            # E3 said "yes" on a pre-alert window
@@ -156,7 +163,7 @@ def main():
         """E6 chain of one video: its windows run one after the other (each anchors on the previous answer); videos run in parallel."""
         s = start[v]
         prev, pw = e7.get(s["frames_dir"]), s
-        todo_w = sorted([x for x in byv[v] if x["frames_dir"] != s["frames_dir"] and not pre_alert(x)
+        todo_w = sorted([x for x in byv[v] if x["frames_dir"] != s["frames_dir"] and not pre_alert(x) and todo_ok(x)
                          and not right(e3[x["frames_dir"]], tgt[x["frames_dir"]])], key=lambda x: x["horizon"])
         for w in todo_w:
             reason = None
@@ -185,6 +192,8 @@ def main():
     rows = []
     for w in wins:
         fd = w["frames_dir"]
+        if not todo_ok(w):
+            continue
         base = {"frames_dir": fd, "video_id": w["video_id"], "horizon": w["horizon"], "label": w["label"], "pre_alert": pre_alert(w),
                 "label_vis": tgt[fd], "label_vis_source": "default", "status": "ok", "anchor": None}
         if right(e3[fd], tgt[fd]):

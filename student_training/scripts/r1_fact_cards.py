@@ -31,6 +31,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 D = ROOT / "outputs" / "teacher_dataset_2026-10"
 MAN = ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"
+if __import__("os").environ.get("R1_REASONING_MANIFEST"):          # plan 2026-10-19: the manifest of the extra windows
+    MAN = Path(__import__("os").environ["R1_REASONING_MANIFEST"])
 SLOTS = {
     "road_user": ["car", "suv", "pickup", "van", "truck", "bus", "motorcycle", "cyclist", "pedestrian", "object", "not_stated"],
     "side": ["ahead", "left", "right", "behind", "not_stated"],

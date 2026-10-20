@@ -125,6 +125,10 @@ def main():
     ap.add_argument("--facts-cards", default=None, help="fact_cards_teacher.jsonl (r1_fact_cards.py): needed for --order facts_first")
     ap.add_argument("--drop-prealert", action="store_true", help="leave the pre-alert windows out of training and validation (plan 2026-10-15)")
     ap.add_argument("--balance-tte", action="store_true", help="positives drawn in equal shares per TTE group each epoch (plan 2026-10-15)")
+    ap.add_argument("--no-extra-train", action="store_true",
+                    help="plan 2026-10-19, chain A: with the union manifest (R1_REASONING_MANIFEST), leave the extra TTE windows (row field extra) out of TRAINING; they stay in validation")
+    ap.add_argument("--fixed-epochs", action="store_true",
+                    help="plan 2026-10-19: no early stopping; run all --epochs (every epoch is saved as epoch_XX.pt, best.pt = the epoch with the lowest validation loss)")
     ap.add_argument("--input", default="last", choices=["last", "last+attn", "l11+last", "l11+last+attn"],
                     help="merger input (plan 2026-10-13): last-layer tokens (original), + crash-head attention channel, + layer-11 tokens")
     ap.add_argument("--aug-texts", default=None, help="paraphrases.jsonl: rephrased text versions of the training windows (plan 2026-10-14)")
@@ -166,7 +170,8 @@ def main():
     if args.order == "facts_first" and cards is None:
         raise SystemExit("--order facts_first needs --facts-cards")
     if reasoning:
-        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
+        train = load_items("nexar_reasoning", 2, "train", caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert,
+                           drop_extra_train=args.no_extra_train)
         val = {"nexar_reasoning": load_items("nexar_reasoning", 2, args.val_split, caches["nexar_reasoning"], order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)}
         v_texts = None if args.val_texts == "none" else (args.val_texts or args.aug_texts)   # "none": validate on the teacher's texts only
         v_shifts = args.val_shifts or args.aug_shifts
@@ -275,10 +280,10 @@ def main():
             print(f"  new best ({monitor} {'wrong-video gap' if args.select == 'gap' else '-val loss'} {score:+.4f}) -> best.pt")
         else:
             bad += 1
-            if bad >= args.patience:
+            if bad >= args.patience and not args.fixed_epochs:
                 print(f"[early stop] no improvement of the {monitor} wrong-video gap for {args.patience} epochs")
                 break
-        if args.stop_on_val_rise and rises >= args.stop_on_val_rise:
+        if args.stop_on_val_rise and rises >= args.stop_on_val_rise and not args.fixed_epochs:
             print(f"[early stop] {monitor} validation loss rose {rises} epochs in a row (best.pt = best wrong-video gap so far)")
             break
         if args.max_steps and step >= args.max_steps:

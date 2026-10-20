@@ -154,7 +154,7 @@ def main():
     print("6 ok: merger shapes for", list(INPUTS), "; original parameters unchanged; attention channel acts; extended mergers start identical to the original")
 
     # 7 ---- Cache returns the right channel layout for each input
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         td = Path(td)
         n = 3
         rng = np.random.default_rng(0)
@@ -278,9 +278,86 @@ def main():
     assert all(i["split"] == "test" and not i["pre_alert"] and i["label"] == i["label_nexar"] for i in tt)
     assert Counter(i["group"] for i in tt) == {"normal": 339, "tte0.5": 142, "tte1.0": 117, "tte1.5": 79}, Counter(i["group"] for i in tt)
     assert sum(i["label"] for i in tt) == 338
-    assert not {i["video_key"] for i in tt} & {i["video_key"] for i in tr + va}, "test videos overlap train / val"
+    # the old check compared test keys ("test_00001") with train keys ("00000"): different namespaces, it could never fail. What can fail:
+    assert all(i["video_key"].startswith("test_") for i in tt), "test windows must come from the test namespace"
+    train_csv = ROOT.parents[1] / "Data-Centric-Crash-Prediction-Using-3LC-and-MViT" / "src" / "Nexar_DataSet" / "train.csv"
+    if train_csv.exists():                                                              # (absent on a pod)
+        nexar_train = {f"{int(l.split(',')[0]):05d}" for l in open(train_csv, encoding="utf-8").read().splitlines()[1:] if l.strip()}
+        assert {i["video_key"] for i in tr + va} <= nexar_train, "a training / validation video is not a Nexar training video"
+    # whether a test CLIP duplicates a training clip is a content question: r1_overlap_check.py (thumbnail correlation of the last frames)
     assert all(i["answer"].startswith("Reasoning:") and parse_reasoning(i["answer"])["collision"] == i["label"] for i in tt)
-    print("14 ok: 677 private test windows (338 crash / 339 normal), groups " + str(dict(Counter(i["group"] for i in tt))) + "; no video shared with train / val")
+    print("14 ok: 677 private test windows (338 crash / 339 normal), groups " + str(dict(Counter(i["group"] for i in tt))) + "; test namespace, train / val videos are Nexar training ids")
+    # 15 ---- public test windows (2026-10-18): same format, disjoint from private and from train / val
+    tp = load_items("nexar_reasoning_test_public", 2, "test", c)
+    assert len(tp) == 667 and len({i["video_key"] for i in tp}) == 667
+    assert all(i["split"] == "test" and not i["pre_alert"] and i["label"] == i["label_nexar"] for i in tp)
+    assert Counter(i["group"] for i in tp) == {"normal": 333, "tte0.5": 142, "tte1.0": 115, "tte1.5": 77}, Counter(i["group"] for i in tp)
+    assert all(i["video_key"].startswith("test_") for i in tp)
+    assert not {i["video_key"] for i in tp} & {i["video_key"] for i in tt}, "a video is in both the private and the public test"
+    assert not {i["id"] for i in tp} & {i["id"] for i in tt}
+    print("15 ok: 667 public test windows (334 crash / 333 normal), groups " + str(dict(Counter(i["group"] for i in tp))) + "; disjoint from the private test; train / val videos are Nexar training ids")
+    # 16 ---- stratified sample for the train-split report (plan 2026-10-18)
+    from r1_eval_reasoning import stratified_sample
+    trd2 = load_items("nexar_reasoning", 2, "train", c, drop_prealert=True)
+    s1, s2, s3 = stratified_sample(trd2, 600, 0), stratified_sample(trd2, 600, 0), stratified_sample(trd2, 600, 1)
+    assert len(s1) == 600 and len({i["id"] for i in s1}) == 600 and [i["id"] for i in s1] == [i["id"] for i in s2] and {i["id"] for i in s1} != {i["id"] for i in s3}
+    full, part = Counter((i["label"], i["group"]) for i in trd2), Counter((i["label"], i["group"]) for i in s1)
+    assert all(abs(part[k] - 600 * full[k] / len(trd2)) <= 1.0 for k in full), (full, part)
+    assert len(stratified_sample(trd2[:10], 50, 0)) == 10
+    print(f"16 ok: stratified sample of 600 from {len(trd2)} train windows, per-stratum counts {dict(part)}, deterministic per seed")
+    # 17 ---- plan 2026-10-19: a cache over two directories, and the extra TTE windows left out of TRAINING only (chain A)
+    import tempfile
+    import numpy as np
+    import r1_data
+    from r1_data import Cache
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        for k, ids in enumerate((["x1", "x2"], ["y1"])):
+            d = Path(td) / f"c{k}"
+            d.mkdir()
+            mm = np.lib.format.open_memmap(d / "features_nexar_reasoning.npy", mode="w+", dtype=np.float16, shape=(len(ids), 2048, 1024))
+            for i in range(len(ids)):
+                mm[i] = (k + 1) * 10 + i                           # one constant per window: 10, 11 (first dir), 20 (second dir)
+            mm.flush()
+            del mm
+            (d / "index_nexar_reasoning.jsonl").write_text("".join(json.dumps({"id": w, "row": i, "p_collision": 0.5}) + "\n" for i, w in enumerate(ids)), encoding="utf-8")
+        cc = Cache(f"{td}/c0,{td}/c1", "nexar_reasoning")
+        assert set(cc.rows) == {"x1", "x2", "y1"} and "y1" in cc and "zz" not in cc
+        got = cc.get(["y1", "x2", "x1"])
+        assert tuple(got.shape) == (3, 2048, 1024) and [float(got[i, 0, 0]) for i in range(3)] == [20.0, 11.0, 10.0], "rows of the second directory are read from the second file"
+        man = Path(td) / "toy_manifest.jsonl"
+        mk = lambda i, sp, extra: {"id": i, "source": "nexar_reasoning", "split": sp, "video_key": i, "frames_dir": i, "label": 1, "tte": 0.75 if extra else 0.5, "valid": True, **({"extra": True} if extra else {}),  # noqa: E731
+                                   "gt": {"explanation": "a car ahead", "prediction": "A collision follows", "risk": 90, "label_vis": 1, "pre_alert": False, "box_hint": ""}}
+        man.write_text("".join(json.dumps(r) + "\n" for r in (mk("t_old", "train", False), mk("t_extra", "train", True), mk("v_old", "val", False), mk("v_extra", "val", True))), encoding="utf-8")
+        old = r1_data.MANIFEST["nexar_reasoning"]
+        r1_data.MANIFEST["nexar_reasoning"] = man
+        try:
+            allin = AllIn()
+            ids = lambda **kw: sorted(i["id"] for i in load_items("nexar_reasoning", 2, kw.pop("split"), allin, **kw))      # noqa: E731
+            assert ids(split="train") == ["t_extra", "t_old"] and ids(split="train", drop_extra_train=True) == ["t_old"]
+            assert ids(split="val", drop_extra_train=True) == ["v_extra", "v_old"], "validation keeps the extra windows"
+            assert {i["group"] for i in load_items("nexar_reasoning", 2, "train", allin)} == {"tte0.5", "tte0.75"}
+        finally:
+            r1_data.MANIFEST["nexar_reasoning"] = old
+        cc.maps.clear()                                              # release the memory maps (Windows cannot delete files that are still mapped)
+        cc.mm = None
+        del cc, got
+        import gc
+        gc.collect()
+    print("17 ok: two-directory cache reads each row from its own file; drop_extra_train removes the extra windows from train only; new groups tte0.75 / tte1.25 follow from the horizon")
+    # 18 ---- the manifests of the extra windows (plan 2026-10-19); skipped where the files are absent (a pod without them)
+    mx = ROOT / "dataset" / "manifests"
+    if (mx / "r1_nexar_reasoning_extra.jsonl").exists() and (mx / "r1_nexar_reasoning_v2.jsonl").exists():
+        ex, v2 = ([json.loads(l) for l in open(mx / n, encoding="utf-8")] for n in ("r1_nexar_reasoning_extra.jsonl", "r1_nexar_reasoning_v2.jsonl"))
+        old_m = [json.loads(l) for l in open(mx / "r1_nexar_reasoning_windows.jsonl", encoding="utf-8")]
+        assert len(old_m) == 4169 and not any(r.get("extra") for r in old_m)
+        assert len(v2) == len(old_m) + len(ex) and [r["id"] for r in v2[:len(old_m)]] == [r["id"] for r in old_m], "the union starts with the unchanged original rows"
+        assert len({r["id"] for r in v2}) == len(v2)
+        split_of = {r["video_key"]: r["split"] for r in old_m}
+        assert all(r["extra"] and r["label"] == 1 and r["tte"] in (0.75, 1.25) and r["valid"] and r["split"] == split_of[r["video_key"]] for r in ex), "split = the video's split"
+        assert all(r["gt"]["explanation"] and r["gt"]["prediction"] and r["gt"]["label_vis"] == 1 and not r["gt"]["pre_alert"] for r in ex)
+        assert all((ROOT / "dataset" / "train" / r["frames_dir"]).is_dir() for r in ex[:50])
+        cx = Counter((r["split"], r["tte"]) for r in ex)
+        print(f"18 ok: extra manifest {len(ex)} windows {dict(sorted(cx.items()))}; union {len(v2)} rows = the 4,169 original rows + the new ones; splits follow the videos")
     print("ALL OK")
 
 

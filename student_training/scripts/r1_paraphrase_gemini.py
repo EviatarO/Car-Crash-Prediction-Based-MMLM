@@ -24,7 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-D = ROOT / "outputs" / "teacher_dataset_2026-10"
+D = Path(__import__("os").environ["R1_PARA_DIR"]) if __import__("os").environ.get("R1_PARA_DIR") else ROOT / "outputs" / "teacher_dataset_2026-10"   # R1_PARA_DIR: a separate folder for a new run (plan 2026-10-19); unset = the original folder
 BATCHES, OUTS = D / "paraphrase_batches", D / "paraphrase_out"
 IN_PER_M, OUT_PER_M, FLEX = 0.75, 3.75, 0.5            # USD per million tokens (OpenRouter list price, google/gemini-3.8-flash); Flex = half price
 

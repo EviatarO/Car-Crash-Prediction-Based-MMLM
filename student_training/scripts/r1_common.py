@@ -87,6 +87,7 @@ def parse_phase2(text: str) -> dict:
 TAG["nexar_reasoning"] = "[Nexar]"
 TAG["nexar_reasoning_shifted"] = "[Nexar]"
 TAG["nexar_reasoning_test"] = "[Nexar]"          # plan 2026-10-17: the private test windows
+TAG["nexar_reasoning_test_public"] = "[Nexar]"   # 2026-10-18: the public test windows
 _FIELDS = {"reason_first": ("Reasoning: how it moves relative to the ego vehicle and how the gap between them changes.\n"
                             "Collision: yes or no.\nOutcome: one short sentence."),
            "verdict_first": ("Collision: yes or no.\n"

@@ -36,7 +36,9 @@ from r1_eval_reasoning import outcome_says_collision  # noqa: E402
 from r1_fact_eval import AHEAD_STRONG, FACTS, LEFT, RIGHT, TYPES, facts  # noqa: E402
 
 MAN = ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_windows.jsonl"
-D = ROOT / "outputs" / "teacher_dataset_2026-10"
+if __import__("os").environ.get("R1_REASONING_MANIFEST"):          # plan 2026-10-19: the manifest of the extra windows
+    MAN = Path(__import__("os").environ["R1_REASONING_MANIFEST"])
+D = Path(__import__("os").environ["R1_PARA_DIR"]) if __import__("os").environ.get("R1_PARA_DIR") else ROOT / "outputs" / "teacher_dataset_2026-10"   # R1_PARA_DIR: a separate folder for a new run (plan 2026-10-19); unset = the original folder
 BATCHES, OUTS = D / "paraphrase_batches", D / "paraphrase_out"
 OUTCOME_WORDS = r"collid|collision|crash|\bcontact|impact|\bhit\b|\bhits\b|strike|struck"
 RISKY = {  # word -> group; a version may use a word of a group only if the original uses a word of the same group
