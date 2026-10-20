@@ -1,0 +1,100 @@
+{
+  "00001_hires": {
+    "note": "teacher - good\nP2V - good\nP2R - good\n"
+  },
+  "00033_hires": {
+    "note": "teacher - good\nP2V - good\nP2R - good"
+  },
+  "00165_hires": {
+    "note": "The reasoning was right and present an outlier\nteacher - good reasoning\nP2V - good reasoning\nP2R - good reasoning"
+  },
+  "00352_hires": {
+    "note": "teacher - partly right reasoning (bad motion) + bad verdict \nP2V - good reasoning\nP2R - partly right reasoning"
+  },
+  "00367_hires": {
+    "note": "teacher - partly right reasoning (bad motion) + bad verdict \nP2V - good reasoning\nP2R - partly right reasoning"
+  },
+  "00053_hires": {
+    "note": "teacher - the teacher give the attention on the first frames and refer its verdict + reasoning to other car. didn't it use the red boxes?\n\nP2V - good reasoning\nP2R - good reasoning",
+    "flag": "wrong text"
+  },
+  "00811_hires": {
+    "flag": "ok",
+    "note": "teacher - good"
+  },
+  "01053_hires": {
+    "flag": "wrong text",
+    "note": "teacher - focus on the car that at the red box and neglect the surrounded.\nstudent - both models describe correctly the surrounded but predict badly the results"
+  },
+  "01233_hires": {
+    "note": "teacher - focus on the car that at the red box and neglect the surrounded.\nstudent - both models describe correctly the surrounded but predict badly the results",
+    "flag": "wrong text"
+  },
+  "01308_hires": {
+    "note": "teacher - good\nstudent - both models describe correctly the surrounded but predict badly the results",
+    "flag": "ok"
+  },
+  "01325_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudent - both models describe correctly the surrounded but predict badly the results"
+  },
+  "02023_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on motion and gap prediction."
+  },
+  "01892_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on motion and gap prediction."
+  },
+  "02125_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on motion and gap prediction."
+  },
+  "02301_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on every fact"
+  },
+  "02309_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on motion and gap prediction."
+  },
+  "02616_hires": {
+    "flag": "ok",
+    "note": "teacher - good\nstudents - failed on motion and gap prediction.\nfeel like it didn't give enough attention for the last frames"
+  },
+  "02627_hires": {
+    "note": "teacher - good\nstudents - failed on motion and gap prediction.\nfeel like it didn't give enough attention for the last frames",
+    "flag": "ok"
+  },
+  "02651_hires": {
+    "note": "teacher - good\nstudents - failed on motion and gap prediction.",
+    "flag": "ok"
+  },
+  "02610_hires": {
+    "flag": "wrong text",
+    "note": "the teacher focus on the red boxes. the box miss the hitter car and lead to bad prediction."
+  },
+  "02642_hires": {
+    "flag": "wrong text"
+  },
+  "00396_hires": {
+    "flag": "ok",
+    "note": "teacher - good prediction/\nP2V - good verdict. reasoning - hallucinate.\nP2R - bad verdict. reasoning - hallucinate."
+  },
+  "00797_hires": {
+    "flag": "ok",
+    "note": "teacher - good prediction/\nP2V - good verdict. reasoning - hallucinate.\nP2R - bad verdict. reasoning - hallucinate."
+  },
+  "00716_hires": {
+    "flag": "wrong text",
+    "note": "teacher - partly right reasoning (bad motion) + bad verdict \nP2V - good reasoning"
+  },
+  "00685_hires": {
+    "flag": "wrong text",
+    "note": "teacher - partly right reasoning (bad motion) + bad verdict \nP2V - good reasoning"
+  },
+  "00198_hires": {
+    "flag": "label problem",
+    "note": "no collision seem to come"
+  }
+}

@@ -37,7 +37,7 @@ from r1_eval_gates import retrieval_at10, token_f1  # noqa: E402
 from r1_reasoning import auc_ap, logodds, prefix_for, score_kinds  # noqa: E402
 from r1_train import QWEN_ID, evaluate, load_lm  # noqa: E402
 
-GROUPS = ("normal", "pre_alert", "tte1.5", "tte1.0", "tte0.5")
+GROUPS = ("normal", "pre_alert", "tte1.5", "tte1.25", "tte1.0", "tte0.75", "tte0.5")          # tte0.75 / tte1.25: the extra windows of plan 2026-10-19
 ROAD_USERS = [("pedestrian", r"pedestrian|person|worker|walker|child"), ("cyclist", r"cyclist|bicycl|bike\b|scooter"),
               ("motorcycle", r"motorcycl|motorbike"), ("bus", r"\bbus\b"), ("truck", r"truck|lorry|dump|semi\b|trailer|tractor"),
               ("van", r"\bvan\b|minivan"), ("suv", r"\bsuv\b|sport utility|crossover|jeep"), ("pickup", r"pickup"),
@@ -182,12 +182,12 @@ def missed_crashes(rows):
     the written verdict (Collision: no), the decision score at 0.5 (s_after or s_first) and the crash model (P < 0.5)."""
     main = "s_after" if rows and "s_after" in rows[0] else ("s_first" if rows and "s_first" in rows[0] else None)
     out = {}
-    for g in ("tte0.5", "tte1.0", "tte1.5", "all"):
+    for g in ("tte0.5", "tte0.75", "tte1.0", "tte1.25", "tte1.5", "all"):
         rs = [r for r in rows if r["label"] == 1 and (r["group"] == g or (g == "all" and r["group"].startswith("tte")))]
         if not rs:
             continue
         out[g] = {"n": len(rs),
-                  "written_no": float(np.mean([r["gen_collision"] != 1 for r in rs])),
+                  "written_no": float(np.mean([r["gen_collision"] != 1 for r in rs])) if any(r.get("gen_text") for r in rs) else None,
                   "score_no": float(np.mean([r[main] < 0 for r in rs])) if main else None,
                   "crash_model_no": float(np.mean([r["a1_p"] < 0.5 for r in rs]))}
     return out
@@ -226,6 +226,24 @@ def text_metrics(rows):
             "distinct_explanations": int(len({r["gen_explanation"] for r in rows})), "n": len(rows)}
 
 
+def stratified_sample(items, n, seed=0):
+    """n windows drawn at random within each (label, group) stratum, proportionally (largest remainders), in a fixed order."""
+    import random as _r
+    if n >= len(items):
+        return sorted(items, key=lambda it: it["id"])
+    strata = {}
+    for it in items:
+        strata.setdefault((it["label"], it["group"]), []).append(it)
+    keys = sorted(strata, key=str)
+    exact = {k: n * len(strata[k]) / len(items) for k in keys}
+    take = {k: int(exact[k]) for k in keys}
+    for k in sorted(keys, key=lambda k: exact[k] - take[k], reverse=True)[:n - sum(take.values())]:
+        take[k] += 1
+    rng = _r.Random(seed)
+    out = [it for k in keys for it in rng.sample(strata[k], take[k])]
+    return sorted(out, key=lambda it: it["id"])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -235,8 +253,8 @@ def main():
     ap.add_argument("--facts-cards", default=None, help="fact_cards_teacher.jsonl: needed for --order facts_first (also scores the generated Facts line)")
     ap.add_argument("--drop-prealert", action="store_true", help="score without the pre-alert windows (plan 2026-10-15)")
     ap.add_argument("--split", default="val")
-    ap.add_argument("--source", default="nexar_reasoning", choices=["nexar_reasoning", "nexar_reasoning_test"],
-                    help="windows to score (cache name = source); nexar_reasoning_test = the private test windows (plan 2026-10-17)")
+    ap.add_argument("--source", default="nexar_reasoning", choices=["nexar_reasoning", "nexar_reasoning_test", "nexar_reasoning_test_public"],
+                    help="windows to score (cache name = source); nexar_reasoning_test = the private test windows (plan 2026-10-17), _public = the public ones")
     ap.add_argument("--no-ref", action="store_true",
                     help="the windows have no reference text yet (test): skip loss / perplexity / gaps / retrieval / blank-video / text metrics; the decision scores, "
                          "missed crashes and the generated answers are still written")
@@ -252,6 +270,10 @@ def main():
     ap.add_argument("--max-new", type=int, default=160)
     ap.add_argument("--n-blank", type=int, default=20)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--no-extra-train", action="store_true", help="plan 2026-10-19, chain A: leave the extra TTE windows out of the TRAIN split (the model never trained on them)")
+    ap.add_argument("--no-generate", action="store_true", help="scoring only (plan 2026-10-19): the decision scores, no generated text and no text metrics; verdict_first only. A scoring pass takes minutes, a generating one about an hour per 650 windows")
+    ap.add_argument("--sample", type=int, default=0, help="N>0: a random subset of N windows, stratified by (label, group) (plan 2026-10-18: the train-split report)")
+    ap.add_argument("--sample-seed", type=int, default=0)
     ap.add_argument("--max-ret", type=int, default=0)
     args = ap.parse_args()
     out = Path(args.out_dir)
@@ -263,8 +285,10 @@ def main():
     caches = {"nexar_reasoning": Cache(args.cache_dir, args.source, args.input), args.source: Cache(args.cache_dir, args.source, args.input)}
     cache = caches[args.source]
     cards = load_cards(args.facts_cards) if args.facts_cards else None
-    items = load_items(args.source, 2, "test" if args.source == "nexar_reasoning_test" else args.split, cache, order=args.order, box_hint=args.box_hint, facts=cards,
-                       drop_prealert=args.drop_prealert)
+    items = load_items(args.source, 2, "test" if args.source.startswith("nexar_reasoning_test") else args.split, cache, order=args.order, box_hint=args.box_hint, facts=cards,
+                       drop_prealert=args.drop_prealert, drop_extra_train=args.no_extra_train)
+    if args.sample and args.sample < len(items):
+        items = stratified_sample(items, args.sample, args.sample_seed)
     if args.limit:
         items = items[:args.limit]
     assert items, "no validation windows in the cache"
@@ -301,7 +325,7 @@ def main():
         score_keys.append(f"s_{kind}")
     if args.train_threshold:
         import random as _r
-        tr_all = load_items("nexar_reasoning", 2, "train", cache, order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert)
+        tr_all = load_items("nexar_reasoning", 2, "train", cache, order=args.order, box_hint=args.box_hint, facts=cards, drop_prealert=args.drop_prealert, drop_extra_train=args.no_extra_train)
         tr_items = _r.Random(0).sample(tr_all, min(args.train_threshold, len(tr_all)))
         kind0 = kinds[0]
         s_tr = np.array(logodds(bridge, tr_items, [prefix_for(kind0, it) for it in tr_items], caches, dev))
@@ -317,7 +341,9 @@ def main():
                                   "val_acc": float((pred == y_va).mean()), "val_confusion": conf(y_va, pred),
                                   "val_balanced_acc": float(0.5 * ((pred[y_va == 1] == 1).mean() + (pred[y_va == 0] == 0).mean()))}
         print("[train-threshold]", json.dumps(rep["train_threshold"]), flush=True)
-    gens = generate_all(bridge, items, caches, dev, "real", args.max_new)
+    if args.no_generate:
+        assert args.order == "verdict_first", "--no-generate needs --order verdict_first (reason_first scores the model's own written reasoning)"
+    gens = [""] * len(items) if args.no_generate else generate_all(bridge, items, caches, dev, "real", args.max_new)
     parsed = [parse_reasoning(g) for g in gens]
     for r, g, p in zip(rows, gens, parsed):
         r.update(gen_text=g, gen_explanation=p["explanation"], gen_collision=p["collision"], gen_outcome=p["outcome"])
@@ -330,7 +356,7 @@ def main():
         for r, s in zip(rows, sc):
             r["s_after"] = s
         score_keys.append("s_after")
-    nb = 0 if args.no_ref else min(args.n_blank, len(items))
+    nb = 0 if (args.no_ref or args.no_generate) else min(args.n_blank, len(items))
     rep["blank_generations"] = [{"id": it["id"], "text": g} for it, g in zip(items[:nb], generate_all(bridge, items[:nb], caches, dev, "blank", args.max_new))]
 
     if args.old_ckpt:                                                 # (3) old Phase-2 model on the same windows with its own question
@@ -341,7 +367,7 @@ def main():
             r["s_old_phase2"] = s
         score_keys.append("s_old_phase2")
 
-    rep.update(metrics=compute_metrics(rows, score_keys), text=None if args.no_ref else text_metrics(rows), missed_crashes=missed_crashes(rows))
+    rep.update(metrics=compute_metrics(rows, score_keys), text=None if (args.no_ref or args.no_generate) else text_metrics(rows), missed_crashes=missed_crashes(rows))
     if args.order == "facts_first":
         rep["facts_line"] = facts_line_accuracy(rows)
     with open(out / "predictions.jsonl", "w", encoding="utf-8") as f:
