@@ -358,6 +358,146 @@ def main():
         assert all((ROOT / "dataset" / "train" / r["frames_dir"]).is_dir() for r in ex[:50])
         cx = Counter((r["split"], r["tte"]) for r in ex)
         print(f"18 ok: extra manifest {len(ex)} windows {dict(sorted(cx.items()))}; union {len(v2)} rows = the 4,169 original rows + the new ones; splits follow the videos")
+    # 19 ---- plan 2026-10-20: extra validation checks inside an epoch, selection by decision AUC, patience in checks
+    import r1_train as T
+    assert T.parse_eval_at("0.5, 0.75,1.0,1.5,0.5", 6) == [0.5, 0.75, 1.0, 1.5]
+    for bad in ("7", "0", "-1"):
+        try:
+            T.parse_eval_at(bad, 6)
+            raise AssertionError("junk accepted: " + bad)
+        except ValueError:
+            pass
+    fr = T.parse_eval_at("0.5,0.75,1.0,1.25,1.5,2.0", 6)
+    assert T.mid_check_steps(fr, 1, 100) == {50: 0.5, 75: 0.75}, "whole numbers are epoch ends, not mid-epoch checks"
+    assert T.mid_check_steps(fr, 2, 100) == {25: 1.25, 50: 1.5} and T.mid_check_steps(fr, 3, 100) == {}
+    assert T.mid_check_steps([0.001], 1, 100) == {1: 0.001} and T.mid_check_steps([0.999], 1, 10) == {9: 0.999}, "clamped inside the epoch"
+    rec = {"val_nexar_reasoning": {"loss_real": 1.2, "gap_wrong": 0.3}, "decision": {"first": {"auc": 0.95}}}
+    assert T.select_score(rec, "auc", "nexar_reasoning") == 0.95 and T.select_score(rec, "val_loss", "nexar_reasoning") == -1.2 and T.select_score(rec, "gap", "nexar_reasoning") == 0.3
+    assert T.select_score({"val_nexar_reasoning": {}}, "auc", "nexar_reasoning") == -1e9
+    assert T.decision_auc({"decision": {"before": {"auc": 0.8}}}) == 0.8 and T.decision_auc({}) is None
+    dry = ROOT / "outputs" / "r1_reasoning_dryrun" / "cache"
+    if dry.exists():                                                   # tiny-LM CPU run: checks are scored and saved, patience counts checks, R2 flags pass through
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            cmd = [sys.executable, "-u", str(HERE / "r1_train.py"), "--phase", "2", "--lm", "tiny", "--device", "cpu", "--sources", "nexar_reasoning", "--cache-dir", str(dry),
+                   "--out-dir", td, "--epochs", "3", "--lr-merger", "1e-5", "--lr-lora", "1e-4", "--eff-bs", "4", "--micro-bs", "2", "--order", "verdict_first",
+                   "--drop-prealert", "--balance-tte", "--select", "auc", "--eval-at", "0.5,0.75,1.5", "--patience-checks", "1", "--val-split", "train",
+                   "--lora-dropout", "0.2", "--lora-r", "8", "--weight-decay", "0.05", "--lora-weight-decay", "0.05"]
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"})
+            assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+            logs = [json.loads(l) for l in open(Path(td) / "train_log.jsonl", encoding="utf-8")]
+            assert logs and logs[0].get("mid") is True and logs[0]["epoch"] == 0.5, "the first record is the 0.5-epoch check"
+            assert (Path(td) / "check_0.50.pt").exists() and (Path(td) / "best.pt").exists()
+            assert "[early stop]" in r.stdout and not (Path(td) / "epoch_01.pt").exists(), "single-class validation: the second check cannot beat the first -> stop after 1 check in a row, before epoch 1 ends"
+        print("19 ok: --eval-at fractions -> mid-epoch steps; select by decision AUC; patience counted in checks; tiny-LM run saves check_*.pt and stops early; R2 flags run")
+    else:
+        print("19 ok (helpers only; the dry-run cache is absent)")
+    # 20 ---- relaxed rewordings (arm D2)
+    import r1_relaxed_paraphrases as RP
+    assert RP.rule_numbers("Rule 5/3: adds 'straight'") == {"5", "3"} and RP.rule_numbers("Rules 3 and 8: contact") == {"3", "8"} and RP.rule_numbers("odd text") == set()
+    assert RP.rule_numbers("Rule 4/6: 'completely fills' weakened") == {"4", "6"}
+    orig = {"w1": "A car stops ahead. The ego vehicle closes the gap until it is directly behind the rear bumper.", "w2": "A truck crosses from the left."}
+    judged = [{"id": "w1", "source": "rephrased_v1", "explanation": "Stopped car ahead; the gap shrinks to its rear bumper.", "outcome": "The ego vehicle hits the car.", "judge": "ok"}]
+    rej = [
+        {"id": "w1", "explanation": "A parked car sits ahead; the ego vehicle closes in, ending behind its rear bumper.", "outcome": "o", "problem": "Rule 3: 'parked' vs 'stopped'"},
+        {"id": "w1", "explanation": "A car ahead stops; the ego vehicle ends up touching the rear.", "outcome": "o", "problem": "Rule 3: touching"},
+        {"id": "w1", "explanation": "A bus stops ahead; the gap closes.", "outcome": "o", "problem": "Rule 1: bus"},
+        {"id": "w1", "explanation": "Stopped car ahead; the gap shrinks to its rear bumper.", "outcome": "o", "problem": "Rule 5: dup of an accepted version"},
+        {"id": "w2", "explanation": "A truck moves in from the left.", "outcome": "o", "problem": "Rules 3 and 8: x"},
+        {"id": "w2", "explanation": "A truck moves in from the left side of the road.", "outcome": "o", "problem": "Rule 5/6: 'side' added"},
+        {"id": "w2", "explanation": "From the left a truck enters the lane.", "outcome": "o", "problem": "unreadable reason"},
+        {"id": "w3", "explanation": "A van.", "outcome": "o", "problem": "Rule 3: x"},
+    ]
+    rows, st = RP.relaxed_rows(judged, rej, orig, max_extra=3)
+    got = [(r["id"], r["source"]) for r in rows[1:]]
+    assert got == [("w1", "rephrased_x1"), ("w2", "rephrased_x1")], got
+    assert st["admitted"] == 2 and st["hard_fact_rule"] == 2 and st["new_contact_word"] == 1 and st["duplicate"] == 1 and st["no_rule_number"] == 1 and st["no_original"] == 1, st
+    assert RP.relaxed_rows(judged, rej, orig, max_extra=0)[1].get("admitted", 0) == 0
+    # 22 ---- the evaluator rebuilds the LoRA with the checkpoint's own rank and alpha = 2r (R2 trains r 8): same scores as the trained model (a wrong alpha/r would silently rescale the adapter)
+    import tempfile as _tf
+
+    import r1_eval_reasoning as EV
+    torch.manual_seed(3)
+    b1 = R1Bridge(tiny_qwen(len(tok)).float(), tok)
+    b1.enable_lora(r=4, alpha=8, dropout=0.0)
+    for n, p in b1.text.named_parameters():
+        if "lora_B" in n:
+            p.data.normal_(0, 0.5)                                  # B starts at 0 (a no-op adapter): make it matter
+    b1.eval()
+    ref = logodds(b1, its, pf, {"nexar_reasoning": FixedCache()}, torch.device("cpu"), bs=3)
+    with _tf.TemporaryDirectory() as td:
+        b1.save(Path(td) / "c.pt")
+        torch.manual_seed(3)
+        b2 = R1Bridge(tiny_qwen(len(tok)).float(), tok)
+        EV.load_ckpt(b2, Path(td) / "c.pt", 16)                      # --lora-r 16 (the default) is overridden by the checkpoint's rank 4
+        got2 = logodds(b2, its, pf, {"nexar_reasoning": FixedCache()}, torch.device("cpu"), bs=3)
+    assert max(abs(a - b) for a, b in zip(ref, got2)) < 1e-4, (ref, got2)
+    assert max(abs(a) for a in ref) > 0, "non-degenerate scores"
+    print("22 ok: load_ckpt infers the LoRA rank from the checkpoint (r 4 vs default 16) and uses alpha = 2r: identical scores to the trained model")
+    # 23 ---- stage 3 (plan 2026-10-22): which LoRA matrices train, the frames store, the OnlineCache interface, the checkpoint-fraction helpers
+    import tempfile
+
+    import r1_frames as RF
+    names = [f"base_model.model.backbone.encoder.layer.{i}.attention.{q}.lora_{ab}.default.weight" for i in range(24) for q in ("query", "key", "value") for ab in "AB"] \
+        + [f"base_model.model.backbone.predictor.layer.{i}.attention.query.lora_A.default.weight" for i in range(12)] \
+        + [f"base_model.model.predictor.layer.{i}.attention.value.lora_B.default.weight" for i in range(12)] + ["base_model.model.backbone.encoder.layer.0.attention.query.weight", "classifier.weight"]
+    sel = RF.encoder_lora_names(names)
+    assert len(sel) == 144 and all(".backbone.encoder." in n and "lora_" in n for n in sel), "only the 144 ENCODER LoRA matrices train (no predictor LoRA, no base weights, no head)"
+    with tempfile.TemporaryDirectory() as td:
+        arr, ixf = RF.frames_sink(td, 3)
+        for k in range(3):
+            arr[k] = k + 1
+            ixf.write(json.dumps({"id": f"w{k}", "row": k}) + "\n")
+        arr.flush()
+        ixf.close()
+        del arr
+        fs = RF.FramesStore(td)
+        got = fs.get(["w2", "w0"])
+        assert got.shape == (2, 16, 256, 256, 3) and got.dtype == np.uint8 and int(got[0, 0, 0, 0, 0]) == 3 and int(got[1, 0, 0, 0, 0]) == 1 and "w1" in fs and "zz" not in fs
+        cdir = Path(td) / "oldcache"
+        cdir.mkdir()
+        (cdir / "index_nexar_reasoning.jsonl").write_text("".join(json.dumps({"id": f"w{k}", "row": k, "p_collision": 0.1 * k, "split": "train", "label": 1}) + "\n" for k in range(5)), encoding="utf-8")
+
+        class FakeEnc(torch.nn.Module):
+            def forward(self, x):
+                return torch.as_tensor(x).float().mean((1, 2, 3, 4))[:, None, None].expand(-1, 2048, 1024) * torch.ones(1, requires_grad=True)
+        oc = RF.OnlineCache(str(cdir), fs, FakeEnc())
+        assert set(oc.rows) == {"w0", "w1", "w2"} and "w4" not in oc and abs(oc.p_collision("w2") - 0.2) < 1e-9, "only windows that have frames are served; the crash-model P comes from the old index"
+        f = oc.get(["w1", "w2"])
+        assert f.requires_grad and tuple(f.shape) == (2, 2048, 1024) and float(f[1, 0, 0]) == 3.0, "gradients flow when enabled"
+        with torch.no_grad():
+            assert not oc.get(["w1"]).requires_grad
+        import gc
+        fs.maps.clear()                                              # release the memory maps (Windows cannot delete files that are still mapped)
+        oc.frames = None
+        del fs, oc, f, got
+        gc.collect()
+    assert T.mid_check_steps([0.25, 0.5, 0.75, 1.25], 1, 100) == {25: 0.25, 50: 0.5, 75: 0.75} and T.mid_check_steps([0.25, 0.5, 0.75, 1.25], 2, 100) == {25: 1.25}
+    print("23 ok: stage 3: 144 encoder LoRA matrices train (predictor LoRA excluded); frames store + OnlineCache interface (rows from the old index, gradient only when enabled); save-point steps")
+    # 21 ---- best check point + the R2 -> R1 rule
+    import subprocess
+    import tempfile
+
+    import r1_best_check as BC
+    with tempfile.TemporaryDirectory() as td:
+        def mk_log(recs):
+            (Path(td) / "train_log.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+        d = lambda a: {"first": {"auc": a}}                                                       # noqa: E731
+        mk_log([{"epoch": 0.5, "mid": True, "decision": d(0.94), "val_x": {"loss_real": 1.3}}, {"epoch": 0.75, "mid": True, "decision": d(0.95), "val_x": {"loss_real": 1.2}},
+                {"epoch": 1, "decision": d(0.95), "val_x": {"loss_real": 1.1}}, {"epoch": 1.5, "mid": True, "decision": d(0.93), "val_x": {"loss_real": 1.2}}])
+        b = BC.best(td)
+        assert b[1] == "check_0.75.pt" and b[0] == 0.75, "tie 0.95 / 0.95 -> the earlier point"
+        mk_log([{"epoch": 1, "decision": d(0.95)}, {"epoch": 1.25, "mid": True, "decision": d(0.957)}])
+        assert BC.best(td)[1] == "check_1.25.pt" and BC.best(td)[0] > 1.0 + 1e-9, "best after epoch 1.0 -> R1 is skipped"
+        r = subprocess.run([sys.executable, str(HERE / "r1_best_check.py"), td, "--after", "1.0"], capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout.split()[:2] == ["check_1.25.pt", "1.25"], (r.returncode, r.stdout, r.stderr[-300:])
+        mk_log([{"epoch": 0.5, "mid": True, "decision": d(0.96)}, {"epoch": 1, "decision": d(0.95)}, {"epoch": 1.5, "mid": True, "decision": d(0.94)}])
+        r = subprocess.run([sys.executable, str(HERE / "r1_best_check.py"), td, "--after", "1.0"], capture_output=True, text=True)
+        assert r.returncode == 3 and r.stdout.split()[:2] == ["check_0.50.pt", "0.5"], "best at or before epoch 1.0 -> exit 3 -> R1 runs"
+    print("21 ok: best check point by validation AUC (ties -> earlier); exit code 0 / 3 = after / at-or-before epoch 1.0")
+    print("20 ok: relaxed rewordings admit only nuance-rule (3-6) rejects without a new contact word; hard-fact / unreadable / duplicate / unknown-window rejects stay out")
     print("ALL OK")
 
 

@@ -1,0 +1,49 @@
+{
+  "_comment": "What the PRESENTATION site shows. Only what is listed here reaches it (the lab site website/ keeps every experiment). Change this file only when the user asks to promote something; then rebuild with build_pres_data.py, check the asserts, show the diff. Paths are relative to MMLM_AI/.",
+  "reasoning_model": "BADAS-JEPA-Reason",
+  "crash_model": "BADAS-Open (SFT)",
+  "showcase": {
+    "predictions": "outputs/r1_p2v_report_2026-10-18/pod/train600/predictions.jsonl",
+    "windows": "outputs/teacher_dataset_2026-10/windows.jsonl",
+    "note": "BADAS-JEPA-Reason (P2V, 2026-10-15, seed 0) on a 600-window training sample; only windows where the written verdict and the score agree with the ground truth"
+  },
+  "vision": {
+    "benchmark": "Nexar Kaggle collision-prediction test, 1,344 clips (private 677 + public 667), single window per clip, AP at TTE 0.5 / 1.0 / 1.5 s and their mean (Kaggle mAP), the protocol of BADAS-2.0 Table 2",
+    "measured": [
+      {"name": "BADAS-Open (published)", "kind": "baseline", "note": "the public BADAS-Open checkpoint, scored by us (original centre-crop preprocessing)",
+       "files": ["outputs/e4_vjepa_reason/StageA_scorer/badas_open_private.jsonl", "outputs/e4_vjepa_reason/StageA_scorer/badas_open_public.jsonl"],
+       "label": "ground_truth", "tte": "time_before_s", "score": "score"},
+      {"name": "BADAS-Open (SFT)", "kind": "ours", "note": "BADAS-Open fine-tuned on Nexar (LoRA on the encoder and predictor, full-frame input); one seed",
+       "files": ["outputs/r1_test_eval_2026-10-17/test_eval_2026-10-17/P2V/results/predictions.jsonl", "outputs/r1_test_eval_public_2026-10-18/test_eval_public_2026-10-18/P2V/results/predictions.jsonl"],
+       "label": "label", "tte": "tte", "score": "a1_p",
+       "expect": {"AP": 0.911, "kaggle_mAP": 0.916}},
+      {"name": "BADAS-JEPA-Reason", "kind": "ours", "note": "verdict-first reasoning model; score = P(yes) read at 'Collision:'; one seed",
+       "files": ["outputs/r1_test_eval_2026-10-17/test_eval_2026-10-17/P2V/results/predictions.jsonl", "outputs/r1_test_eval_public_2026-10-18/test_eval_public_2026-10-18/P2V/results/predictions.jsonl"],
+       "label": "label", "tte": "tte", "score": "s_first",
+       "expect": {"AP": 0.926, "kaggle_mAP": 0.928}}
+    ],
+    "reported": [
+      {"name": "BADAS-1.0", "ap": [0.935, 0.936, 0.904], "mAP": 0.925, "source": "BADAS-2.0 paper, Table 2"},
+      {"name": "BADAS-2.0", "ap": [0.943, 0.957, 0.921], "mAP": 0.940, "source": "BADAS-2.0 paper, Table 2"},
+      {"name": "BADAS-2.0-Flash", "ap": [0.945, 0.962, 0.915], "mAP": 0.941, "source": "BADAS-2.0 paper, Table 2"},
+      {"name": "BADAS-2.0-Flash-Lite", "ap": [0.946, 0.947, 0.907], "mAP": 0.933, "source": "BADAS-2.0 paper, Table 2"},
+      {"name": "Cosmos-BADAS", "ap": [null, null, null], "mAP": 0.859, "source": "BADAS-2.0 paper, Sec. 7.4 (public part only, no per-TTE AP)", "partial": true}
+    ],
+    "footnotes": [
+      "Gemini-BADAS is not reported on this benchmark (the paper gives only a single-window F1 of 0.662 on its own long-tail set), so it is not a row.",
+      "Our models: one training seed each. The paper does not state its number of seeds."
+    ]
+  },
+  "reasoning": {
+    "val_predictions": "outputs/r1_phase2f_2026-10-15/phase2f_2026-10-15/P2V/results/predictions.jsonl",
+    "val_text_metrics": "outputs/r1_phase2f_2026-10-15/phase2f_2026-10-15/P2V/results/text_metrics.json",
+    "val_metrics": "outputs/r1_phase2f_2026-10-15/phase2f_2026-10-15/P2V/results/metrics.json",
+    "val_cards": "outputs/r1_phase2f_2026-10-15/cards_P2V.jsonl",
+    "teacher_cards_val": "outputs/teacher_dataset_2026-10/fact_cards_teacher.jsonl",
+    "test_predictions": "outputs/r1_p2v_report_2026-10-18/test_agreed/predictions.jsonl",
+    "test_text_metrics": "outputs/r1_p2v_report_2026-10-18/pod/test_agreed/text_metrics.json",
+    "test_cards": "outputs/r1_p2v_report_2026-10-18/cards_test_model.jsonl",
+    "teacher_cards_test": "outputs/r1_p2v_report_2026-10-18/cards_test_teacher.jsonl",
+    "test_note": "431 private-test windows where the blind teacher's verdict equals the label (the only test windows with a reference text); biased toward easier windows"
+  }
+}

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCP-MMLM · Semantic Guidance for Collision Anticipation</title>
+<meta name="description" content="BADAS-JEPA-Reason: anticipates dashcam collisions up to 1.5 seconds ahead and explains its prediction in a single video pass.">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="stylesheet" href="assets/pres.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <span class="brand">CCP-MMLM</span>
+  <div class="navlinks"><a href="index.html" class="active">Home</a></div>
+</nav>
+
+<!-- ================= HERO ================= -->
+<section class="hero" style="height:62vh;min-height:420px">
+  <canvas id="plexus"></canvas>
+  <div class="hero-inner">
+    <div class="hero-kicker">Collision Anticipation · MSc Thesis</div>
+    <h1 class="hero-title" style="font-size:clamp(37.4px,6.6vw,92.4px)">CCP-MMLM<br>
+      <span class="thin">Semantic Guidance for Collision Anticipation</span></h1>
+    <p class="hero-sub sharp">Anticipates dashcam collisions up to 1.5 seconds in advance and provides causal reasoning in a single video pass.</p>
+  </div>
+  <div class="scroll-hint">SCROLL ↓</div>
+</section>
+
+<!-- ================= 1. MODEL IN ACTION ================= -->
+<section class="block" id="showcaseSection">
+  <div class="kicker">Model in action</div>
+  <h2><span id="nmReason">BADAS-JEPA-Reason</span> in action</h2>
+  <div class="showcase">
+    <div>
+      <div class="stage" id="scStage">
+        <video id="scVideo" muted playsinline preload="auto"></video>
+        <div class="tte"><div class="lbl" id="scTteLbl">TIME TO COLLISION</div><div class="val" id="scTteVal">–</div><div class="sub" id="scTteSub"></div></div>
+        <div class="alight"><div class="dot" id="scDot"></div><span>DECISION</span></div>
+        <div class="tap-hint" id="scTapHint"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>
+      </div>
+      <div class="timeline" aria-hidden="true"><div class="win" id="tlWin"></div><div class="dec" id="tlDec"></div><div class="evt" id="tlEvt"></div><div class="head" id="tlHead"></div></div>
+      <div class="tl-legend"><span><i style="background:rgba(0,191,255,.45)"></i>the 2 s the model sees</span><span><i style="background:var(--amber)"></i>decision point</span>
+        <span><i style="background:var(--red)"></i>collision</span></div>
+    </div>
+    <div class="capcard" id="scCard">
+      <div class="caplbl">Model reasoning</div>
+      <div class="captext" id="scReason">–</div>
+      <div class="outcome" id="scOutcome"></div>
+      <div class="decrow">
+        <div class="prob"><div class="k">P(collision)</div><div class="v" id="scPval">–</div><div class="pbar"><div class="pbar-fill" id="scPbar"></div></div></div>
+        <div class="verdict" id="scVerdict">–</div>
+      </div>
+      <div class="capmeta">
+        <div><div class="k">Clip</div><div class="v" id="scClip">–</div></div>
+        <div><div class="k">Window</div><div class="v" id="scHorizon">–</div></div>
+        <div><div class="k">Ground truth</div><div class="v" id="scTruth">–</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="shuffle-row">
+    <button class="ctl big" id="shuffleBtn">⟲ next clip</button>
+    <span class="finenote">Examples from training windows; test-set results below.</span>
+  </div>
+</section>
+
+<!-- ================= 2. PROBLEM / OUR MODEL ================= -->
+<section class="block">
+  <div class="kicker">Research goal</div>
+  <h2>A crash warning that explains itself</h2>
+  <div class="ps-grid">
+    <div class="ps-card"><h3>The problem</h3>
+      <p>Crash predictors give a <b>score, not a reason</b>. Today an explanation needs a second model that looks at the scene again, which doubles the cost and drifts
+         from what the predictor actually saw.</p></div>
+    <div class="ps-card sol"><h3>Our model</h3>
+      <p><b>BADAS-JEPA-Reason</b> reads the crash-tuned V-JEPA2 video features directly and returns, in one pass: <b>collision yes / no</b>, its <b>probability</b>,
+         the <b>reasoning</b> and the expected <b>outcome</b>.</p></div>
+  </div>
+  <p class="whynew"><b>Why it is new.</b> V-JEPA2 has been aligned with language models for general video question answering, and BADAS-Reason explains a warning with a
+     separate vision-language model that looks at one frame. We produce the decision and its reasoning from the same video latents, which the BADAS-2.0 authors list as
+     future work.</p>
+  <div class="stats">
+    <div class="stat"><div class="n" id="statMap">–</div><div class="t">Kaggle mAP on 1,344 held-out test clips</div><div class="s" id="statMapSub"></div></div>
+    <div class="stat"><div class="n">1</div><div class="t">vision pass gives the verdict and the reasoning</div><div class="s">no second model, no second look</div></div>
+    <div class="stat"><div class="n">2 s</div><div class="t">of video in → verdict, probability, reasoning, outcome out</div><div class="s">16 frames at 7.5 fps</div></div>
+  </div>
+</section>
+
+<!-- ================= 3. ARCHITECTURE ================= -->
+<section class="block">
+  <div class="kicker">Architecture</div>
+  <h2>From video to verdict and reason</h2>
+  <p class="lede">Both models start from the same V-JEPA2 video encoder. Click any block to open its inner layers.</p>
+  <div id="archHost"></div>
+</section>
+
+<!-- ================= 4. RESULTS ================= -->
+<section class="block" id="resultsSection">
+  <div class="kicker">Results</div>
+  <h2>How well it anticipates, and how well it explains</h2>
+
+  <h3 class="rsub"><span class="k">1 · Vision</span>Collision anticipation on the Nexar Kaggle benchmark</h3>
+  <p class="lede" id="visBench"></p>
+  <div class="tablewrap" id="visTable"></div>
+  <ul class="tnotes" id="visNotes"></ul>
+
+  <h3 class="rsub"><span class="k">2 · Reasoning</span>What the model writes</h3>
+  <p class="lede">The closest published system, BADAS-Reason, solves a different task, so its scores cannot be put next to ours:</p>
+  <div class="tablewrap"><table class="ptable captable"><thead><tr><th style="cursor:default"></th><th style="cursor:default">BADAS-Reason (BADAS-2.0 paper)</th><th style="cursor:default">BADAS-JEPA-Reason (ours)</th></tr></thead><tbody>
+    <tr><td>Input</td><td>one peak-risk frame with attention boxes</td><td>2 s of video (16 frames)</td></tr>
+    <tr><td>Output</td><td>one-sentence hazard + a 2–4-word driver command</td><td>collision yes / no, its probability, reasoning, outcome</td></tr>
+    <tr><td>Who decides "collision"</td><td>a separate crash model (BADAS)</td><td>the same model, from the same video features</td></tr>
+    <tr><td>Vision passes</td><td>two (crash model + its own image encoder)</td><td>one</td></tr>
+    <tr><td>Reported metrics</td><td>loss / perplexity and exact match of the command against a human label</td><td>below: facts, meaning similarity, video dependence</td></tr>
+  </tbody></table></div>
+  <p class="lede" style="margin-top:22px" id="reasonLede"></p>
+  <div class="tablewrap" id="reasonTable"></div>
+  <ul class="tnotes" id="reasonNotes"></ul>
+</section>
+
+<footer>CCP-MMLM · SEMANTIC GUIDANCE FOR COLLISION ANTICIPATION</footer>
+
+<script src="pres_data.js"></script>
+<script src="assets/plexus.js"></script>
+<script src="assets/archspec.js"></script>
+<script src="assets/archview.js"></script>
+<script src="assets/showcase.js"></script>
+<script src="assets/results.js"></script>
+<script>
+"use strict";
+const D = window.PRES_DATA;
+initPlexus(document.getElementById("plexus"));
+initShowcase(D.showcase);
+buildArchView(document.getElementById("archHost"), window.ARCH_SPEC);
+
+/* ---------------------------------------------------------------- headline number (the promoted reasoning model) */
+const ours = D.vision.rows.find(r => r.name === D.names.reasoning), b2 = D.vision.rows.find(r => r.name === "BADAS-2.0");
+document.getElementById("statMap").textContent = ours.mAP.toFixed(3);
+document.getElementById("statMapSub").textContent = b2 ? `BADAS-2.0: ${b2.mAP.toFixed(3)} · ours: one training seed` : "";
+
+/* ---------------------------------------------------------------- vision table */
+document.getElementById("visBench").textContent = D.vision.benchmark + ". Click a column to sort; the best value of each column is green.";
+const f3 = v => (v === null || v === undefined) ? "–" : v.toFixed(3);
+const vrows = D.vision.rows.map(r => ({name: r.name, kind: r.kind, a05: r.ap[0], a10: r.ap[1], a15: r.ap[2], mAP: r.mAP, source: r.source, partial: r.partial}));
+sortTable(document.getElementById("visTable"), [
+  {key: "name", label: "Model", fmt: (v, r) => r.kind === "ours" ? `${v} <span class="src">(ours)</span>` : v},
+  {key: "a05", label: "AP @ 0.5 s", num: true, best: "max", fmt: f3},
+  {key: "a10", label: "AP @ 1.0 s", num: true, best: "max", fmt: f3},
+  {key: "a15", label: "AP @ 1.5 s", num: true, best: "max", fmt: f3},
+  {key: "mAP", label: "mAP", num: true, best: "max", fmt: (v, r) => f3(v) + (r.partial ? " *" : "")},
+  {key: "source", label: "Source", fmt: v => `<span class="src">${v}</span>`}],
+  vrows, {sort: {key: "mAP", dir: "desc"}, rowClass: r => r.kind === "ours" ? "ours" : ""});
+document.getElementById("visNotes").innerHTML = ["* Cosmos-BADAS: the paper reports its mAP on the public part only (0.859), without per-TTE AP."]
+  .concat(D.vision.footnotes).map(n => `<li>${n}</li>`).join("");
+
+/* ---------------------------------------------------------------- reasoning metrics */
+const R = D.reasoning;
+document.getElementById("reasonLede").textContent = `Our reasoning metrics on the validation windows (${R.n_val}) and on ${R.n_test} private-test windows. ` +
+  "Fact agreement compares the four facts of the model's text (road user, side, motion, gap) with the teacher's; green = better than its baseline.";
+const pct = v => (v === null || v === undefined) ? "–" : v.toFixed(3);
+const rrows = R.rows.map(r => ({metric: r.metric, val: r.val, bval: r.base_val, test: r.test, btest: r.base_test, bname: r.base_name}));
+sortTable(document.getElementById("reasonTable"), [
+  {key: "metric", label: "Metric", fmt: (v, r) => v + (r.bname ? `<br><span class="src">baseline: ${r.bname}</span>` : "")},
+  {key: "val", label: `Validation (${R.n_val})`, num: true, fmt: pct}, {key: "bval", label: "Baseline", num: true, fmt: pct},
+  {key: "test", label: `Private test (${R.n_test})`, num: true, fmt: pct}, {key: "btest", label: "Baseline", num: true, fmt: pct}],
+  rrows, {cellClass: (k, r) => ((k === "val" && r.bval !== null && r.val > r.bval) || (k === "test" && r.btest !== null && r.test !== null && r.test > r.btest)) ? "above" : ""});
+document.getElementById("reasonNotes").innerHTML = [R.test_note + ".", "Validation windows were never trained on; the model was chosen on validation loss, not on these numbers."]
+  .map(n => `<li>${n}</li>`).join("");
+</script>
+</body>
+</html>

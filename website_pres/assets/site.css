@@ -1,0 +1,595 @@
+/* ==================================================================
+   site.css - shared styles for all three pages (landing / dataset /
+   experiments). Sticky-offset math uses CSS vars instead of hardcoded
+   pixel guesses, since dataset.html stacks sitenav + a page-local
+   topbar + a sticky thead and the offsets must compose exactly.
+   ================================================================== */
+:root{
+  --bg:#0D1226; --panel:#1C2340; --panel2:#243060; --panel-dk:#161d36;
+  --cyan:#00BFFF; --cyan-dk:#0096CC; --red:#FF6B6B; --green:#00E676;
+  --soft-green:#9BE7B5;
+  --amber:#FFA726; --muted:#A0B4CC; --white:#FFFFFF;
+  --mono:Consolas,'Cascadia Mono',ui-monospace,monospace;
+  --navh:50px; --topbarh:96px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--white);
+     font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+     -webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+
+/* ============ shared top nav (all 3 pages) ============ */
+.sitenav{position:sticky;top:0;z-index:60;display:flex;align-items:center;
+         gap:28px;padding:13px 6vw;background:rgba(10,14,30,.92);
+         backdrop-filter:blur(10px);border-bottom:1px solid #2a3560;height:var(--navh)}
+.sitenav .brand{font-family:var(--mono);font-size:14.3px;color:var(--cyan);
+                letter-spacing:.2em;white-space:nowrap;font-weight:700}
+.sitenav .navlinks{display:flex;gap:6px;margin-left:6px}
+.sitenav .navlinks a{font-family:var(--mono);font-size:13.2px;letter-spacing:.1em;
+     color:var(--muted);padding:8px 16px;border-radius:7px;transition:.15s;
+     border:1px solid transparent}
+.sitenav .navlinks a:hover{color:var(--white)}
+.sitenav .navlinks a.active{color:var(--cyan);border-color:#2a3560;background:var(--panel)}
+
+/* ============ hero ============ */
+.hero{position:relative;height:88vh;min-height:520px;display:flex;
+      flex-direction:column;justify-content:center;overflow:hidden;
+      border-bottom:1px solid #2a3560}
+#plexus{position:absolute;inset:0;width:100%;height:100%}
+.hero-inner{position:relative;z-index:2;padding:0 6vw;pointer-events:none}
+.hero-kicker{font-family:var(--mono);font-size:14.3px;letter-spacing:.35em;
+             color:var(--cyan);text-transform:uppercase;margin-bottom:18px}
+.hero-title{font-size:clamp(46.2px,8.25vw,114.4px);font-weight:800;line-height:.95;
+            letter-spacing:-.02em}
+.hero-title .thin{color:var(--muted);font-weight:300}
+.hero-sub{margin-top:22px;max-width:560px;color:var(--muted);font-size:16.5px;
+          line-height:1.6}
+.hero-cards{position:relative;z-index:2;display:flex;gap:18px;padding:34px 6vw 0;
+            flex-wrap:wrap}
+.stat-card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel-dk) 100%);
+           border:1px solid #2a3560;border-radius:10px;padding:16px 22px;
+           min-width:170px;transform-style:preserve-3d;transition:transform .15s ease,
+           border-color .2s;will-change:transform;cursor:default}
+.stat-card:hover{border-color:var(--cyan-dk)}
+.stat-card .k{font-family:var(--mono);font-size:12.1px;letter-spacing:.18em;
+              color:var(--muted);text-transform:uppercase}
+.stat-card .v{font-size:33px;font-weight:700;margin-top:5px}
+.stat-card .v small{font-size:14.3px;color:var(--muted);font-weight:400;margin-left:7px}
+.scroll-hint{position:absolute;bottom:22px;left:6vw;z-index:2;color:var(--muted);
+             font-family:var(--mono);font-size:12.1px;letter-spacing:.25em;
+             animation:bob 2.4s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(7px)}}
+@media (prefers-reduced-motion:reduce){
+  .scroll-hint{animation:none}
+  #plexus{display:none}
+  .hero{background:radial-gradient(ellipse at 30% 40%,#1a2450 0%,var(--bg) 70%)}
+}
+
+/* ============ dataset page's own topbar (tabs/search/filters) ============ */
+.topbar{position:sticky;top:var(--navh);z-index:50;display:flex;align-items:center;
+        gap:14px;padding:12px 6vw;background:rgba(13,18,38,.94);
+        backdrop-filter:blur(10px);border-bottom:1px solid #2a3560;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;background:var(--panel-dk);border-radius:8px;padding:4px}
+.tab{border:0;background:transparent;color:var(--muted);font:600 14.3px/1 inherit;
+     font-family:inherit;padding:8px 20px;border-radius:6px;cursor:pointer;
+     transition:.15s}
+.tab.active{background:var(--cyan);color:#04182b}
+.tab:not(.active):hover{color:var(--white)}
+.searchwrap{flex:1;min-width:180px;max-width:420px;position:relative}
+.searchwrap input{width:100%;background:var(--panel-dk);border:1px solid #2a3560;
+     border-radius:8px;color:var(--white);font-family:var(--mono);font-size:14.3px;
+     padding:10px 14px 10px 36px;outline:none;transition:border-color .15s}
+.searchwrap input:focus{border-color:var(--cyan)}
+.searchwrap svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);
+     width:15px;height:15px;stroke:var(--muted);fill:none;stroke-width:2}
+.filters{display:flex;gap:4px}
+.pill{border:1px solid #2a3560;background:transparent;color:var(--muted);
+      font:600 13.2px/1 inherit;font-family:inherit;padding:8px 14px;border-radius:99px;
+      cursor:pointer;transition:.15s}
+.pill.active{border-color:var(--cyan);color:var(--cyan)}
+.pill.clearbtn{color:var(--red);border-color:rgba(255,107,107,.35)}
+.rowcount{font-family:var(--mono);font-size:13.2px;color:var(--muted);margin-left:auto;
+          white-space:nowrap}
+
+/* ============ table ============ */
+.table-wrap{padding:26px 6vw 80px}
+table{width:100%;border-collapse:collapse}
+thead th{position:sticky;top:calc(var(--navh) + var(--topbarh));z-index:10;
+         background:var(--panel-dk);font-family:var(--mono);font-size:12.1px;
+         letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+         text-align:left;padding:10px 14px 6px}
+thead th.sortable{cursor:pointer;user-select:none}
+thead th.sortable:hover{color:var(--white)}
+thead th .caret{display:inline-block;margin-left:5px;font-size:9.9px;opacity:.35}
+thead th.sort-asc .caret,thead th.sort-desc .caret{opacity:1;color:var(--cyan)}
+.filter-row th{position:sticky;
+         top:calc(var(--navh) + var(--topbarh) + 30px);z-index:9;
+         background:var(--panel-dk);padding:4px 10px 10px;
+         border-bottom:1px solid #2a3560}
+.filter-row input,.filter-row select{width:100%;background:var(--bg);
+     border:1px solid #2a3560;border-radius:6px;color:var(--white);
+     font-family:var(--mono);font-size:12.1px;padding:5px 7px;outline:none}
+.filter-row input:focus,.filter-row select:focus{border-color:var(--cyan)}
+.filter-row .range{display:flex;gap:4px}
+.filter-row .range input{width:50%}
+tbody td{padding:10px 14px;border-bottom:1px solid #1d2748;font-size:15.4px;
+         vertical-align:middle}
+tbody tr{transition:background .12s}
+tbody tr:hover{background:rgba(0,191,255,.05)}
+tbody tr.hit{animation:hitflash 1.6s ease-out}
+@keyframes hitflash{0%,60%{background:rgba(0,191,255,.22)}100%{background:transparent}}
+.num{font-family:var(--mono);font-size:14.3px}
+.dim{color:var(--muted)}
+.thumb{position:relative;width:150px;height:84px;border-radius:6px;overflow:hidden;
+       cursor:pointer;background:var(--panel-dk);border:1px solid #2a3560;
+       transition:border-color .15s,transform .15s;display:block}
+.thumb:hover{border-color:var(--cyan);transform:scale(1.03)}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb .play{position:absolute;inset:0;display:flex;align-items:center;
+     justify-content:center;background:rgba(10,14,30,.35);transition:background .15s}
+.thumb:hover .play{background:rgba(10,14,30,.15)}
+.thumb .play svg{width:30px;height:30px;fill:rgba(255,255,255,.92);
+     filter:drop-shadow(0 1px 6px rgba(0,0,0,.6))}
+.chip{display:inline-block;font-family:var(--mono);font-size:12.1px;font-weight:700;
+      letter-spacing:.08em;padding:4px 11px;border-radius:99px}
+.chip.pos{color:var(--green);background:rgba(0,230,118,.1);
+          border:1px solid rgba(0,230,118,.35)}
+.chip.neg{color:var(--muted);background:rgba(160,180,204,.08);
+          border:1px solid rgba(160,180,204,.3)}
+.badge{display:inline-block;font-family:var(--mono);font-size:11px;color:var(--amber);
+       border:1px solid rgba(255,167,38,.4);border-radius:4px;padding:2px 7px;
+       margin-left:8px;vertical-align:1px}
+
+/* ============ player (lightbox) - reused by the landing showcase inline ============ */
+.overlay{position:fixed;inset:0;z-index:100;background:rgba(5,8,20,.82);
+         backdrop-filter:blur(6px);display:none;align-items:center;
+         justify-content:center;padding:3vh 3vw}
+.overlay.open{display:flex}
+.player{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;
+        width:min(1100px,96vw);overflow:hidden;
+        box-shadow:0 30px 90px rgba(0,0,0,.6)}
+.player.inline{width:100%;box-shadow:none}
+.player-head{display:flex;align-items:center;gap:14px;padding:13px 18px;
+             border-bottom:1px solid #2a3560;flex-wrap:wrap}
+.player-head .pid{font-family:var(--mono);font-size:17.6px;font-weight:700;
+                  color:var(--cyan)}
+.player-head .meta{font-family:var(--mono);font-size:13.2px;color:var(--muted)}
+.player-head .close{margin-left:auto;border:0;background:transparent;
+     color:var(--muted);font-size:28.6px;line-height:1;cursor:pointer;padding:2px 8px}
+.player-head .close:hover{color:var(--white)}
+.stage{position:relative;background:#000}
+.stage video{display:block;width:100%;max-height:62vh;cursor:pointer}
+.tte{position:absolute;left:18px;top:50%;transform:translateY(-50%);
+     background:rgba(8,12,26,.72);border:1px solid rgba(0,191,255,.35);
+     border-radius:10px;padding:12px 16px;pointer-events:none;min-width:150px}
+.tte .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.22em;
+          color:var(--muted);text-transform:uppercase}
+.tte .val{font-family:var(--mono);font-size:37.4px;font-weight:700;color:var(--cyan);
+          margin-top:2px;transition:color .1s}
+.tte .val.warn{color:var(--red)}
+.tte .val.after{color:var(--amber);font-size:26.4px}
+.tte .sub{font-family:var(--mono);font-size:12.1px;color:var(--muted);margin-top:3px}
+.alight{position:absolute;top:14px;right:16px;display:flex;align-items:center;
+        gap:8px;background:rgba(8,12,26,.72);border-radius:99px;
+        padding:6px 12px 6px 8px;pointer-events:none}
+.alight .dot{width:14px;height:14px;border-radius:50%;background:var(--red);
+     box-shadow:0 0 10px 2px rgba(255,107,107,.55);transition:background .1s,
+     box-shadow .1s}
+.alight .dot.on{background:var(--green);
+     box-shadow:0 0 12px 3px rgba(0,230,118,.65)}
+.alight span{font-family:var(--mono);font-size:11px;letter-spacing:.15em;
+             color:var(--muted)}
+.endcard{position:absolute;inset:0;display:none;align-items:center;
+         justify-content:center;flex-direction:column;gap:14px;
+         background:rgba(8,12,26,.72)}
+.endcard.show{display:flex}
+.endcard .msg{font-family:var(--mono);font-size:15.4px;color:var(--muted);
+              letter-spacing:.1em}
+.player-controls{display:flex;align-items:center;gap:10px;padding:13px 18px;
+                 border-top:1px solid #2a3560;flex-wrap:wrap}
+.ctl{border:1px solid #2a3560;background:var(--panel);color:var(--white);
+     font:600 14.3px/1 inherit;font-family:var(--mono);padding:9px 16px;
+     border-radius:8px;cursor:pointer;transition:.15s}
+.ctl:hover{border-color:var(--cyan-dk)}
+.ctl.active{background:var(--cyan);border-color:var(--cyan);color:#04182b}
+.ctl.big{padding:9px 22px}
+.speed-lbl{font-family:var(--mono);font-size:12.1px;color:var(--muted);
+           letter-spacing:.15em;margin-right:2px}
+.seg-info{margin-left:auto;font-family:var(--mono);font-size:12.1px;
+          color:var(--muted)}
+/* seek scrubber - range mapped to the reviewed segment only, not full video */
+.scrubwrap{display:flex;align-items:center;gap:10px;padding:0 18px 13px;
+           font-family:var(--mono);font-size:12.1px;color:var(--muted)}
+.scrubwrap input[type=range]{flex:1;accent-color:var(--cyan);height:4px;cursor:pointer}
+.scrubwrap .t{min-width:38px;text-align:center}
+
+footer{padding:24px 6vw;border-top:1px solid #2a3560;color:var(--muted);
+       font-family:var(--mono);font-size:12.1px;letter-spacing:.12em}
+
+/* ============ landing-page sections (shared across index.html) ============ */
+section.block{padding:70px 6vw;border-bottom:1px solid #1d2748}
+section.block .kicker{font-family:var(--mono);font-size:13.2px;letter-spacing:.3em;
+     color:var(--cyan);text-transform:uppercase;margin-bottom:14px}
+section.block h2{font-size:clamp(28.6px,3.74vw,44px);font-weight:800;
+     letter-spacing:-.01em;margin-bottom:8px}
+section.block .lede{color:var(--muted);font-size:16.5px;max-width:640px;
+     line-height:1.6;margin-bottom:36px}
+
+/* ==================================================================
+   Shared building blocks - moved out of index.html's inline <style>
+   when experiments.html started using them. Landing-only styles
+   (showcase, caption card, mtable) stay inline there.
+   ================================================================== */
+.goal-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media (max-width:820px){ .goal-grid{grid-template-columns:1fr} }
+.goal-card{background:var(--panel);border:1px solid #2a3560;border-radius:12px;
+           padding:22px;border-top:3px solid var(--cyan-dk)}
+.goal-card:nth-child(2){border-top-color:var(--green)}
+.goal-card:nth-child(3){border-top-color:var(--amber)}
+.goal-card h3{font-size:16.5px;letter-spacing:.02em;margin-bottom:10px;color:var(--white)}
+.goal-card p{font-size:14.9px;line-height:1.65;color:var(--muted)}
+
+.archwrap{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;
+          padding:26px;overflow-x:auto}
+.archwrap svg{display:block;margin:0 auto;max-width:100%;height:auto}
+
+.cta{font-family:var(--mono);font-size:14.3px;letter-spacing:.08em;padding:13px 26px;
+     border-radius:9px;border:1px solid #2a3560;transition:.15s;display:inline-block}
+.cta.primary{background:var(--cyan);color:#04182b;border-color:var(--cyan);font-weight:700}
+.cta.primary:hover{background:var(--cyan-dk)}
+.cta.ghost:hover{border-color:var(--cyan-dk);color:var(--white)}
+
+/* ==================================================================
+   Experiments page
+   ================================================================== */
+.hero.hero-short{min-height:52vh}
+.hero.hero-short .hero-title{margin-bottom:14px}
+
+/* ---- arm picker ---- */
+.picker-block{padding-bottom:34px;border-bottom:none}
+.big-picker{font-size:18.7px;padding:17px 34px;cursor:pointer;display:inline-flex;
+            align-items:center;gap:14px}
+.caretdown{font-size:14px;opacity:.75}
+.picker-hint{color:var(--muted);font-family:var(--mono);font-size:13.2px;margin-top:14px}
+.pickcard{width:min(860px,94vw);max-height:86vh;overflow:auto;background:var(--panel);
+          border:1px solid #2a3560;border-radius:14px}
+.pickgroup{padding:8px 0 18px}
+.pickgroup-t{font-family:var(--mono);font-size:12.1px;letter-spacing:.2em;
+             text-transform:uppercase;color:var(--cyan);padding:16px 22px 10px}
+.pickrow{display:block;width:100%;text-align:left;padding:14px 22px;
+         border-top:1px solid #1d2748;transition:.12s;cursor:pointer;
+         background:transparent;border-left:none;border-right:none;border-bottom:none;
+         font:inherit;color:inherit;appearance:none}
+.pickrow:hover{background:rgba(0,191,255,.06)}
+.pickrow-k{display:block;font-weight:700;font-size:16.5px;color:var(--white)}
+.pickrow-d{display:block;color:var(--muted);font-size:14.3px;margin-top:4px;line-height:1.5}
+.pickrow-b{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.pickrow-b i{font-style:normal;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+             text-transform:uppercase;padding:3px 9px;border-radius:20px;border:1px solid}
+.pickrow-b i.ok{color:var(--green);border-color:rgba(0,230,118,.4);background:rgba(0,230,118,.08)}
+.pickrow-b i.no{color:var(--muted);border-color:#2a3560;background:rgba(160,180,204,.06)}
+
+/* ---- prose + notes ---- */
+section.block .lede.small{font-size:14.9px;margin-bottom:18px;max-width:760px}
+.subh{font-size:19.8px;font-weight:700;margin:30px 0 10px;color:var(--white)}
+.subh2{font-size:clamp(28.6px,3.74vw,44px);font-weight:800;margin:44px 0 8px}
+.results-head{display:flex;align-items:center;justify-content:space-between;
+              gap:20px;flex-wrap:wrap;margin:44px 0 10px}
+.results-head h2{margin-bottom:0}
+.note{font-family:var(--mono);font-size:13.2px;line-height:1.65;color:var(--muted);
+      margin:14px 0;max-width:900px;padding-left:14px;border-left:2px solid #2a3560}
+.note.flat{border-left-color:var(--cyan-dk)}
+.note.warn{border-left-color:var(--amber);color:#e8d3ae}
+.promptbox{background:var(--panel-dk);border:1px solid #2a3560;border-radius:12px;
+           padding:20px 22px;font-family:var(--mono);font-size:12.65px;line-height:1.6;
+           color:var(--muted);white-space:pre-wrap;max-height:440px;overflow:auto}
+code{font-family:var(--mono);font-size:.94em;color:var(--cyan)}
+
+/* ---- stat tiles ---- */
+.statgrid{display:flex;flex-wrap:wrap;gap:12px;margin:6px 0 10px}
+.stat{background:var(--panel);border:1px solid #2a3560;border-radius:10px;
+      padding:12px 18px;min-width:104px}
+.stat.pos{border-left:3px solid var(--green)}
+.stat.neg{border-left:3px solid var(--red)}
+.stat .k{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+         text-transform:uppercase;color:var(--muted)}
+.stat .v{font-family:var(--mono);font-size:22px;font-weight:700;margin-top:3px}
+.stat .v small{font-size:12.1px;font-weight:400;color:var(--muted);margin-left:4px}
+
+/* ---- charts ---- */
+.chartgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin:8px 0 6px}
+.chartgrid.three{grid-template-columns:1.15fr .95fr .8fr}
+.chartgrid.wide{grid-template-columns:1fr 1.4fr}
+@media (max-width:1000px){ .chartgrid,.chartgrid.three,.chartgrid.wide{grid-template-columns:1fr} }
+.chartgrid figure{background:var(--panel-dk);border:1px solid #2a3560;border-radius:12px;
+                  padding:16px 18px 12px;min-width:0}
+.chartgrid figcaption{font-family:var(--mono);font-size:12.1px;letter-spacing:.08em;
+                      text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-family:var(--mono);
+        font-size:11.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+.chartscroll{overflow-x:auto;padding-bottom:6px}
+.chartscroll>div{min-width:1040px}
+.cmrow{display:flex;flex-wrap:wrap;gap:10px}
+.cmcell{flex:1 1 200px;min-width:170px}
+.cmttl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+       color:var(--cyan);text-align:center;margin-bottom:2px}
+/* Square charts (ROC, confusion matrix) scale their viewBox to the container, so in a
+   2-column grid they balloon far larger than the line charts beside them. Cap them and
+   centre instead, so every figure in a row reads at a comparable size. */
+#cTestRoc svg,#cValRoc svg{max-width:390px;margin:0 auto}
+.cmcell svg{max-width:330px;margin:0 auto}
+
+/* ---- gear / mode selector ---- */
+.gearwrap{display:flex;align-items:center;gap:10px}
+.gear{font-size:19px;color:var(--muted)}
+.modes{display:flex;gap:8px;flex-wrap:wrap}
+
+/* ---- compact metric tables (never sticky: they live inside sections) ---- */
+table.mini{width:100%;border-collapse:collapse;min-width:640px}
+table.mini th{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;
+              text-transform:uppercase;color:var(--muted);text-align:right;
+              padding:10px 14px;background:var(--panel-dk);
+              border-bottom:1px solid #2a3560;white-space:nowrap;
+              position:static;top:auto}
+/* Only the FIRST header row's first cell is a row label. Unscoped, this also matched
+   the first cell of the SECOND header row - "fixed" in the vs-baseline table - which is
+   why that one header was left-aligned while the other three in its group were right. */
+table.mini thead tr:first-child th:first-child{text-align:left}
+/* rowspan headers default to middle, which floats "Bucket"/"N" above the second-row
+   headers they sit beside; bottom puts them on the same baseline. */
+table.mini th[rowspan]{vertical-align:bottom}
+table.mini td{font-family:var(--mono);font-size:14.3px;text-align:right;
+              padding:10px 14px;border-bottom:1px solid #1d2748}
+table.mini td:first-child{text-align:left;font-weight:700}
+table.mini tbody tr:hover{background:rgba(0,191,255,.04)}
+table.mini td.hero-metric{font-weight:700;color:var(--white)}
+table.mini.kv{min-width:0}
+table.mini.kv td:first-child{font-weight:400}
+table.mini.kv td:last-child{color:var(--white)}
+
+/* ---- comparison view ---- */
+.chiprow{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 4px}
+.cmp-toolbar{display:flex;align-items:center;gap:16px;margin-bottom:12px}
+.chartscroll{margin-left:-6vw;margin-right:-6vw}
+/* The table body scrolls inside its own box instead of running the whole page long,
+   so the bar charts underneath stay reachable while filtering. Sized for ~6 rows:
+   a row is ~105px (thumbnail-driven) and the two header rows ~87px, so 720px shows
+   6 of them. Capped at 80vh so a short screen degrades gracefully rather than
+   pushing the charts off-screen entirely. */
+/* Break out of section.block's 6vw side padding so the Clip column starts at the left
+   edge and Comments ends at the right - about 12vw of extra width, which together with
+   dropping the Mined-failure column is usually enough to remove horizontal scrolling
+   entirely once Captions are toggled off. */
+.cmp-scroll{max-height:min(720px,80vh);overflow:auto;border:1px solid #2a3560;
+            border-radius:12px;margin-left:-6vw;margin-right:-6vw}
+/* border-collapse:collapse (inherited from the base `table` rule) makes Chrome
+   compute wrong offsets for position:sticky on cells - the pinned notes column lands
+   ~100px short of the right edge instead of against it. `separate` with zero spacing
+   looks identical here because every border is drawn per-cell anyway. */
+.cmp-scroll table.cmp-table{min-width:900px;border-collapse:separate;border-spacing:0}
+.cmp-table td,.cmp-table th{white-space:nowrap}
+.cmp-scroll thead th{position:sticky;top:0;z-index:3}
+.cmp-scroll .filter-row th{position:sticky;top:34px;z-index:2}
+.cmp-table td{vertical-align:middle}
+/* Captions are the width hogs: at full width the table overflows and the sticky
+   notes column ends up overlaying the score columns. Truncated to a width that lets
+   the whole table fit on a normal screen - the full text is in the title tooltip and
+   in the clip player - so sticky only actually engages on narrow viewports. */
+.cap{display:inline-block;max-width:155px;overflow:hidden;text-overflow:ellipsis;
+     white-space:nowrap;vertical-align:bottom;color:var(--muted);font-size:12.65px}
+/* one mark per selected arm, in selection order - narrow enough to add a column
+   without costing the width the full-bleed change just recovered */
+.vmarks{display:inline-flex;gap:4px}
+.vm{font-style:normal;font-family:var(--mono);font-size:13px;font-weight:700;
+    line-height:1;width:18px;height:18px;border-radius:4px;display:inline-flex;
+    align-items:center;justify-content:center}
+.vm.ok{color:var(--soft-green);background:rgba(0,230,118,.14)}
+.vm.no{color:var(--red);background:rgba(255,107,107,.14)}
+.vm.na{color:var(--muted);background:rgba(160,180,204,.10)}
+/* the argument-description column: readable but clearly secondary to the value */
+table.mini td.hpdesc{text-align:left;font-weight:400;color:var(--muted);
+                     font-size:12.65px;white-space:normal;max-width:340px}
+.score{font-family:var(--mono);font-weight:700;padding:3px 8px;border-radius:6px}
+.score.right{color:var(--soft-green);background:rgba(0,230,118,.10)}
+.score.wrong{color:var(--red);background:rgba(255,107,107,.10)}
+
+/* ---- player caption line (experiments page) ---- */
+#pCaption{font-size:15.4px;line-height:1.6;color:var(--muted);padding:14px 18px;
+          border-top:1px solid #2a3560;background:var(--panel-dk)}
+
+/* ---- review notes column (Cross-Experiment Comparison) ---- */
+.cmp-toolbar .pushright{margin-left:auto}
+.notecount{color:var(--soft-green)}
+.notecount.warn{color:var(--amber)}
+/* The notes column is last, where a reviewer expects it. It is NOT sticky: a pinned
+   cell in a table this wide lands short of the edge in Chrome and overlays the score
+   columns, which is worse than scrolling. Instead the two caption columns - the width
+   hogs - can be toggled off, which makes the whole table fit and puts the notes on
+   screen next to the scores. */
+.cmp-table td:last-child{min-width:215px;border-left:1px solid #2a3560}
+.cmp-table th:last-child{border-left:1px solid #2a3560}
+.noteinput{width:200px;min-height:46px;resize:vertical;display:block;
+           background:var(--panel-dk);color:var(--white);border:1px solid #2a3560;
+           border-radius:8px;padding:7px 9px;font-family:var(--mono);
+           font-size:12.65px;line-height:1.45;transition:.12s}
+.noteinput::placeholder{color:#5c6d8a}
+.noteinput:focus{outline:none;border-color:var(--cyan-dk);background:var(--panel)}
+/* an annotated row should be findable by eye, not only by sorting */
+.noteinput.has-note{border-left:3px solid var(--soft-green);color:var(--soft-green)}
+
+/* ---- vs-baseline / distribution / agreement sections ---- */
+.baserow{display:flex;align-items:center;gap:14px;margin:0 0 16px;flex-wrap:wrap}
+.baselbl{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;
+         text-transform:uppercase;color:var(--muted)}
+/* four distribution panels sit in one row on a wide screen, two-up below that */
+.chartgrid.four{grid-template-columns:repeat(4,1fr)}
+@media (max-width:1250px){ .chartgrid.four{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:700px){ .chartgrid.four{grid-template-columns:1fr} }
+/* fixed = green, broken = red: the sign of the trade should be readable without
+   parsing the header, since these two columns are the point of the table */
+table.mini td.good{color:var(--soft-green)}
+table.mini td.bad{color:var(--red)}
+table.mini thead tr:first-child th[colspan]{text-align:center;color:var(--cyan);
+       border-bottom:1px solid #2a3560}
+.delta{font-family:var(--mono);color:var(--muted)}
+.delta.big{color:var(--amber);font-weight:700}
+
+
+/* ---- Boxed-teacher pilot view (experiments.html #pilot) ---- */
+.pilot-runs{padding:6px 0 4px}
+.pilot-runs table.mini{min-width:0}
+.pilot-table td,.pilot-table th{white-space:nowrap}
+.pilot-table td.reason{white-space:normal;min-width:260px;max-width:320px;vertical-align:top}
+.pilot-table td{vertical-align:top}
+.pilot-table td:last-child{min-width:230px}
+.pilot-table .noteinput{width:220px;min-height:84px}
+.pgrid{position:relative;width:300px;cursor:zoom-in;border:1px solid #2a3560;border-radius:6px;overflow:hidden;background:var(--panel-dk)}
+.pgrid img{display:block;width:100%;height:auto}
+.pgrid:hover{border-color:var(--cyan)}
+.pplus{position:absolute;top:5px;right:5px;width:26px;height:26px;border-radius:7px;border:1px solid rgba(255,255,255,.35);
+       background:rgba(10,14,30,.75);color:#fff;font-size:17px;line-height:1;cursor:pointer;padding:0}
+.pplus:hover{background:var(--cyan-dk);border-color:var(--cyan)}
+.pv{display:inline-block;font-family:var(--mono);font-weight:700;padding:4px 10px;border-radius:99px;font-size:13.2px}
+.pv.ok{color:var(--soft-green);background:rgba(0,230,118,.14)}
+.pv.no{color:var(--red);background:rgba(255,107,107,.14)}
+.prisk{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-left:4px}
+.pflip{font-family:var(--mono);font-size:11.5px;color:var(--amber);margin-left:4px}
+.pilot-runs tr.dimrow td{opacity:.55}
+.pilot-runs tr.hl td{background:rgba(0,191,255,.12)}
+.pilot-runs tr.cmprow{cursor:pointer}
+.ppred{margin-top:6px;font-size:13.4px;line-height:1.45;color:var(--soft-green);font-style:italic}
+.hvsel{background:var(--panel-dk);color:var(--white);border:1px solid #2a3560;border-radius:7px;padding:5px 6px;font-size:13px}
+.hvsel.has-note{border-color:var(--cyan)}
+.hvhint{margin-top:4px;font-size:11.5px}
+.chip-run.active{border-color:var(--cyan);color:var(--cyan)}
+.ptext{font-size:14.3px;line-height:1.5;color:var(--white)}
+.ptags{margin-top:6px;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.pwarn{color:var(--amber);cursor:help}
+.gridbox{background:var(--panel-dk);border:1px solid #2a3560;border-radius:14px;width:min(1920px,96vw);max-height:94vh;
+         overflow:auto;box-shadow:0 30px 90px rgba(0,0,0,.6)}
+.gridbox img{display:block;width:100%;height:auto}
+
+/* ---- Reasoning model view (experiments.html #r2): everything fits a 1280px window without page-level horizontal scroll ---- */
+#viewR2 .cmp-toolbar{flex-wrap:wrap;gap:10px 12px}
+#viewR2 .r2search{width:190px;padding:7px 10px;font-family:var(--mono);font-size:13px}
+#viewR2 .r2search:focus{outline:none;border-color:var(--cyan)}
+/* numeric tables: compact, wrapping headers; a table that still cannot fit scrolls inside its own wrapper (inline overflow-x:auto) */
+#viewR2 table.mini{min-width:0}
+#viewR2 table.mini th{font-size:10.5px;letter-spacing:.04em;white-space:normal;padding:8px 6px;line-height:1.3;vertical-align:bottom}
+#viewR2 table.mini td{font-size:13px;padding:8px 6px}
+#viewR2 table.mini td.hpdesc{min-width:0 !important;max-width:none;font-size:12px}
+#viewR2 table.mini td .dim{display:block;font-size:11.5px}
+#viewR2 .pilot-runs{max-width:100%}
+/* the 612-window table: fixed layout, explicit column widths, text stacked in one cell */
+#viewR2 .r2win-wrap{margin:0 -3vw;border:1px solid #2a3560;border-radius:12px;max-height:min(760px,82vh);overflow:auto;max-width:100vw}
+#viewR2 table.r2win{table-layout:fixed;width:100%;min-width:0;border-collapse:separate;border-spacing:0}
+#viewR2 .r2win col.c-thumb{width:122px}
+#viewR2 .r2win col.c-id{width:92px}
+#viewR2 .r2win col.c-grp{width:96px}
+#viewR2 .r2win col.c-lab{width:62px}
+#viewR2 .r2win col.c-p{width:64px}
+#viewR2 .r2win col.c-ver{width:86px}
+#viewR2 .r2win thead th{position:sticky;top:0;z-index:3;font-size:10.5px;letter-spacing:.04em;white-space:normal;padding:8px 6px;
+                        line-height:1.3;vertical-align:bottom;border-bottom:1px solid #2a3560}
+#viewR2 .r2win thead th.sortable{cursor:pointer;user-select:none}
+#viewR2 .r2win thead th .caret{margin-left:3px;font-size:9px}
+#viewR2 .r2win tbody td{padding:8px 6px;font-size:13px;vertical-align:top;overflow-wrap:anywhere}
+#viewR2 .r2win td.r2id{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:var(--muted)}
+#viewR2 .r2win td.num{text-align:center}
+#viewR2 .r2win .pgrid{width:110px}
+#viewR2 .r2win .pplus{width:22px;height:22px;font-size:14px;top:3px;right:3px}
+#viewR2 .r2win .pv{padding:3px 7px;font-size:12px}
+#viewR2 .r2win .pflip{display:block;margin:3px 0 0}
+#viewR2 .r2win .ptext{font-size:13px;line-height:1.42}
+#viewR2 .r2win .ppred{margin-top:4px;font-size:12.5px;line-height:1.4}
+#viewR2 .r2win .r2blk + .r2blk{margin-top:9px;padding-top:8px;border-top:1px dashed #2a3560}
+#viewR2 .r2win .r2lab{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+#viewR2 .r2win .r2blk.model .r2lab{color:var(--cyan)}
+
+/* ---- dataset.html, "Reasoning dataset - augmented" (assets/aug.js) ---- */
+#viewAug .augver{margin:0 0 8px;line-height:1.45}
+#viewAug .augver.dimrow{opacity:.62}
+#viewAug .augver .chip{margin-right:4px}
+#viewAug .augver .dim{display:block;font-size:12px;color:var(--muted)}
+#viewAug .augver .bad{color:var(--red)}
+#viewAug .cmp-toolbar .sep{display:inline-block;width:10px}
+#viewAug .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewAug table.augtable td{vertical-align:top;text-align:left;font-weight:400}
+#viewAug table.augtable td:first-child{width:170px}
+#viewAug table.augtable td .dim{font-size:11.5px;color:var(--muted)}
+#viewAug table.augtable td.hpdesc{max-width:none;white-space:normal}
+@media (max-width:700px){ #viewAug table.augtable td:first-child{width:120px} #viewAug .augsearch{min-width:0;width:100%} }
+#viewAug .cmp-toolbar{flex-wrap:wrap;gap:6px}
+#viewAug table.augtable{table-layout:fixed;width:100%}
+#viewAug table.augtable td{overflow-wrap:anywhere}
+#viewAug table.augtable{min-width:0}
+@media (max-width:700px){ #viewAug table.augtable td:first-child{width:96px} #viewAug .thumb{width:90px;height:51px} }
+
+/* ---- experiments.html, "Reasoning model - 3 formats" (assets/p2f.js) ---- */
+#viewP2F table.mini th{font-size:10.5px;letter-spacing:.04em;white-space:normal;padding:8px 6px;line-height:1.3;vertical-align:bottom}
+#viewP2F table.mini td{font-size:13px;padding:7px 6px}
+#viewP2F table.mini td.bad{color:var(--red)}
+#viewP2F .p2fbar{flex-wrap:wrap;gap:6px}
+#viewP2F .p2fbar select{background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:999px;padding:5px 10px;font-family:var(--mono);font-size:12px}
+#viewP2F .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewP2F table.p2ftable{table-layout:fixed;width:100%;min-width:0}
+#viewP2F table.p2ftable td{vertical-align:top;text-align:left;font-weight:400;overflow-wrap:anywhere}
+#viewP2F table.p2ftable td:first-child{width:170px}
+#viewP2F table.p2ftable td.hpdesc{max-width:none;white-space:normal}
+#viewP2F .p2fcell{margin:0 0 9px;padding:6px 8px;border-left:3px solid #2a3560;line-height:1.45}
+#viewP2F .p2fcell.wrongcell{border-left-color:var(--red)}
+#viewP2F .p2fcell .chip{margin-right:4px}
+#viewP2F .dim{font-size:12px;color:var(--muted)}
+@media (max-width:700px){ #viewP2F table.p2ftable td:first-child{width:96px} #viewP2F .thumb{width:90px;height:51px} #viewP2F .augsearch{min-width:0;width:100%} }
+
+/* ---- dataset.html, "Teacher reasoning - test (private)" (assets/testref.js) ---- */
+#viewTestRef .trbar{flex-wrap:wrap;gap:6px}
+#viewTestRef .trbar select{background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:999px;padding:5px 10px;font-family:var(--mono);font-size:12px}
+#viewTestRef .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewTestRef table.trtable{table-layout:fixed;width:100%;min-width:0}
+#viewTestRef table.trtable td{vertical-align:top;text-align:left;font-weight:400;overflow-wrap:anywhere}
+#viewTestRef table.trtable td:first-child{width:170px}
+#viewTestRef table.trtable td:last-child{width:190px}
+#viewTestRef table.trtable td.hpdesc{max-width:none;white-space:normal}
+#viewTestRef .trans{margin:0 0 9px;padding:6px 8px;border-left:3px solid #2a3560;line-height:1.45}
+#viewTestRef .trans.wrongcell{border-left-color:var(--red)}
+#viewTestRef .trans.final{border-left-color:var(--cyan)}
+#viewTestRef .trans .chip{margin-right:4px}
+#viewTestRef .dim{font-size:12px;color:var(--muted)}
+#viewTestRef .dim.bad{color:var(--red)}
+#viewTestRef .trnote{width:100%;background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:6px;font:12px var(--mono);margin-top:6px}
+#viewTestRef .trflag{background:transparent;color:var(--white);border:1px solid #2a3560;border-radius:6px;padding:4px;font:12px var(--mono);width:100%}
+@media (max-width:700px){ #viewTestRef table.trtable td:first-child{width:96px} #viewTestRef table.trtable td:last-child{width:110px} #viewTestRef .thumb{width:90px;height:51px} #viewTestRef .augsearch{min-width:0;width:100%} }
+
+#viewTestRef table.trcm, #viewTestRef #trSummary{table-layout:auto;width:100%;min-width:0}
+#viewTestRef table.mini th{white-space:normal;font-size:11px;padding:7px 6px}
+#viewTestRef table.mini td{font-size:13px;padding:6px}
+#viewTestRef .table-wrap{overflow-x:visible}
+
+/* dropdowns: the closed box is transparent with light text, so the OPEN list must be dark too (it was white on white) */
+#viewTestRef select, #viewP2F select{color-scheme:dark;background-color:#121831}
+#viewTestRef select option, #viewP2F select option{background-color:#121831;color:#e6ebf5}
+#viewTestRef .trnote{color-scheme:dark;background-color:#121831}
+#viewTestRef .trbar select, #viewP2F .p2fbar select, #viewTestRef .trflag{background:#121831 !important;color:#e6ebf5 !important;color-scheme:dark}
+
+/* the new-windows rewordings tab: the same layout as #viewAug (fixed width, wrapped text, no horizontal scroll) */
+#viewAugX .augver{margin:0 0 8px;line-height:1.45}
+#viewAugX .augver.dimrow{opacity:.62}
+#viewAugX .augver .chip{margin-right:4px}
+#viewAugX .augver .dim{display:block;font-size:12px;color:var(--muted)}
+#viewAugX .augver .bad{color:var(--red)}
+#viewAugX .cmp-toolbar .sep{display:inline-block;width:10px}
+#viewAugX .augsearch{background:transparent;border:1px solid #2a3560;border-radius:999px;color:var(--white);padding:6px 12px;min-width:220px;font-family:var(--mono)}
+#viewAugX table.augtable td{vertical-align:top;text-align:left;font-weight:400}
+#viewAugX table.augtable td:first-child{width:170px}
+#viewAugX table.augtable td .dim{font-size:11.5px;color:var(--muted)}
+#viewAugX table.augtable td.hpdesc{max-width:none;white-space:normal}
+@media (max-width:700px){ #viewAugX table.augtable td:first-child{width:120px} #viewAugX .augsearch{min-width:0;width:100%} }
+#viewAugX .cmp-toolbar{flex-wrap:wrap;gap:6px}
+#viewAugX table.augtable{table-layout:fixed;width:100%}
+#viewAugX table.augtable td{overflow-wrap:anywhere}
+#viewAugX table.augtable{min-width:0}
+@media (max-width:700px){ #viewAugX table.augtable td:first-child{width:96px} #viewAugX .thumb{width:90px;height:51px} }

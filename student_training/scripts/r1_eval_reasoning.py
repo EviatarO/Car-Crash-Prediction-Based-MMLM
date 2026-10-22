@@ -69,7 +69,11 @@ def fmt(x, k=3):
 def load_ckpt(bridge, path, lora_r):
     sd = torch.load(path, map_location="cpu")
     if "lora" in sd and not hasattr(bridge.text, "peft_config"):
-        bridge.enable_lora(r=lora_r)
+        a = next((v for k, v in sd["lora"].items() if "lora_A" in k), None)         # the rank is the first dimension of any lora_A matrix (plan 2026-10-20: R2 trains r 8)
+        if a is not None and a.shape[0] != lora_r:
+            print(f"[load_ckpt] checkpoint LoRA rank {a.shape[0]} (not --lora-r {lora_r}): using the checkpoint's", flush=True)
+            lora_r = int(a.shape[0])
+        bridge.enable_lora(r=lora_r, alpha=2 * lora_r)                              # alpha = 2r in every run so far (r 16 / alpha 32) and in r1_train.py
     bridge.load(path)
     bridge.eval()
 

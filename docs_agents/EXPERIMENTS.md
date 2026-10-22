@@ -180,8 +180,32 @@ Chain B only (chain A deliberately not run). Stages: P1aug-v2 12 fixed epochs (l
 ### 2s. Test-set teacher reasoning (2026-10-17..)
 Private 677: pass 1 = E3 blind teacher (plan `2026-10-17_Plan-Test-Private-Addendum-Pass1-Only.md`); pass 2 anchored (`PROMPT_TEACHER_TEST_P2.py`) piloted on 20 windows, awaiting the user's review. Texts are for final evaluation only.
 
-### 2t. Seeds of today's P2V (PLANNED, `2026-10-20_Plan-Seeds-Of-Todays-P2V.md`)
-Seeds 1-4 of the P1fixR + P2V recipe from the same P1aug checkpoint; decision rules fixed in advance: R1 gain real only if mean pooled AP gain >= +0.010 AND >= 4/5 seeds above the crash model; R2 rank/z-score of seed 0; R3 ensemble of log-odds helps if >= +0.008 AP over the best single seed and the mean; chain B shown beside the spread. ~1 h/seed, 4 seeds as two parallel streams ~3 h (~$2-2.7). Not started.
+### 2t. Seeds plan (superseded: seeds now come LAST, after stage 3 and 3.1; `2026-10-20_Plan-Seeds-Of-Todays-P2V.md` kept as the template)
+Stage 4 = 5 seeds of the FINAL recipe end to end (every stage, new seed), the test sets scored once (seeds + ensemble vs the crash model and BADAS-2.0, P2V as reference). Rules R1-R3 of that plan still apply.
+
+### 2u. Stage 1 (2026-10-20; `outputs/r1_next_2026-10-20/summary.md`, HF `checkpoints/next_2026-10-20/`) - validation only
+R2 = regularised Phase 2 (LoRA r8, dropout 0.2, wd 0.05, checks at 0.5..2 epochs, best by val AUC); D2 = relaxed rewordings (9,497 accepted + 2,585 nuance-only judge rejects); R1 skipped by the pre-set rule (R2 best at 1.5 epochs). One seed each.
+| | val core AUC | val full AUC | 1.25 s AUC | train AUC | best | BERTScore (floor) | wrong-video gap | fact mean4 (motion / gap) |
+|---|---|---|---|---|---|---|---|---|
+| today's P2V | 0.953 | 0.951 | 0.931 | 0.989 | ep 1 | 0.425 (0.335) | +0.292 | 0.606 (0.591 / 0.641) |
+| R2 | 0.951 | 0.948 | 0.923 | 0.990 | 1.5 ep | 0.425 (0.335) | +0.344 | 0.622 (0.595 / 0.696) |
+| D2 (ep 3, val-loss rule) | 0.952 | 0.950 | 0.925 | 0.993 | ep 3 | 0.426 (0.338) | +0.298 | 0.620 (0.595 / 0.663) |
+Decision gate (+0.005) not met. Text gate (+0.03 on motion / gap / mean4): R2 passes on gap (+0.055); D2 fails. Fusion on D2 (crash model + D2, val core AUC 0.9574 / 0.9524): fixed w 0.6 -> 0.9598 (+0.0024), learned gate 0.9562, "pick the more confident path" 0.9571, "pick the path more likely right" 0.9572, small MLP trained on the train sample 0.9427 (the models are over-fitted there), MLP 5-fold CV on val 0.9568: gate +0.005 not met, fusion CLOSED (`outputs/r1_next_2026-10-20/fusion_D2/`, `r1_fusion.py`, `r1_fusion_mlp.py`).
+
+### 2v. Stage 2 #4: B4 (crash-head attention as projector input) vs control (2026-10-21; `outputs/r1_b4_2026-10-21/summary.md`, HF `checkpoints/b4_2026-10-21/`)
+Both chains on D2's recipe, fresh Phase 1 (<= 10 ep, patience 2) -> P1fixR -> P2V; identical except `--input last+attn` vs `last`. One pod, ~8.5 h.
+| | val core | val full | 1.0 / 1.5 s AUC | BERTScore | wrong-video gap | right clip of 10 | motion / gap / mean4 |
+|---|---|---|---|---|---|---|---|
+| B4 | 0.9534 | 0.9522 | 0.935 / 0.912 | 0.426 | +0.310 | 0.61 | 0.626 / 0.694 / 0.623 |
+| control | **0.9592** | **0.9577** | 0.942 / 0.930 | 0.426 | +0.310 | 0.52 | 0.587 / 0.631 / 0.606 |
+Decision gate (B4 >= control + 0.005) not met (-0.0058). Text gate nearly met (+0.039 motion, +0.063 gap) but B4's decision is just outside the -0.005 tolerance; B4 needs the crash head at inference -> not a final candidate. The control is the best validation decision so far (+0.006 over today's P2V).
+
+### 2w. Single-stage recipe, 2 seeds (2026-10-21/22; `outputs/r1_base_2026-10-22/summary.md`, HF `checkpoints/base_2026-10-22/`)
+ONE projector stage from random on P1fixR's data (pre-alert dropped, TTE-balanced, reasoning first; <= 10 ep, patience 2, lr 1e-3), then P2V as the control. One pod, two parallel seeds, ~6.5 h.
+Val core / full AUC: seed 0 0.9515 / 0.9494, seed 1 0.9451 / 0.9461 (mean 0.9483 / 0.9478, spread 0.0064); control 0.9592 / 0.9577. BERTScore 0.415 / 0.418 vs 0.426; mean4 facts 0.594 / 0.596 vs 0.606. **Rule: difference 0.0109 > band max(0.005, 0.0064) -> the control (two-step Phase 1) is selected.** Dropping pre-alert windows inside Phase 1 did not help.
+
+### 2x. Stage 3 (encoder LoRA trained by the LM loss only; code done, no result yet) - see PROJECT_STATE "Stage 3"
+Measurements made while building it (real BADAS weights, local GPU): encoder-only tokens == cached tokens after fp16 rounding (0.0); stochastic depth 0.1 makes train-mode tokens random (relative change 0.73) unless zeroed; with it zeroed, train-mode tokens vs eval fp32: TF32 0.4 % (cos 1.0001), bf16 autocast 13 % (cos 0.982); encoder fwd + bwd peak 4.95 GB (micro-batch 2, checkpointing). Pod timings of the three precisions: pending (`r1_frames.py bench` on the pod).
 
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.

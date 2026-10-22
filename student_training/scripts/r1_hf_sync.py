@@ -24,24 +24,24 @@ PATTERNS = ("train_log.jsonl", "epoch_*.pt", "best.pt", "done.B_*", "top3.txt", 
 SUBDIRS = ("B", "logs", ".")                           # chain B, the logs, and the done.* markers at the top of <dir>
 
 
-def candidates(root: Path):
+def candidates(root: Path, subdirs=SUBDIRS, patterns=PATTERNS):
     seen = set()
-    for sub in SUBDIRS:
+    for sub in subdirs:
         base = root if sub == "." else root / sub
         if not base.exists():
             continue
         walk = [(base, [], [f.name for f in base.iterdir() if f.is_file()])] if sub == "." else os.walk(base)
         for d, _, names in walk:
             for n in names:
-                if any(fnmatch.fnmatch(n, p) for p in PATTERNS):
+                if any(fnmatch.fnmatch(n, p) for p in patterns):
                     p = Path(d) / n
                     if p not in seen:
                         seen.add(p)
                         yield p
 
 
-def push_once(api, root, repo, prefix, min_age=20.0, dry=False):
-    files = [p for p in candidates(root) if time.time() - p.stat().st_mtime > min_age]
+def push_once(api, root, repo, prefix, min_age=20.0, dry=False, subdirs=SUBDIRS, patterns=PATTERNS):
+    files = [p for p in candidates(root, subdirs, patterns) if time.time() - p.stat().st_mtime > min_age]
     rels = {p: f"{prefix}/{p.relative_to(root).as_posix()}" for p in files}
     remote = {}
     if files and not dry:
@@ -97,6 +97,8 @@ def main():
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--loop", type=int, default=0, help="push: repeat every N seconds until killed")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--subdirs", default=",".join(SUBDIRS), help="push: sub-directories of --dir to watch ( . = the top level), comma-separated (plan 2026-10-20: R2,R1,D2P1,D2,logs,.)")
+    ap.add_argument("--patterns", default=",".join(PATTERNS), help="push: file name patterns, comma-separated")
     a = ap.parse_args()
     root = Path(a.dir)
     api = None
@@ -107,7 +109,7 @@ def main():
         pull(api, root, a.repo, a.prefix)
         return
     while True:
-        push_once(api, root, a.repo, a.prefix, dry=a.dry_run)
+        push_once(api, root, a.repo, a.prefix, dry=a.dry_run, subdirs=tuple(a.subdirs.split(",")), patterns=tuple(a.patterns.split(",")))
         if not a.loop:
             break
         time.sleep(a.loop)

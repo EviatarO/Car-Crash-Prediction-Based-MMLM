@@ -118,10 +118,21 @@ One line per rejected option so it is not re-proposed. Full reasoning for Juneâ€
 - **Retraining P1aug per seed** (3.5 h, needs the deleted frame-shifted features) -> seeds vary only P1fixR + P2V; stated as a limit.
 - **Lower learning rates to delay over-fitting** -> tried in chain B, did not help.
 
+### Stages 1-3 (user decisions 2026-10-20..22)
+- **Fusion of the crash and reasoning scores (fixed w, learned gate, pick-the-confident-path, calibrated selection, small MLP)** -> closed: best +0.0024 val core AUC, gate +0.005 not met; a gate trained on the train sample is worse because both models are over-fitted there.
+- **Crash-head attention as a projector input (B4) as the final model** -> its text gain (motion +0.04, gap +0.06) does not carry the decision (-0.006) and it needs the crash path at inference; the reasoning model must be self-contained (user rule: no crash head at all).
+- **Single-stage Phase 1 on P1fixR's data** -> worse than the two-step Phase 1 (0.948 vs 0.959 val core AUC); the control keeps the two steps.
+- **bf16 autocast for the encoder while training** -> changes the tokens by 13 % vs the evaluation fp32 tokens; fp32 with TF32 matmuls (0.4 %) is the default.
+- **Test sets for choosing between recipes** -> never; the control-vs-P2V question is answered at the final seeds stage in one test pass (P2V's recipe is not reproducible anyway).
+- **Seeds before the remaining experiments** -> seeds come last (after stage 3 and 3.1), 5 end-to-end seeds of the final recipe.
+- **Control seed 1 (extra pod)** -> skipped for cost; the control is one run (0.9592), judged against the single-stage seed spread.
+- **Encoder-only vs joint stage 3** -> both run (two pods). The "a frozen projector breaks when the encoder shifts" argument does not apply when the encoder is trained THROUGH the frozen reader, but joint training is the standard recipe and may help.
+- **Bigger pods / 3 streams on one pod** -> not needed; one 32 GB GPU holds two Phase-1/2 streams (27 GB); stage 3 needs one pod per arm.
+
 ## Unresolved (need the user)
-000. **Rewordings: style vs diversity.** A lot of rewordings are rejected by the judge; the user suspects slang / colloquial style rather than added information. Should training text be one uniform format, or does diversity help? Needs the rejection-reason breakdown first, then possibly relaxed rules or the spare (4th+) versions, tested by a training run. Pending answer.
-001. **Seeds plan:** 4 new seeds (recommended) or 2; reuse the current pod or a new one. Asked 2026-10-20.
-002. **After chain B + seeds:** ensemble of P2V seeds as the final model, a regularised Phase 2 (best epoch is always the first), or the write-up; fusion with the crash model; threshold on validation.
+000. **Rewordings: style vs diversity** (answered with data: judge rejects are 88 % nuance rules 3-6, 12 % hard facts; D2 with 27 % more versions did not move the decision).
+001. **Stage-3 precision** after the pod benchmark: TF32 fp32 (default) vs plain fp32 vs bf16 (not recommended); the user decides from the measured seconds per step.
+002. **After stage 3:** 3.1 (motion / gap auxiliary loss) on the winning base, then the 5-seed final run; whether the final test pass also scores B4 as a pre-committed explanation-oriented model.
 003. **Pass 2 of the test teacher reasoning** after the user's review of the 20-window pilot.
 01. **Continuation list** (Phase-1 plan section 5): direct fact signal (structured fields vs auxiliary loss), short reasoning, attention / layer 11 on the new base; ViT-L LoRA fine-tune of the encoder; motion/gap loss.
 02. (superseded by 003) test-set teacher reasoning on hold.
