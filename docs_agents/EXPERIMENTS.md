@@ -204,7 +204,16 @@ Decision gate (B4 >= control + 0.005) not met (-0.0058). Text gate nearly met (+
 ONE projector stage from random on P1fixR's data (pre-alert dropped, TTE-balanced, reasoning first; <= 10 ep, patience 2, lr 1e-3), then P2V as the control. One pod, two parallel seeds, ~6.5 h.
 Val core / full AUC: seed 0 0.9515 / 0.9494, seed 1 0.9451 / 0.9461 (mean 0.9483 / 0.9478, spread 0.0064); control 0.9592 / 0.9577. BERTScore 0.415 / 0.418 vs 0.426; mean4 facts 0.594 / 0.596 vs 0.606. **Rule: difference 0.0109 > band max(0.005, 0.0064) -> the control (two-step Phase 1) is selected.** Dropping pre-alert windows inside Phase 1 did not help.
 
-### 2x. Stage 3 (encoder LoRA trained by the LM loss only; code done, no result yet) - see PROJECT_STATE "Stage 3"
+### 2x. Stage 3 (encoder LoRA trained by the LM loss only) - 2026-10-22, NEGATIVE
+Config: `ARM=J|E bash r1_pod_stage3.sh` (RTX PRO 4500 32 GB, one pod per arm); warm start = control P2V (`checkpoints/b4_2026-10-21/CT/P2V/best.pt`); encoder = A1 epoch_02 LoRA, 144 encoder LoRA matrices train; J lr enc / projector / LM LoRA 5e-5 / 1e-5 / 5e-5, E encoder only 5e-5 (`--freeze-reader`); fp32 (TF32 while training); micro-batch 2 x accum 8 = 16; 142 steps / epoch, max 6 epochs, patience 2 on val loss; unscored checkpoints every 0.25 epoch, refinement +-0.25 / +-0.5 around the best epoch.
+Parity: GPU normalisation vs processor 4.8e-7; tokens vs the old cache rel. mean 1.94 % (max 2.87 %), cosine min 0.99856; epoch-0 val loss 1.0779 (control 1.078), decision AUC 0.9593.
+Bench (pod, s per micro-batch-2 encoder fwd+bwd): fp32 0.38, fp32_strict 0.38, bf16 0.24-0.27; token change vs eval fp32: TF32 0.5 %, bf16 ~15 %.
+| val core decision AUC | ep 0 | ep 1 | ep 2 | +0.25 | +0.50 |
+|---|---|---|---|---|---|
+| J | 0.9593 | 0.9572 | 0.9590 | 0.9593 | 0.9580 |
+| E | 0.9593 | 0.9583 | 0.9591 | 0.9591 | 0.9592 |
+Val loss J 1.153 / 1.189 (train 0.73 / 0.74), E 1.086 / 1.086 at epochs 1 / 2; early stop after epoch 2, best = epoch 0. Update ratio encoder LoRA 0.015-0.027, token cosine vs start 0.998. Gate (core >= 0.9642, full >= 0.9577) not met by either arm. Re-encode + val / train600 evaluations ran on the epoch-0 encoder; text / BERTScore, token drift on the new cache: skipped (pods stopped on request).
+Outputs: `outputs/stage3_2026-10-22/{J,E}/` (local only; `summary.md`); HF `checkpoints/stage3_2026-10-22/{J,E}/live` holds only the background-synced files (final push hit the HF commit rate limit).
 Measurements made while building it (real BADAS weights, local GPU): encoder-only tokens == cached tokens after fp16 rounding (0.0); stochastic depth 0.1 makes train-mode tokens random (relative change 0.73) unless zeroed; with it zeroed, train-mode tokens vs eval fp32: TF32 0.4 % (cos 1.0001), bf16 autocast 13 % (cos 0.982); encoder fwd + bwd peak 4.95 GB (micro-batch 2, checkpointing). Pod timings of the three precisions: pending (`r1_frames.py bench` on the pod).
 
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)

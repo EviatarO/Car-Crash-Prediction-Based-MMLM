@@ -498,6 +498,40 @@ def main():
         assert r.returncode == 3 and r.stdout.split()[:2] == ["check_0.50.pt", "0.5"], "best at or before epoch 1.0 -> exit 3 -> R1 runs"
     print("21 ok: best check point by validation AUC (ties -> earlier); exit code 0 / 3 = after / at-or-before epoch 1.0")
     print("20 ok: relaxed rewordings admit only nuance-rule (3-6) rejects without a new contact word; hard-fact / unreadable / duplicate / unknown-window rejects stay out")
+
+    # 24 - stage 4 (plan 2026-10-22 rev 3): ensemble = mean log-odds; rules R1 / R3; the test reference rule; the reference manifest reaches the evaluator
+    import r1_seed_report as SR
+    import r1_test_refs as TR
+    a_ = [{"id": "w1", "label": 1, "s_first": 2.0}, {"id": "w2", "label": 0, "s_first": -1.0}, {"id": "w3", "label": 0, "s_first": 0.5}]
+    b_ = [{"id": "w2", "label": 0, "s_first": -3.0}, {"id": "w1", "label": 1, "s_first": 4.0}]
+    ens = {r["id"]: r["s_first"] for r in SR.ensemble_rows([a_, b_])}
+    assert ens == {"w1": 3.0, "w2": -2.0}, ens                                          # log-odds mean over the windows every seed scored
+    ok, gain, above, need = SR.rule_r1([0.925, 0.922, 0.930, 0.918, 0.926], 0.911)
+    assert ok and abs(gain - 0.0132) < 1e-9 and (above, need) == (5, 4), (ok, gain, above, need)
+    ok, gain, above, need = SR.rule_r1([0.930, 0.905, 0.935, 0.909, 0.931], 0.911)
+    assert not ok and above == 3 and need == 4 and gain > 0.010, (ok, gain, above)     # gain big enough, but only 3 of 5 above -> not established
+    assert not SR.rule_r1([0.915, 0.916, 0.918, 0.917, 0.914], 0.911)[0]               # all above, gain 0.005 < 0.010
+    assert SR.rule_r1([0.93, 0.925, 0.92], 0.911)[3] == 2                                 # fewer seeds: n - 1 must be above
+    assert SR.rule_r3(0.935, [0.92, 0.925, 0.926]) and not SR.rule_r3(0.927, [0.92, 0.925, 0.926])
+    p1 = {"00001_hires": ({"collision": "yes", "explanation": "A car brakes ahead.", "risk_score": 80}, "A collision follows."),
+          "00002_hires": ({"collision": "yes", "explanation": "A van turns.", "risk_score": 70}, "A collision follows.")}
+    assert TR.reference(p1, "00001_hires", 1)[0] == ("A car brakes ahead.", "A collision follows.", 80)
+    assert TR.reference(p1, "00002_hires", 0) == (None, "pass-1 verdict disagrees with the label")
+    assert TR.reference(p1, "00003_hires", 1) == (None, "no pass-1 answer")
+    refs = TR.REFS["private"]
+    if refs.exists():
+        import importlib
+        import os as _os
+        _os.environ["R1_TEST_MANIFEST"] = str(refs)
+        import r1_data as RD
+        importlib.reload(RD)
+        assert RD.MANIFEST["nexar_reasoning_test"] == refs and RD.MANIFEST["nexar_reasoning_test_public"].name == "r1_nexar_reasoning_test_public.jsonl"
+        del _os.environ["R1_TEST_MANIFEST"]
+        importlib.reload(RD)
+        rows = [json.loads(l) for l in open(refs, encoding="utf-8")]
+        assert len(rows) == 431 and all(r["gt"]["explanation"] and r["gt"]["status"] == "pass1_agreed" for r in rows), len(rows)
+    print("24 ok: stage 4: ensemble = mean log-odds over common windows; R1 needs gain >= 0.010 AND 4 of 5 above; R3 needs best seed and mean + 0.008; "
+          "a test reference only where pass 1 agrees with the label (private 431); R1_TEST_MANIFEST reaches the evaluator")
     print("ALL OK")
 
 

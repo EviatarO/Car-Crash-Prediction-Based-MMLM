@@ -127,12 +127,13 @@ One line per rejected option so it is not re-proposed. Full reasoning for Juneâ€
 - **Seeds before the remaining experiments** -> seeds come last (after stage 3 and 3.1), 5 end-to-end seeds of the final recipe.
 - **Control seed 1 (extra pod)** -> skipped for cost; the control is one run (0.9592), judged against the single-stage seed spread.
 - **Encoder-only vs joint stage 3** -> both run (two pods). The "a frozen projector breaks when the encoder shifts" argument does not apply when the encoder is trained THROUGH the frozen reader, but joint training is the standard recipe and may help.
+- **Encoder LoRA trained by the LM loss only (stage 3, arms J and E)** -> ran 2026-10-22: no point beat the unchanged encoder (best 0.9593 = start; gate 0.9642); J over-fits, E flat. Do not repeat without a new training signal.
+- **bf16 to speed up the encoder** -> saves ~1 s of ~8.4 s per optimizer step; not worth the 15 % token change.
 - **Bigger pods / 3 streams on one pod** -> not needed; one 32 GB GPU holds two Phase-1/2 streams (27 GB); stage 3 needs one pod per arm.
 
 ## Unresolved (need the user)
 000. **Rewordings: style vs diversity** (answered with data: judge rejects are 88 % nuance rules 3-6, 12 % hard facts; D2 with 27 % more versions did not move the decision).
-001. **Stage-3 precision** after the pod benchmark: TF32 fp32 (default) vs plain fp32 vs bf16 (not recommended); the user decides from the measured seconds per step.
-002. **After stage 3:** 3.1 (motion / gap auxiliary loss) on the winning base, then the 5-seed final run; whether the final test pass also scores B4 as a pre-committed explanation-oriented model.
+002. **After stage 3 (negative):** stage 4 = 5 end-to-end seeds of the control recipe + test sets once (user asked for the plan 2026-10-22); 3.1 (motion / gap auxiliary loss) only if text faithfulness becomes the headline; whether the final test pass also scores B4 as a pre-committed explanation-oriented model.
 003. **Pass 2 of the test teacher reasoning** after the user's review of the 20-window pilot.
 01. **Continuation list** (Phase-1 plan section 5): direct fact signal (structured fields vs auxiliary loss), short reasoning, attention / layer 11 on the new base; ViT-L LoRA fine-tune of the encoder; motion/gap loss.
 02. (superseded by 003) test-set teacher reasoning on hold.

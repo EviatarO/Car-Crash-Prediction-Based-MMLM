@@ -50,20 +50,26 @@ def push_once(api, root, repo, prefix, min_age=20.0, dry=False, subdirs=SUBDIRS,
                 remote[x.path] = x.size
     todo = [p for p in files if remote.get(rels[p]) != p.stat().st_size]
     sent = 0
-    for p in todo:
-        if dry:
+    if dry:
+        for p in todo:
             print(f"[sync] would upload {rels[p]} ({p.stat().st_size} bytes)")
-            continue
+    elif todo:
+        # ONE commit per pass (2026-10-22): HF allows 128 commits / hour per repo, and one commit per file from two pods hit that limit
+        from huggingface_hub import CommitOperationAdd
+        sizes = {p: p.stat().st_size for p in todo}
         try:
-            size = p.stat().st_size
-            api.upload_file(path_or_fileobj=str(p), path_in_repo=rels[p], repo_id=repo, repo_type="model")
-            got = {x.path: x.size for x in api.get_paths_info(repo, [rels[p]], repo_type="model")}
-            if got.get(rels[p]) == size:
-                sent += 1
-            else:
-                print(f"[sync] size mismatch after uploading {rels[p]} (local {size}, remote {got.get(rels[p])}); retried next pass", flush=True)
+            api.create_commit(repo, operations=[CommitOperationAdd(path_in_repo=rels[p], path_or_fileobj=str(p)) for p in todo],
+                              commit_message=f"sync {prefix}: {len(todo)} files", repo_type="model")
+            got = {}
+            for i in range(0, len(todo), 200):
+                got.update({x.path: x.size for x in api.get_paths_info(repo, [rels[p] for p in todo[i:i + 200]], repo_type="model")})
+            for p in todo:
+                if got.get(rels[p]) == sizes[p]:
+                    sent += 1
+                else:
+                    print(f"[sync] size mismatch after uploading {rels[p]} (local {sizes[p]}, remote {got.get(rels[p])}); retried next pass", flush=True)
         except Exception as e:                                                   # noqa: BLE001  never stop the run
-            print(f"[sync] upload of {rels[p]} failed: {type(e).__name__}: {str(e)[:120]}; retried next pass", flush=True)
+            print(f"[sync] commit of {len(todo)} files failed: {type(e).__name__}: {str(e)[:160]}; retried next pass", flush=True)
     print(f"[sync] {time.strftime('%H:%M:%S')}: {len(files)} candidate files, {len(todo)} to upload, {sent} uploaded", flush=True)
     return sent
 

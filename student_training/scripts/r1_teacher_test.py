@@ -15,6 +15,7 @@ Gemini 3.8 Flash on OpenRouter, Flex tier. Everything lives in outputs/teacher_t
     python r1_teacher_test.py e3 --model google/gemini-3.8-flash --tier flex [--limit N] [--dry-run]
     python r1_teacher_test.py e8 --model google/gemini-3.8-flash --tier flex [--pilot 20 --ids 00352,00367] [--dry-run]
     python r1_teacher_test.py final
+    python r1_teacher_test.py e3 --split public --concurrency 64     # stage 4 (2026-10-22): pass 1 on the PUBLIC windows -> outputs/teacher_test_public_2026-10/runs/
 """
 from __future__ import annotations
 
@@ -30,7 +31,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-OUT = ROOT / "outputs" / "teacher_test_2026-10"
+# plan 2026-10-22 stage 4: --split public = the same pass on the PUBLIC test windows, in their own folder (windows.jsonl = windows_public.jsonl, boxed/ from
+# r1_attention_boxes.py --stage boxes with R1_PILOT_OUT set to it); read before argparse because every path below hangs on it
+SPLIT = "public" if "--split=public" in sys.argv or any(a == "--split" and sys.argv[i + 1:i + 2] == ["public"] for i, a in enumerate(sys.argv)) else "private"
+OUT = ROOT / "outputs" / ("teacher_test_public_2026-10" if SPLIT == "public" else "teacher_test_2026-10")
 os.environ.setdefault("R1_PILOT_OUT", str(OUT))
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT))
@@ -226,6 +230,7 @@ def final(args):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["e3", "e8", "final"])
+    ap.add_argument("--split", choices=["private", "public"], default="private", help="test half (read at import time: sets the folder)")
     ap.add_argument("--model", default="google/gemini-3.8-flash")
     ap.add_argument("--tier", choices=["standard", "flex"], default="flex")
     ap.add_argument("--concurrency", type=int, default=16)

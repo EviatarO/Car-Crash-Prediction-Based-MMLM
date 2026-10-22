@@ -28,6 +28,11 @@ MANIFEST = {"nexar": ROOT / "dataset" / "manifests" / "r1_nexar_v12_windows.json
 # new chains, the extra-only one when only the new windows are encoded); unset = the original manifest, so every old command behaves as before.
 if __import__("os").environ.get("R1_REASONING_MANIFEST"):
     MANIFEST["nexar_reasoning"] = Path(__import__("os").environ["R1_REASONING_MANIFEST"])
+# plan 2026-10-22 stage 4: the test manifests with the teacher's pass-1 text filled in (only the windows whose pass-1 verdict = the label; r1_test_refs.py),
+# for the loss / gap / retrieval metrics of the test windows; unset = the reference-free manifests
+for _k, _e in (("nexar_reasoning_test", "R1_TEST_MANIFEST"), ("nexar_reasoning_test_public", "R1_TEST_PUBLIC_MANIFEST")):
+    if __import__("os").environ.get(_e):
+        MANIFEST[_k] = Path(__import__("os").environ[_e])
 
 
 class Cache:

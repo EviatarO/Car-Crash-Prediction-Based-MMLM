@@ -11,7 +11,7 @@ approaching BADAS (Kaggle mAP: BADAS-1.0 0.925, BADAS-2.0 0.940, BADAS-2.0-Flash
 Work lives on branch `reasoning-path-vjepa2-llm` (root `README.md` = goal + folder map). Model names for the presentation: crash model "BADAS-Open (SFT)", reasoning model "BADAS-JEPA-Reason".
 
 ## Standing rules of the user (binding)
-- Never print API keys / the HF token (copy by scp only). **Claude never pushes git** unless the user asks for that push (git push failed once: the user's `id_ed25519_private` key needs a passphrase; the user pushes). Commit only on request.
+- Never print API keys / the HF token (copy by scp only). **Claude never pushes git** unless asked; Claude's push fails anyway (`github-private` -> `id_ed25519_private` is rejected / needs a passphrase): Claude commits on request, **the user pushes**.
 - **The USER creates pods**; Claude copies code, launches the driver, drivers push logs to HF and **STOP THE POD on any major failure or after the HF byte check** (user rule 2026-10-22). Hourly health check while the session is open (CronCreate, session-only; delete the job when a run ends). Never edit a bash driver while it runs (bash re-reads it: that killed a run). Confirm before any spend beyond the approved amount.
 - **Validation only** for every experiment until the final seeds stage; test sets scored ONCE at the end (pre-alert windows removed from training and scores; object crop excluded; test texts never for training / selection).
 - **No crash head at all** in training or at inference of the reasoning model (single path: encoder -> projector -> language model); crash model and reasoning model stay two separate architectures; fusion is closed.
@@ -31,6 +31,7 @@ A1-compress256: pooled test AP 0.911 / AUC 0.913 / Kaggle mAP 0.916 (private 0.9
 | R2 / D2 (stage 1) | 0.951 / 0.952 | 0.948 / 0.950 |
 | B4 (crash-head attention input) / **control** (D2 recipe, fresh two-step Phase 1) | 0.953 / **0.959** | 0.952 / **0.958** |
 | single-stage recipe, seeds 0 / 1 | 0.952 / 0.945 | 0.949 / 0.946 |
+| stage 3 encoder LoRA, arm J / arm E (best scored point after epoch 0) | 0.9593 / 0.9592 | not scored |
 | crash model | 0.957 | 0.956 |
 - **Selected base = the control** (pre-registered rule: single-stage mean 0.948 vs control 0.959, difference > noise band 0.0064). Its P2V checkpoint: HF `checkpoints/b4_2026-10-21/CT/P2V/best.pt` (val loss 1.078).
 - Over-fitting is the measured problem (train AUC ~0.99 vs val 0.95; best epoch always early). Nothing changed the decision by more than ~0.006 AUC; recipe-to-recipe noise is ~0.007.
@@ -40,21 +41,18 @@ A1-compress256: pooled test AP 0.911 / AUC 0.913 / Kaggle mAP 0.916 (private 0.9
 ### Datasets (private HF org `eviatarO-org`)
 Teacher dataset 4,169 windows (`outputs/teacher_dataset_2026-10/`), extra windows 860 at TTE 0.75 / 1.25 s (`outputs/teacher_extra_2026-10/`), rewordings (accepted 9,497 + nuance-only judge rejects 2,585 = `paraphrases_relaxed.jsonl`, 12,082 versions), manifests `dataset/manifests/r1_nexar_reasoning_{windows,extra,v2,test,test_public}.jsonl`. HF window repo `nexar-reasoning-windows` (uint8 16x256x256x3 frames of all 4,169 windows). Test sets: private 677 + public 667; 431 private windows have a teacher reference (pass 2 not run; the 20-window pass-2 pilot awaits the user's review).
 
-### Stage 3 (IN PROGRESS: code done, two pod attempts failed early, not yet running)
-Plan `~/.claude/plans/CCP based BADAS/2026-10-22_Plan-Stage3-Encoder-LoRA.md`: the V-JEPA2 encoder's LoRA (144 matrices, rank 16 q/k/v, 2.36 M params) trains with the language model's loss ONLY, warm start = the control. Two arms on two pods:
-**J** (encoder LoRA + projector + LM LoRA; lr 5e-5 / 1e-5 / 5e-5) and **E** (encoder LoRA only; projector + LM LoRA frozen; the clean diagnostic). <= 6 epochs, early stop patience 2, unscored checkpoint every 0.25 epoch + local refinement around the winning epoch, epoch-0 parity check (must reproduce the control's val loss 1.078 +- 0.01).
-Gates: an arm wins at val core AUC >= 0.9642 and val full >= 0.9577 (control + 0.005).
-- Code written + unit-tested (23 tests pass; 21 Oct run of the whole suite): `r1_frames.py`, `r1_train.py` stage-3 options, `r1_pod_stage3.sh` (arm via `ARM=J|E`).
-- **Pod attempts (22 Oct) both stopped within ~10 min**: pod 1 by the driver's own fail-safe (cause not read: likely the encoder-only parity check, because TF32 had been switched on globally; logs were lost to the 20-s age rule, now fixed), pod 2 because the driver file was overwritten while running. Both fixed; **no stage-3 result exists**.
-- Findings that matter for stage 3: (1) the V-JEPA2 config has **stochastic depth 0.1 and dropouts: in train mode the tokens change by 73 % and are random** -> `OnlineEncoder` zeroes drop-path / dropout and runs the net in train mode only while gradients flow (needed for gradient checkpointing); (2) encoder precision: TF32 fp32 token change 0.4 % vs eval fp32, **bf16 autocast 13 %** (cos 0.982) -> fp32 required; `--enc-precision fp32|fp32_strict|bf16` (default fp32 = TF32 while training, plain fp32 for eval / re-encoding); the driver waits up to 60 min after the smoke test for `$OUT/PRECISION` (default fp32) and runs `r1_frames.py bench` (timings + token errors for all three).
-- Encoder-only tokens == cached tokens exactly after fp16 rounding (checked on real BADAS weights); GPU normalisation == processor (4.8e-7); gradients reach all 144 LoRA matrices; peak 4.95 GB at micro-batch 2 with checkpointing on the 6 GB laptop GPU.
+### Stage 3 (DONE 2026-10-22: NEGATIVE)
+Plan `~/.claude/plans/CCP based BADAS/2026-10-22_Plan-Stage3-Encoder-LoRA.md`: the V-JEPA2 encoder's LoRA (144 matrices, rank 16 q/k/v, 2.36 M params) trained by the language model's loss ONLY, warm start = the control. Arms **J** (encoder LoRA + projector + LM LoRA) and **E** (encoder LoRA only). Gate: val core AUC >= 0.9642 and val full >= 0.9577.
+- **No scored point beat epoch 0** (core AUC 0.9572-0.9593 vs start 0.9593); J over-fits (val loss 1.078 -> 1.153 / 1.189), E is flat (1.086). Early stop after epoch 2; best = epoch 0 = the unchanged encoder. The encoder did move (update ratio 0.015-0.027, token cosine 0.998). **The control stays the base.** Numbers: EXPERIMENTS.md "Stage 3"; files `outputs/stage3_2026-10-22/` (local only).
+- Lasting facts for any online-encoder work: (1) V-JEPA2 config has stochastic depth 0.1 + dropouts (train-mode tokens change 73 %) -> `OnlineEncoder` zeroes them, train mode only while gradients flow; (2) precision: TF32 0.5 % token change vs eval fp32, bf16 15 % -> fp32 (TF32 while training); bf16 saves only ~1 s of ~8.4 s per optimizer step; (3) **the old feature cache is NOT bit-reproducible**: today's encoder differs from it by ~2 % relative (cos 0.9986) on pod and laptop GPUs; the functional check is the epoch-0 val loss (1.078 +- 0.01, reproduced: 1.0779, AUC 0.9593).
+- Cost / pace: RTX PRO 4500 32 GB, micro-batch 2, peak 12.7 GB, ~8.4 s / optimizer step (142 steps / epoch, ~20 min / epoch).
 
 ## Open TODOs (in order)
-1. **Restart two pods** (32 GB GPU RTX PRO 4500, 100 GB disk, no network volume), send SSH lines -> I read the real port through the proxy line (`cat /proc/1/environ | grep RUNPOD_TCP_PORT_22`; the console port was wrong twice), copy code + token (scp), `r1_pod_run.sh setup`, run `ARM=J` / `ARM=E bash r1_pod_stage3.sh` (never edit it afterwards), report the smoke test + `bench_precision.json` to the user, write `$OUT/PRECISION` after the user decides, re-create the hourly cron. ETA ~6-10 h per arm (fp32 slower than bf16: measure), ~$10-18 for both.
-2. After stage 3: report with gates (val core / full AUC, text, fact cards locally via `r1_fact_cards.py --source model`, token drift, fact probe before / after). Then 3.1 (motion / gap auxiliary loss on the winning base) as its own plan, then **stage 4: 5 seeds of the final recipe end to end, test sets once (seeds + ensemble vs crash model and BADAS-2.0; P2V as reference)**.
+1. **User decision pending:** stage 4 (5 end-to-end seeds of the control recipe, test sets ONCE: seeds + ensemble vs crash model and BADAS-2.0, P2V as reference) now, or 3.1 (motion / gap auxiliary loss) first as its own plan. Recommendation given: stage 4 first (decision AUC has been flat at ~0.959 across every change; 3.1 would mainly help text faithfulness).
+2. Write the plan file + driver + dry run for the chosen stage; the user opens pods.
 3. Presentation website: Home page built (`website_pres/`); other pages follow in later rounds; user reviews wording (hero subtitle "causal reasoning", problem / solution text).
 4. Review the 20-window pass-2 pilot with the user; open: P2V threshold chosen on validation, regularised Phase 2 variants, controls, faithfulness test, pre-alert human review.
-5. Housekeeping: RunPod network volume (63 GB, $4.41/mo) unverified; HF private storage near the 100 GB limit (do not push epoch checkpoints); unsent access requests (DRAMA, WTS, RoadSafe365, MM-AU authors).
+5. Housekeeping: RunPod network volume (63 GB, $4.41/mo) unverified; HF private storage near the 100 GB limit (do not push epoch checkpoints); HF commit rate limit is 128 commits / hour per repo (two pods syncing + file-by-file uploads hit it: upload folders in one commit); unsent access requests (DRAMA, WTS, RoadSafe365, MM-AU authors).
 
 ## Known bugs / gotchas
 - **A smoke test must use options valid for its epoch count** (`--eval-at` fractions above `--epochs` abort); DRYRUN only prints commands: rehearse every training / eval command on a tiny model (`--lm tiny --device cpu`) before a pod run.
@@ -68,7 +66,7 @@ Gates: an arm wins at val core AUC >= 0.9642 and val full >= 0.9577 (control + 0
 - Crash-path gotchas: `history/2026-09_PROJECT_STATE.md`.
 
 ## Pod state
-Nothing should be running. Stage-3 pods `8n0e7usyf48b0b` and `aap202i5ku6luw` stopped (22 Oct); earlier pods stopped themselves after the HF byte check. A new pod is created by the USER; Claude copies code with `tar ... | ssh ... tar xzf - --no-same-owner`, the HF token by scp.
+Nothing is running. Stage-3 pods `otx4rtbdiql3lt` (J) and `uslgw2gcv1sxe8` (E) stopped by Claude on 22 Oct after training ended (remaining driver stages skipped on the user's request); no cron job is active. When killing a driver by name over ssh, `pkill -f <name>` also matches the ssh shell's own command line: kill by PID. A new pod is created by the USER; Claude copies code with `tar ... | ssh ... tar xzf - --no-same-owner`, the HF token by scp.
 
 ## Important commands (from `MMLM_AI/`, scripts in `student_training/scripts/`)
 ```bash
@@ -84,7 +82,7 @@ PYTHONUTF8=1 python website_pres/build_pres_data.py # presentation site data (as
 Older commands (teacher flow, caching, probes): scripts' docstrings and `history/`.
 
 ## Git state
-Branch `reasoning-path-vjepa2-llm`; three commits on 2026-10-20 (`e2e3759`, `5a6ffc6`, `d873c74`); the push failed (passphrase) and may still be pending: check `git status -sb`. **Uncommitted since:** `r1_train.py` / `r1_eval_reasoning.py` options, `r1_fusion*.py`, `r1_best_check.py`, `r1_relaxed_paraphrases.py`, `r1_frames.py`, `r1_pod_{next,b4,base,stage3}.sh`, `r1_hf_sync.py`, `r1_reasoning_test.py`, `website_pres/`. Commit only when the user asks.
+Branch `reasoning-path-vjepa2-llm`, pushed (by the user) at `1f70adb` (stage-3 code, pod drivers, fusion / best-check / relaxed-paraphrase scripts, tests, docs, `website_pres/`). Uncommitted after that: this handoff refresh of `docs_agents/`. `outputs/` is git-ignored.
 
 ## Next step
-Get two pods from the user and run stage 3 (TODO 1). Do not relaunch without reading `bench_precision.json` and the smoke result to the user.
+Get the user's choice for TODO 1 (stage 4 vs 3.1), then write its plan file in `~/.claude/plans/CCP based BADAS/`.
