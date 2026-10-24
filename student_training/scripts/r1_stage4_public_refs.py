@@ -64,7 +64,7 @@ def main():
     print("[3] pass 1 (resumes where it stopped)", flush=True)                                 # 3 + 4 resume by themselves
     run([py, "r1_teacher_test.py", "e3", "--split", "public", "--tier", "flex", "--concurrency", a.concurrency] + (["--dry-run"] if a.dry_run else []), env, False)
     print("[4] outcome sentences", flush=True)
-    run([py, "r1_add_prediction.py", "--run", "E3", "--tier", "flex", "--concurrency", a.concurrency], env, a.dry_run)
+    run([py, "r1_add_prediction.py", "--run", "E3", "--model", "google/gemini-3.8-flash", "--tier", "flex", "--concurrency", a.concurrency], env, a.dry_run)
     print("[5] reference manifest", flush=True)
     run([py, "r1_test_refs.py", "manifest", "--split", "public"], None, a.dry_run)
     print("[6] upload the references", flush=True)                                            # 6

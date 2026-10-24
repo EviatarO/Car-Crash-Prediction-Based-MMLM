@@ -216,6 +216,13 @@ Val loss J 1.153 / 1.189 (train 0.73 / 0.74), E 1.086 / 1.086 at epochs 1 / 2; e
 Outputs: `outputs/stage3_2026-10-22/{J,E}/` (local only; `summary.md`); HF `checkpoints/stage3_2026-10-22/{J,E}/live` holds only the background-synced files (final push hit the HF commit rate limit).
 Measurements made while building it (real BADAS weights, local GPU): encoder-only tokens == cached tokens after fp16 rounding (0.0); stochastic depth 0.1 makes train-mode tokens random (relative change 0.73) unless zeroed; with it zeroed, train-mode tokens vs eval fp32: TF32 0.4 % (cos 1.0001), bf16 autocast 13 % (cos 0.982); encoder fwd + bwd peak 4.95 GB (micro-batch 2, checkpointing). Pod timings of the three precisions: pending (`r1_frames.py bench` on the pod).
 
+### 2y. Stage 4: five seeds of the final recipe + one test pass (2026-10-22..23; `outputs/stage4_2026-10-22/summary.md`, HF `checkpoints/stage4_2026-10-22/`)
+Driver `r1_pod_stage4.sh` (two pods, 11.6 h), report `r1_seed_report.py`; seed 0 = the 21-Oct control, seeds 1-4 new. Val core AUC 0.959 / 0.951 / 0.950 / 0.945 / 0.953 (0.952 ± 0.005).
+Pooled test AP 0.917 / 0.913 / 0.915 / 0.912 / 0.908 (0.913 ± 0.003), ensemble 0.927 (AUC 0.930, Kaggle mAP 0.932 [0.915, 0.947]); private seed mean 0.919, public 0.907.
+Crash-model 5-seed ensemble (existing seeds A1-compress256, AA-ctrl-seed1/2, ctrl-seed3/4; post-hoc): 0.908; reasoning ens - crash ens +0.019 [+0.010, +0.029] (`crash_ensemble_check.md`).
+Text on test (references: pass-1 teacher text where its verdict = label, private 431 / public 460): BERTScore 0.422 / 0.421 (floor ~0.33), facts mean4 0.598 / 0.615, gap_wrong +0.29..+0.36, retrieval@10 0.30-0.50.
+Rules: R1 no, R2 P2V outside the seed range, R3 yes, R4 below BADAS-2.0, R5 yes.
+
 ### 2e. Literature facts used (full log: memory `article_reference_log.md`)
 - V-JEPA 2 → LLM (Meta): projector-only stage 1, then full LLM training; 18 M (controlled) / 88.5 M pairs.
 - VL-JEPA: frozen V-JEPA2 ViT-L + Llama-3.2-1B layers predicting text embeddings; separate decoder.

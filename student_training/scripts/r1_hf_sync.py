@@ -74,23 +74,33 @@ def push_once(api, root, repo, prefix, min_age=20.0, dry=False, subdirs=SUBDIRS,
     return sent
 
 
-def pull(api, root, repo, prefix):
+def pull(api, root, repo, prefix, skip=()):
+    """download into a short absolute temp folder, then move (2026-10-24: the old <dir>/_restore/.cache path broke on Windows' path-length limit)."""
+    import shutil
+    import tempfile
     from huggingface_hub import hf_hub_download
     try:
         items = [x for x in api.list_repo_tree(repo, path_in_repo=prefix, recursive=True, repo_type="model") if hasattr(x, "size")]
     except Exception as e:                                                       # noqa: BLE001
         print(f"[sync] nothing to restore ({type(e).__name__})")
         return 0
+    root = root.resolve()
+    tmpdir = tempfile.mkdtemp(prefix="r1s_")
     n = 0
-    for x in items:
-        rel = x.path[len(prefix) + 1:]
-        dst = root / rel
-        if dst.exists() and dst.stat().st_size == x.size:
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = hf_hub_download(repo, x.path, repo_type="model", local_dir=str(root / "_restore"))
-        os.replace(tmp, dst)
-        n += 1
+    try:
+        for x in items:
+            rel = x.path[len(prefix) + 1:]
+            if any(fnmatch.fnmatch(os.path.basename(rel), p) for p in skip):
+                continue
+            dst = root / rel
+            if dst.exists() and dst.stat().st_size == x.size:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = hf_hub_download(repo, x.path, repo_type="model", local_dir=tmpdir)
+            shutil.move(tmp, dst)
+            n += 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
     print(f"[sync] restored {n} files from {repo}/{prefix}")
     return n
 
@@ -105,6 +115,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--subdirs", default=",".join(SUBDIRS), help="push: sub-directories of --dir to watch ( . = the top level), comma-separated (plan 2026-10-20: R2,R1,D2P1,D2,logs,.)")
     ap.add_argument("--patterns", default=",".join(PATTERNS), help="push: file name patterns, comma-separated")
+    ap.add_argument("--skip", default="", help="pull: file name patterns NOT to download, comma-separated (e.g. *.pt on the PC)")
     a = ap.parse_args()
     root = Path(a.dir)
     api = None
@@ -112,7 +123,7 @@ def main():
         from huggingface_hub import HfApi
         api = HfApi()
     if a.mode == "pull":
-        pull(api, root, a.repo, a.prefix)
+        pull(api, root, a.repo, a.prefix, skip=tuple(p for p in a.skip.split(",") if p))
         return
     while True:
         push_once(api, root, a.repo, a.prefix, dry=a.dry_run, subdirs=tuple(a.subdirs.split(",")), patterns=tuple(a.patterns.split(",")))

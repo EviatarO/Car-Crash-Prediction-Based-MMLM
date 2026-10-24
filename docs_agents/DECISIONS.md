@@ -133,7 +133,7 @@ One line per rejected option so it is not re-proposed. Full reasoning for Juneâ€
 
 ## Unresolved (need the user)
 000. **Rewordings: style vs diversity** (answered with data: judge rejects are 88 % nuance rules 3-6, 12 % hard facts; D2 with 27 % more versions did not move the decision).
-002. **After stage 3 (negative):** stage 4 = 5 end-to-end seeds of the control recipe + test sets once (user asked for the plan 2026-10-22); 3.1 (motion / gap auxiliary loss) only if text faithfulness becomes the headline; whether the final test pass also scores B4 as a pre-committed explanation-oriented model.
+002. **After stage 4:** is the P2V recipe (shifted-window Phase 1 + judged rewordings) really better than the final recipe, or was P2V lucky? -> step B (4 seeds, rule fixed 2026-10-24). 3.1 (motion / gap auxiliary loss) only if text faithfulness becomes the headline.
 003. **Pass 2 of the test teacher reasoning** after the user's review of the 20-window pilot.
 01. **Continuation list** (Phase-1 plan section 5): direct fact signal (structured fields vs auxiliary loss), short reasoning, attention / layer 11 on the new base; ViT-L LoRA fine-tune of the encoder; motion/gap loss.
 02. (superseded by 003) test-set teacher reasoning on hold.

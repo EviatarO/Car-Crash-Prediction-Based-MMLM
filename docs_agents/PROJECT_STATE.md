@@ -18,7 +18,7 @@ Work lives on branch `reasoning-path-vjepa2-llm` (root `README.md` = goal + fold
 - Plans: a new file per plan in `~/.claude/plans/CCP based BADAS/`; answer plan questions in chat too; short plain answers, flag < 80 % confidence, state the threshold of every thresholded metric, per-experiment `summary.md`. No Windows power-setting changes. Do not run heavy GPU jobs on the user's laptop (it made the PC crawl).
 - Professor-facing documents: no internal run names. Presentation website: new site `website_pres/`; lab site `website/` keeps every experiment; promotion to the presentation site only when the user says so.
 
-## Status as of 2026-10-22
+## Status as of 2026-10-24
 
 ### Crash path (frozen)
 A1-compress256: pooled test AP 0.911 / AUC 0.913 / Kaggle mAP 0.916 (private 0.9127, public 0.9096). Ledger: EXPERIMENTS.md §1.
@@ -47,9 +47,15 @@ Plan `~/.claude/plans/CCP based BADAS/2026-10-22_Plan-Stage3-Encoder-LoRA.md`: t
 - Lasting facts for any online-encoder work: (1) V-JEPA2 config has stochastic depth 0.1 + dropouts (train-mode tokens change 73 %) -> `OnlineEncoder` zeroes them, train mode only while gradients flow; (2) precision: TF32 0.5 % token change vs eval fp32, bf16 15 % -> fp32 (TF32 while training); bf16 saves only ~1 s of ~8.4 s per optimizer step; (3) **the old feature cache is NOT bit-reproducible**: today's encoder differs from it by ~2 % relative (cos 0.9986) on pod and laptop GPUs; the functional check is the epoch-0 val loss (1.078 +- 0.01, reproduced: 1.0779, AUC 0.9593).
 - Cost / pace: RTX PRO 4500 32 GB, micro-batch 2, peak 12.7 GB, ~8.4 s / optimizer step (142 steps / epoch, ~20 min / epoch).
 
+### Stage 4 (DONE 2026-10-23): five seeds of the final recipe + the test sets once
+Full account: `docs_agents/EXPERIMENT_STATUS_2026-10-24.md`; numbers `outputs/stage4_2026-10-22/summary.md`, report `outputs/stage4_2026-10-22/report_bert/report.md`.
+Pooled test AP: crash model 0.911; reasoning single seed 0.913 ± 0.003 (R1 not established); **5-seed ensemble 0.927 / Kaggle mAP 0.932 [0.915, 0.947]** (R3 yes); crash-model 5-seed ensemble 0.908 (post-hoc) -> reasoning ensemble +0.019 AP [+0.010, +0.029];
+validation 0.952 ± 0.005 (seed 0's 0.959 = selection luck); text above floors for every seed (BERTScore 0.422 / 0.421 vs ~0.33). P2V (0.926, 15 Oct) lies above all 5 seeds -> step B.
+
 ## Open TODOs (in order)
-1. **User decision pending:** stage 4 (5 end-to-end seeds of the control recipe, test sets ONCE: seeds + ensemble vs crash model and BADAS-2.0, P2V as reference) now, or 3.1 (motion / gap auxiliary loss) first as its own plan. Recommendation given: stage 4 first (decision AUC has been flat at ~0.959 across every change; 3.1 would mainly help text faithfulness).
-2. Write the plan file + driver + dry run for the chosen stage; the user opens pods.
+1. **Step B** (plan `~/.claude/plans/CCP based BADAS/2026-10-24_Plan-StepB-P2V-Recipe-Seeds.md`, approved): 4 new full seeds of the P2V recipe (P1aug with frame-shifted windows + judged rewordings -> P1fixR -> P2V), two pods with 150 GB disk, ~14 h, ~$20;
+   decision rule fixed: recipe B better only if mean(B) - mean(A) >= +0.005 AND Welch p < 0.05 over seeds (P2V not counted). Code to write: `r1_pod_stepb.sh`, `r1_seed_report.py --seed0 / compare`.
+2. Write-up claims from stage 4 (see the status document, last section).
 3. Presentation website: Home page built (`website_pres/`); other pages follow in later rounds; user reviews wording (hero subtitle "causal reasoning", problem / solution text).
 4. Review the 20-window pass-2 pilot with the user; open: P2V threshold chosen on validation, regularised Phase 2 variants, controls, faithfulness test, pre-alert human review.
 5. Housekeeping: RunPod network volume (63 GB, $4.41/mo) unverified; HF private storage near the 100 GB limit (do not push epoch checkpoints); HF commit rate limit is 128 commits / hour per repo (two pods syncing + file-by-file uploads hit it: upload folders in one commit); unsent access requests (DRAMA, WTS, RoadSafe365, MM-AU authors).
@@ -66,7 +72,7 @@ Plan `~/.claude/plans/CCP based BADAS/2026-10-22_Plan-Stage3-Encoder-LoRA.md`: t
 - Crash-path gotchas: `history/2026-09_PROJECT_STATE.md`.
 
 ## Pod state
-Nothing is running. Stage-3 pods `otx4rtbdiql3lt` (J) and `uslgw2gcv1sxe8` (E) stopped by Claude on 22 Oct after training ended (remaining driver stages skipped on the user's request); no cron job is active. When killing a driver by name over ssh, `pkill -f <name>` also matches the ssh shell's own command line: kill by PID. A new pod is created by the USER; Claude copies code with `tar ... | ssh ... tar xzf - --no-same-owner`, the HF token by scp.
+Nothing is running. Stage-4 pods `swz9z8wow1b5mf` and `g3r29sg6h94723` stopped themselves after the final push (23 Oct, confirmed by the user); no cron job is active. On the PC, pull results with `r1_hf_sync.py pull --skip '*.pt'` (fixed 24 Oct for Windows path length). When killing a driver by name over ssh, `pkill -f <name>` also matches the ssh shell's own command line: kill by PID. A new pod is created by the USER; Claude copies code with `tar ... | ssh ... tar xzf - --no-same-owner`, the HF token by scp.
 
 ## Important commands (from `MMLM_AI/`, scripts in `student_training/scripts/`)
 ```bash
@@ -82,7 +88,7 @@ PYTHONUTF8=1 python website_pres/build_pres_data.py # presentation site data (as
 Older commands (teacher flow, caching, probes): scripts' docstrings and `history/`.
 
 ## Git state
-Branch `reasoning-path-vjepa2-llm`, pushed (by the user) at `1f70adb` (stage-3 code, pod drivers, fusion / best-check / relaxed-paraphrase scripts, tests, docs, `website_pres/`). Uncommitted after that: this handoff refresh of `docs_agents/`. `outputs/` is git-ignored.
+Branch `reasoning-path-vjepa2-llm`; stage-4 code pushed by the user at `de1098e`; the 24 Oct commit (status document, sync pull fix, public-refs fix, these docs) follows. Claude's pushes are rejected (key): the user pushes. `outputs/` is git-ignored.
 
 ## Next step
-Get the user's choice for TODO 1 (stage 4 vs 3.1), then write its plan file in `~/.claude/plans/CCP based BADAS/`.
+Step B: write `r1_pod_stepb.sh` + the report's `compare`, verify (tests, DRYRUN, tiny model), then the user opens two pods (150 GB disk); unattended run with hourly checks and the escalation rule (fix -> Opus 5.5 -> stop the pod).
