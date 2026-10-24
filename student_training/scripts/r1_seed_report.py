@@ -35,10 +35,25 @@ from r1_phase_report import rouge_l, token_f1  # noqa: E402
 from r1_review_reasoning import bleu4  # noqa: E402
 
 B4 = ROOT / "outputs" / "r1_b4_2026-10-21"
+P1A = ROOT / "outputs" / "r1_phase1aug_2026-10-14" / "phase1aug_2026-10-14"
+P2F = ROOT / "outputs" / "r1_phase2f_2026-10-15" / "phase2f_2026-10-15"
 REFS = {"private": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test_refs.jsonl",
         "public": ROOT / "dataset" / "manifests" / "r1_nexar_reasoning_test_public_refs.jsonl"}
 P2V_TEST = {"private": ROOT / "outputs" / "r1_test_eval_2026-10-17" / "test_eval_2026-10-17" / "P2V" / "results" / "predictions.jsonl",
             "public": ROOT / "outputs" / "r1_test_eval_public_2026-10-18" / "test_eval_public_2026-10-18" / "P2V" / "results" / "predictions.jsonl"}
+# where seed 0 of each recipe lives (it was not trained by the seeds' pods). stage4 = the 2026-10-21 control (seed 0 of the final recipe; its test pass ran on pod 1);
+# p2v = the 2026-10-15 P2V (seed 0 of the P2V recipe, plan 2026-10-24 step B; its test pass = the 17/18-Oct runs; no grounding run on test; val full fetched from HF chains_2026-10-19)
+RECIPES = {
+    "stage4": {"stages": ("P1", "P1fixR", "P2V"),
+               "log": {st: B4 / "CT" / st / "train_log.jsonl" for st in ("P1", "P1fixR", "P2V")},
+               "ev": {k: B4 / "eval" / "CT" / k for k in ("val", "train600", "val_text")},
+               "val_cards": B4 / "cards_CT.jsonl"},
+    "p2v": {"stages": ("P1aug", "P1fixR", "P2V"),
+            "log": {"P1aug": P1A / "P1aug" / "train_log.jsonl", "P1fixR": P2F / "P1fixR" / "train_log.jsonl", "P2V": P2F / "P2V" / "train_log.jsonl"},
+            "ev": {"val": ROOT / "outputs" / "r1_p2v_valfull" / "val", "train600": ROOT / "outputs" / "r1_p2v_report_2026-10-18" / "pod" / "train600",
+                   "val_text": P2F / "P2V" / "results", "test_private": P2V_TEST["private"].parent, "test_public": P2V_TEST["public"].parent},
+            "val_cards": ROOT / "outputs" / "r1_phase2f_2026-10-15" / "cards_P2V.jsonl"},
+}
 TEACH_VAL_CARDS = ROOT / "outputs" / "teacher_dataset_2026-10" / "fact_cards_teacher.jsonl"
 HALVES = ("private", "public")
 VAL_TTES = (0.5, 0.75, 1.0, 1.25, 1.5)
@@ -61,6 +76,20 @@ def rule_r3(ens_ap, seed_aps):
     return ens_ap >= max(seed_aps) and ens_ap >= float(np.mean(seed_aps)) + R3_MARGIN
 
 
+STEPB_MIN_DIFF, STEPB_ALPHA = 0.005, 0.05        # plan 2026-10-24 step B, fixed before the run
+
+
+def rule_stepb(a_aps, b_aps):
+    """step B: recipe B (P2V recipe, NEW seeds only) vs recipe A (final recipe, seeds 0-4) on pooled test AP, the seed as the unit.
+    -> (verdict, mean difference B - A, Welch two-sided p): 'B better' / 'A better' needs |difference| >= 0.005 AND p < 0.05, else 'no difference'."""
+    from scipy.stats import ttest_ind
+    diff = float(np.mean(b_aps) - np.mean(a_aps))
+    p = float(ttest_ind(b_aps, a_aps, equal_var=False).pvalue)
+    if abs(diff) >= STEPB_MIN_DIFF and p < STEPB_ALPHA:
+        return ("B better" if diff > 0 else "A better"), diff, p
+    return "no difference", diff, p
+
+
 def outcome_says_collision(text):
     import re
     t = (text or "").lower()
@@ -71,9 +100,11 @@ def outcome_says_collision(text):
 
 # ----------------------------------------------------------------------------- where each seed's files are
 class Seeds:
-    def __init__(self, root):
+    def __init__(self, root, recipe="stage4"):
         self.root = Path(root)
         self.pods = [self.root / f"pod{i}" / "live" for i in (1, 2)]
+        self.rc = RECIPES[recipe]
+        self.stages = self.rc["stages"]
 
     def _find(self, rel):
         for p in self.pods:
@@ -88,13 +119,17 @@ class Seeds:
         return sorted(ks)
 
     def log(self, k, stage):
-        return B4 / "CT" / stage / "train_log.jsonl" if k == 0 else self._find(f"S{k}/{stage}/train_log.jsonl")
+        return self.rc["log"].get(stage) if k == 0 else self._find(f"S{k}/{stage}/train_log.jsonl")
 
     def ev(self, k, kind):
-        """eval folder of seed k: val, train600, val_text (seed 0: the 2026-10-21 files), test_<half>, ground_<half>."""
-        if k == 0 and kind in ("val", "train600", "val_text"):
-            return B4 / "eval" / "CT" / kind
+        """eval folder of seed k: val, train600, val_text, test_<half>, ground_<half> (seed 0: the recipe's preset files where they exist, else its pod folder)."""
+        if k == 0 and kind in self.rc["ev"]:
+            p = self.rc["ev"][kind]
+            return p if p.exists() else None
         return self._find(f"eval/S{k}/{kind}")
+
+    def val_cards(self, k):
+        return self.rc["val_cards"] if k == 0 else self.cards(f"val_S{k}")
 
     def cards(self, name):
         return self.root / "cards" / f"{name}.jsonl"
@@ -106,13 +141,13 @@ class Seeds:
 # ----------------------------------------------------------------------------- prepare
 def prepare(a):
     from r1_test_refs import cmd_join
-    S = Seeds(a.root)
+    S = Seeds(a.root, a.recipe)
     (S.root / "cards").mkdir(parents=True, exist_ok=True)
     todo = []                                                              # (pred file, cards file)
     for k in S.ids():
         vt = S.ev(k, "val_text")
         if vt and (vt / "predictions.jsonl").exists():
-            todo.append((vt / "predictions.jsonl", B4 / "cards_CT.jsonl" if k == 0 else S.cards(f"val_S{k}")))
+            todo.append((vt / "predictions.jsonl", S.val_cards(k)))
         for h in HALVES:
             g = S.ev(k, f"test_{h}")
             if not (g and (g / "predictions.jsonl").exists() and REFS[h].exists()):
@@ -124,7 +159,7 @@ def prepare(a):
     if a.no_cards:
         return
     for pred, out in todo:
-        if out.parent == B4:                                               # seed 0's validation cards exist (2026-10-21)
+        if out == S.val_cards(0) and out.exists():                         # seed 0's validation cards exist already
             continue
         print(f"[cards] {pred} -> {out}", flush=True)
         subprocess.run([sys.executable, "r1_fact_cards.py", "--source", "model", "--pred", str(pred), "--out", str(out), "--tier", "flex",
@@ -246,11 +281,12 @@ def aligned(rows_list):
 
 # ----------------------------------------------------------------------------- report
 def report(a):
-    S = Seeds(a.root)
+    S = Seeds(a.root, a.recipe)
     out = Path(a.out or S.root / "report")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     ks = S.ids()
     M = {"seeds": ks, "val": {}, "train600": {}, "curves": {}, "test": {}, "text": {}, "ground": {}, "free": {}, "rules": {}}
+    M["stages"] = list(S.stages)
     L = [f"# Stage 4: five seeds of the final recipe, test sets once (seeds found: {ks})", "",
          "Decision score = log-odds at 'Collision:' (reasoning model) / P (crash model). AP, AUC, Kaggle mAP are threshold-free. "
          "Every thresholded number states its threshold. Seed 0 = the 2026-10-21 control run (it won the recipe selection on validation: its VALIDATION numbers are biased upwards, its test numbers are not).", ""]
@@ -258,7 +294,7 @@ def report(a):
 
     # --- validation
     L += ["## Validation (val core = 524 windows: checkpoint selection; val full = 641 incl. 0.75 / 1.25 s windows: reported only)", "",
-          "| seed | val core AUC | val core AP | val full AUC | val full AUC per TTE 0.5 / 0.75 / 1.0 / 1.25 / 1.5 s | train-600 AUC | over-fit gap (train-600 - val core AUC) | best epoch P1 / P1fixR / P2V | P2V val loss |",
+          "| seed | val core AUC | val core AP | val full AUC | val full AUC per TTE 0.5 / 0.75 / 1.0 / 1.25 / 1.5 s | train-600 AUC | over-fit gap (train-600 - val core AUC) | best epoch " + " / ".join(S.stages) + " | P2V val loss |",
           "|---|---|---|---|---|---|---|---|---|"]
     for k in ks:
         vt, vf, tr = S.ev(k, "val_text"), S.ev(k, "val"), S.ev(k, "train600")
@@ -271,7 +307,7 @@ def report(a):
         t_auc = auc_ap(t6)[0] if t6 else None
         best, loss = [], None
         M["curves"][k] = {}
-        for st in ("P1", "P1fixR", "P2V"):
+        for st in S.stages:
             rows = jl(S.log(k, st)) if S.log(k, st) else None
             if not rows:
                 best.append("n/a")
@@ -404,7 +440,7 @@ def report(a):
     bert_cache = json.load(open(bert_cache_p, encoding="utf-8")) if bert_cache_p.exists() else {}
     for k in ks:
         sets_t = [("val core", S.ev(k, "val_text") / "predictions.jsonl" if S.ev(k, "val_text") else None,
-                   B4 / "cards_CT.jsonl" if k == 0 else S.cards(f"val_S{k}"), teach_val)]
+                   S.val_cards(k), teach_val)]
         for h in HALVES:
             tc = S.cards(f"test_{h}_teacher")
             sets_t.append((f"test {h}", S.joined(k, h) / "predictions.jsonl", S.cards(f"test_{h}_S{k}"),
@@ -472,6 +508,43 @@ def report(a):
     print("\n".join(L))
 
 
+def compare(a):
+    """step B: recipe A (report metrics of the final recipe) vs recipe B (report metrics of the P2V recipe; its seed 0 = P2V is shown, not counted)."""
+    A = json.load(open(Path(a.a) / "metrics.json", encoding="utf-8"))
+    B = json.load(open(Path(a.b) / "metrics.json", encoding="utf-8"))
+    seeds = lambda M, h: {int(n.split()[1]): v for n, v in M["test"][h].items() if n.startswith("seed ")}   # noqa: E731
+    ap_a = {k: v["all"]["AP"] for k, v in seeds(A, "pooled").items()}
+    ap_b_all = {k: v["all"]["AP"] for k, v in seeds(B, "pooled").items()}
+    ap_b = {k: v for k, v in ap_b_all.items() if k != 0}
+    verdict, diff, p = rule_stepb(list(ap_a.values()), list(ap_b.values()))
+    row = lambda M, name, h="pooled": M["test"][h].get(name, {})   # noqa: E731
+    L = ["# Step B: the P2V recipe (B) vs the final recipe (A), pooled test, the seed as the unit", "",
+         f"Rule (fixed 2026-10-24): B better if mean(B new seeds) - mean(A) >= +{STEPB_MIN_DIFF} AND Welch two-sided p < {STEPB_ALPHA}; A better symmetrically; else no difference. "
+         "P2V (B's seed 0) triggered the question and is NOT counted. This comparison was triggered by an observed test result (follow-up).", "",
+         f"**Verdict: {verdict}** (difference B - A {diff:+.4f} AP, p = {p:.3f})", "",
+         "| recipe | seeds counted | pooled AP per seed | mean ± SD | Kaggle mAP mean | val core AUC mean | 5-seed ensemble AP / Kaggle mAP |", "|---|---|---|---|---|---|---|"]
+    for name, M, aps, ks in (("A final recipe", A, ap_a, sorted(ap_a)), ("B P2V recipe (new seeds)", B, ap_b, sorted(ap_b))):
+        sm = seeds(M, "pooled")
+        e = row(M, "ensemble (mean log-odds)")
+        L.append(f"| {name} | {ks} | {' / '.join(f'{aps[k]:.3f}' for k in ks)} | {fms(list(aps.values()))} | {fms([sm[k]['kaggle_mAP'] for k in ks])} | "
+                 f"{fms([M['val'].get(str(k), M['val'].get(k, {})).get('core_auc') for k in ks])} | {f3(e.get('all', {}).get('AP'))} / {f3(e.get('kaggle_mAP'))} |")
+    if 0 in ap_b_all:
+        L.append(f"| P2V (B's seed 0, not counted) | - | {ap_b_all[0]:.3f} | | | | |")
+    L += ["", "| half | A seeds mean | B new seeds mean |", "|---|---|---|"]
+    for h in ("private", "public"):
+        L.append(f"| {h} | {fms([v['all']['AP'] for k, v in seeds(A, h).items()])} | {fms([v['all']['AP'] for k, v in seeds(B, h).items() if k != 0])} |")
+    tb = lambda M, h, k: (((M["text"].get(f"S{k}|test {h}") or {}).get("scores") or {}).get("bertscore_f1_rescaled") or {}).get("model")   # noqa: E731
+    L += ["", "| text (test) | A BERTScore | B BERTScore | A facts mean4 | B facts mean4 |", "|---|---|---|---|---|"]
+    for h in ("private", "public"):
+        L.append(f"| {h} | {fms([tb(A, h, k) for k in ap_a])} | {fms([tb(B, h, k) for k in ap_b])} | "
+                 f"{fms([(A['text'].get(f'S{k}|test {h}') or {}).get('mean4') for k in ap_a])} | {fms([(B['text'].get(f'S{k}|test {h}') or {}).get('mean4') for k in ap_b])} |")
+    out = Path(a.out or Path(a.b).parent / "compare")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "compare.md").write_text("\n".join(L), encoding="utf-8")
+    (out / "compare.json").write_text(json.dumps({"verdict": verdict, "diff": diff, "p": p, "ap_a": ap_a, "ap_b": ap_b, "p2v": ap_b_all.get(0)}, indent=1), encoding="utf-8")
+    print("\n".join(L))
+
+
 def _train_thr(S, k):
     vt = S.ev(k, "val_text")
     m = json.load(open(vt / "metrics.json", encoding="utf-8")) if vt and (vt / "metrics.json").exists() else {}
@@ -486,7 +559,7 @@ def figures(M, sets, d):
     import matplotlib.pyplot as plt
     from sklearn.metrics import precision_recall_curve, roc_curve
     fig, ax = plt.subplots(1, 3, figsize=(15, 4.2))
-    for j, st in enumerate(("P1", "P1fixR", "P2V")):
+    for j, st in enumerate(M["stages"]):
         for k, c in M["curves"].items():
             if st in c:
                 ax[j].plot(c[st]["epoch"], c[st]["val_loss"], "o-", label=f"seed {k} val")
@@ -526,12 +599,15 @@ def figures(M, sets, d):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prepare", "report"])
+    ap.add_argument("cmd", choices=["prepare", "report", "compare"])
+    ap.add_argument("--a", default=None, help="compare: report folder of recipe A (final recipe)")
+    ap.add_argument("--b", default=None, help="compare: report folder of recipe B (P2V recipe)")
     ap.add_argument("--root", default=str(ROOT / "outputs" / "stage4_2026-10-22"))
     ap.add_argument("--out", default=None)
     ap.add_argument("--boot", type=int, default=1000)
     ap.add_argument("--no-bert", action="store_true")
     ap.add_argument("--no-cards", action="store_true")
     ap.add_argument("--concurrency", type=int, default=64)
+    ap.add_argument("--recipe", choices=sorted(RECIPES), default="stage4", help="which recipe's seed 0 to use (stage4 = the 21-Oct control; p2v = the 15-Oct P2V, step B)")
     a = ap.parse_args()
-    prepare(a) if a.cmd == "prepare" else report(a)
+    {"prepare": prepare, "report": report, "compare": compare}[a.cmd](a)

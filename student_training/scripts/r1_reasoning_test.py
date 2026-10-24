@@ -532,6 +532,17 @@ def main():
         assert len(rows) == 431 and all(r["gt"]["explanation"] and r["gt"]["status"] == "pass1_agreed" for r in rows), len(rows)
     print("24 ok: stage 4: ensemble = mean log-odds over common windows; R1 needs gain >= 0.010 AND 4 of 5 above; R3 needs best seed and mean + 0.008; "
           "a test reference only where pass 1 agrees with the label (private 431); R1_TEST_MANIFEST reaches the evaluator")
+
+    # 25 - step B (plan 2026-10-24): recipe B (P2V recipe, new seeds) vs A (final recipe) - argument order (A, B), difference >= 0.005 AND Welch p < 0.05
+    a_ = [0.917, 0.913, 0.915, 0.912, 0.908]
+    v, d, p = SR.rule_stepb(a_, [0.925, 0.927, 0.924, 0.926])
+    assert v == "B better" and d > 0.01 and p < 0.05, (v, d, p)
+    assert SR.rule_stepb(a_, [0.903, 0.904, 0.902, 0.905])[0] == "A better"
+    assert SR.rule_stepb(a_, [0.914, 0.911, 0.916, 0.913])[0] == "no difference"                 # same level
+    v, d, p = SR.rule_stepb(a_, [0.930, 0.905, 0.935, 0.909])
+    assert v == "no difference" and d >= 0.005 and p >= 0.05, (v, d, p)                          # big mean gap but too noisy
+    assert SR.RECIPES["p2v"]["stages"] == ("P1aug", "P1fixR", "P2V") and SR.Seeds(".", "p2v").log(0, "P1aug").name == "train_log.jsonl"
+    print("25 ok: step B: B better / A better / no difference by mean difference >= 0.005 AND Welch p < 0.05 (argument order A, B); P2V recipe seed 0 = the 15-Oct run")
     print("ALL OK")
 
 
